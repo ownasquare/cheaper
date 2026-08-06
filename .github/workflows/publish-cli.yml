@@ -1,0 +1,45 @@
+name: Publish CLI
+
+# Publish the `cheaperapp` CLI to npm on a version tag.
+#   git tag v0.1.0 && git push origin v0.1.0
+# Desktop installers live in the cheaper-desktop repo's own Release workflow.
+#
+# Secrets: NPM_TOKEN (npm automation token).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-npm:
+    name: Publish cheaperapp to npm
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    env:
+      HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: env.HAS_NPM == 'true'
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - name: Verify tag matches package version
+        if: env.HAS_NPM == 'true'
+        working-directory: cli
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::Tag '$TAG' != cli/package.json version '$PKG'"; exit 1
+          fi
+      - name: Publish
+        if: env.HAS_NPM == 'true'
+        working-directory: cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
