@@ -1,7 +1,7 @@
 # Cheaper installer — modernization for Claude plugin registry v2 (2026-08-05)
 
 ## Summary
-The `cheaperapp` CLI installer (adaptive Claude model routing) was fixed so it
+The `cheaper` CLI installer (adaptive Claude model routing) was fixed so it
 actually works on a fresh Claude account. The previous installer silently failed
 against the current Claude plugin system and shipped two latent asset bugs that
 disabled the tiered routing agents. All paths are now verified end-to-end against
@@ -82,7 +82,7 @@ the real `claude` CLI.
   re-run via the fallback path would short-circuit rather than update. Not an issue at
   the current pinned v0.2.0; revisit if the plugin version changes (prefer the CLI
   `plugin update` path, or make `pluginRegistered()` version-aware).
-- npm publish of `cheaperapp` and the signed desktop installers remain per `HANDOFF.md`
+- npm publish of `cheaper` and the signed desktop installers remain per `HANDOFF.md`
   (unchanged by this work); the CLI runs fine from the local repo in the meantime.
 
 ## Follow-on: uninstall + cross-platform "install everything" (same day)
@@ -148,11 +148,11 @@ hardening2 9/9, gateway pytest 19/19 (**105** assertions), all `node --check` cl
 
 Verified the actual publish path by `npm pack`-ing the tarball and installing it the way
 `npx`/`npm i -g` would (sandboxed). Findings + fixes:
-- **`npx cheaperapp install --all` would have FAILED.** The package is named `cheaperapp`
-  but its only bin was `cheaper`, so `npx cheaperapp …` → `command not found` (npm does not
-  fall back to a differently-named single bin). **Fix:** added a `cheaperapp` bin alias in
-  `cli/package.json` (`bin: { cheaper, cheaperapp }` → same script). Re-verified:
-  `npx cheaperapp --version` → `cheaper 0.1.0`, and installing the tarball + running
+- **`npx cheaper install --all` would have FAILED.** The package is named `cheaper`
+  but its only bin was `cheaper`, so `npx cheaper …` → `command not found` (npm does not
+  fall back to a differently-named single bin). **Fix:** added a `cheaper` bin alias in
+  `cli/package.json` (`bin: { cheaper, cheaper }` → same script). Re-verified:
+  `npx cheaper --version` → `cheaper 0.1.0`, and installing the tarball + running
   `install --all` lands skill/agents/hook/gateway.
 - **Tarball hygiene:** it shipped `__pycache__/*.pyc` (from an earlier gateway pytest run
   polluting `cli/assets/gateway`) and the gateway test suite. **Fix:** cleaned the source,
@@ -160,7 +160,7 @@ Verified the actual publish path by `npm pack`-ing the tarball and installing it
   (`assets/gateway/app/*.py` + requirements + .env.example, `assets/plugin`) — a `files`
   allowlist ignores `.npmignore` for its entries, so globs are the deterministic control.
   Tarball now 30 files / 44 kB (was 39 / 72 kB); run-pass 8/8.
-- **Still required to actually use `npx cheaperapp`:** the package is NOT published (npm
+- **Still required to actually use `npx cheaper`:** the package is NOT published (npm
   `404`). Publish via `cd cli && npm publish` or the tag-triggered `publish-npm` job, and
   claim the name (or scope it) before someone else does.
 
@@ -201,10 +201,10 @@ Concurrent note: another agent added a `peek` command (`cli/src/peek.js`, plus d
 
 ### Live install + full-command QA — 2026-08-06 (npm publish blocked)
 
-Attempted to publish `cheaperapp` to npm on the user's request. **Blocked**: the machine is
+Attempted to publish `cheaper` to npm on the user's request. **Blocked**: the machine is
 not logged into npm (`npm whoami` → `ENEEDAUTH`); logging in requires the user's credentials
 (an action the assistant may not perform). The package is verified publish-ready
-(`npm publish --dry-run`: 30 files, 44 kB, both `cheaper`/`cheaperapp` bins). To publish:
+(`npm publish --dry-run`: 30 files, 44 kB, both `cheaper`/`cheaper` bins). To publish:
 `cd cli && npm publish --access public` after `npm login`, or set `NPM_TOKEN` + push a
 `v0.1.0` tag.
 
@@ -224,8 +224,8 @@ writable nvm prefix — no sudo/auth) and exhaustively tested every README comma
   `ROUTER_MODEL_*`, `CHEAPER_DB`, `CHEAPER_PORT`, `CHEAPER_PEEK_HOME`, upstream URLs).
 
 Fixes made during QA (things that didn't work):
-1. **`cheaperapp` bin alias** — package name ≠ bin name, so `npx cheaperapp` → `command not
-   found`. Added `bin.cheaperapp` → same script.
+1. **`cheaper` bin alias** — package name ≠ bin name, so `npx cheaper` → `command not
+   found`. Added `bin.cheaper` → same script.
 2. **`gateway start` pip portability** — `--break-system-packages` errors on old/venv pip.
    `cli/src/gateway.js` now tries a plain `pip install` first and only falls back to the flag
    for externally-managed (Homebrew/PEP-668) pythons.
@@ -236,9 +236,9 @@ Fixes made during QA (things that didn't work):
 A 5-agent README-vs-code audit found the README otherwise accurate (Cursor line was the only
 confirmed discrepancy).
 
-**Repo restructure (concurrent, mid-session):** the `cheaperapp/` monorepo was split into
+**Repo restructure (concurrent, mid-session):** the `cheaper/` monorepo was split into
 **`cheaper-app`** (this CLI — canonical), **`cheaper-desktop`** (Electron app), and
 **`cheaper-web`** (marketing site). All installer/uninstall/peek/gateway fixes live in
 `cheaper-app/cli`. The desktop signing pipeline (`notarize.js`/`sign.js`/entitlements) and the
 signed-installer release workflow moved to `cheaper-desktop`; `cheaper-app` publishes only the
-CLI to npm. Paths in earlier sections that read `cheaperapp/…` now resolve under `cheaper-app/…`.
+CLI to npm. Paths in earlier sections that read `cheaper/…` now resolve under `cheaper-app/…`.

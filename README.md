@@ -7,13 +7,13 @@
 Adaptive model routing for AI coding tools — triage every request, run the cheapest
 capable model, escalate only when it counts, and **see** it working.
 
-[![npm](https://img.shields.io/npm/v/cheaperapp?color=059669&label=npm)](https://www.npmjs.com/package/cheaperapp)
-[![downloads](https://img.shields.io/npm/dm/cheaperapp?color=059669)](https://www.npmjs.com/package/cheaperapp)
+[![npm](https://img.shields.io/npm/v/cheaper?color=059669&label=npm)](https://www.npmjs.com/package/cheaper)
+[![downloads](https://img.shields.io/npm/dm/cheaper?color=059669)](https://www.npmjs.com/package/cheaper)
 [![license](https://img.shields.io/badge/license-MIT-059669)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D16-brightgreen)](package.json)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/)
-[![X](https://img.shields.io/badge/X-@_cheaperapp-000000?logo=x)](https://x.com/_cheaperapp)
-[![Sponsor](https://img.shields.io/badge/Sponsor-♥-ec4899)](https://github.com/sponsors/cheaperapp)
+[![X](https://img.shields.io/badge/X-@_cheaper-000000?logo=x)](https://x.com/_cheaper)
+[![Sponsor](https://img.shields.io/badge/Sponsor-♥-ec4899)](https://github.com/sponsors/ownasquare)
 
 </div>
 
@@ -33,10 +33,10 @@ that logs every decision so your savings are measured, not promised.
 
 ```bash
 # 1. See what routing WOULD have saved you — from your existing logs, before installing anything
-npx cheaperapp peek
+npx cheaper peek
 
 # 2. Install the router (skill + tiered agents + hook + gateway)
-npx cheaperapp install --all
+npx cheaper install --all
 
 # 3. Start the gateway and point your tool at it
 cheaper gateway start
@@ -161,7 +161,7 @@ A menu-bar / tray app (macOS · Windows · Linux) that wraps the whole thing:
 
 The desktop app lives in its own open-source repo —
 [**cheaper-desktop**](https://github.com/ownasquare/cheaper-desktop) — which consumes
-this `cheaperapp` package and builds the native installers (`.dmg` / `.exe` / `.deb` /
+this `cheaper` package and builds the native installers (`.dmg` / `.exe` / `.deb` /
 `.rpm` / `.AppImage`). It's kept separate so the routing core stays lean and the
 code-signing pipeline stays out of this repo.
 
@@ -226,8 +226,8 @@ cheaper <command> [options]
 <summary><b>Quickstart, one paste</b></summary>
 
 ```bash
-npx cheaperapp peek
-npx cheaperapp install --all      # or: npx cheaperapp install plugin
+npx cheaper peek
+npx cheaper install --all      # or: npx cheaper install plugin
 cheaper gateway start
 export ANTHROPIC_BASE_URL=http://localhost:8787
 cheaper monitor
@@ -295,7 +295,7 @@ unpriceable (no phantom savings); savings honor the never-upgrade ceiling. See
 ## Layout
 
 ```
-cheaperapp/                 # this repo — the open-source router
+cheaper/                 # this repo — the open-source router
 ├── gateway/       # FastAPI proxy + SQLite monitor (Python; pytest)
 ├── cli/           # `cheaper` Node CLI + installer (bundles gateway + plugin assets)
 │   └── src/peek/  # zero-dep `cheaper peek` savings estimator (node --test cli/test/)
@@ -319,7 +319,7 @@ you. Sponsorship keeps the estimates honest, adds more tools, and ships fixes fa
 
 <div align="center">
 
-[![Sponsor](https://img.shields.io/badge/Sponsor%20Cheaper-♥-ec4899?style=for-the-badge)](https://github.com/sponsors/cheaperapp)
+[![Sponsor](https://img.shields.io/badge/Sponsor%20Cheaper-♥-ec4899?style=for-the-badge)](https://github.com/sponsors/ownasquare)
 
 </div>
 

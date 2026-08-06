@@ -1,7 +1,7 @@
-# GitHub Sponsors profile — paste-ready copy for `cheaperapp`
+# GitHub Sponsors profile — paste-ready copy for `cheaper`
 
 Modeled on the `iamtoruk` Sponsors layout, rewritten for Cheaper. Paste these into
-the GitHub Sponsors dashboard when you enroll the `cheaperapp` account
+the GitHub Sponsors dashboard when you enroll the `cheaper` account
 (**Settings → Sponsors**, or https://github.com/sponsors/dashboard). GitHub requires
 the account owner to do identity verification, connect a bank/Stripe payout, and
 submit tax info — that part can't be scripted.
@@ -43,9 +43,9 @@ submit tax info — that part can't be scripted.
 ## After enrolling — repoint the links (if needed)
 
 The repo button (`.github/FUNDING.yml`) and the site/README already point to
-`github.com/sponsors/cheaperapp`. If you decide to host the profile under a different
+`github.com/sponsors/ownasquare`. If you decide to host the profile under a different
 account (e.g. `ownasquare` or `iamtoruk`), update these to match:
 
 - `cheaper-app/.github/FUNDING.yml` → `github: [<account>]`
-- `cheaper-app/README.md` → the three `github.com/sponsors/cheaperapp` links
-- `../cheaper-web/web/*.html` footers → the `Sponsor` links (`github.com/sponsors/cheaperapp`)
+- `cheaper-app/README.md` → the three `github.com/sponsors/ownasquare` links
+- `../cheaper-web/web/*.html` footers → the `Sponsor` links (`github.com/sponsors/ownasquare`)

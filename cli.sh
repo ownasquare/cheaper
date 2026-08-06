@@ -1,6 +1,6 @@
 #!/bin/sh
 # Cheaper installer.  Usage:  curl -fsSL https://cheaper.app/cli.sh | sh
-# Optional args are passed to `cheaperapp install` (default: --all).
+# Optional args are passed to `cheaper install` (default: --all).
 set -e
 printf '\n  Cheaper — adaptive Claude model routing\n\n'
 if ! command -v node >/dev/null 2>&1; then
@@ -8,5 +8,5 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 if [ "$#" -eq 0 ]; then set -- --all; fi
-echo "  Installing via npx cheaperapp ..."
-exec npx --yes cheaperapp@latest install "$@"
+echo "  Installing via npx cheaper ..."
+exec npx --yes cheaper@latest install "$@"

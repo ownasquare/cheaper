@@ -242,15 +242,45 @@
     }
     return { amount: num(baselines.requested_default, 0), label: 'vs your model' };
   }
+  function historicalDimsAvailable(){
+    return baselineChoice === 'historical' && lastPeek && lastPeek.totals;
+  }
+  function tokensDimValue(d){
+    if (historicalDimsAvailable()){
+      var totals = lastPeek.totals;
+      return {
+        tokensSaved: num(totals.tokensSavedReasoningPotential, 0),
+        label: 'reasoning tokens (historical)'
+      };
+    }
+    var tokens = d.tokens || {};
+    return {
+      tokensSaved: num(tokens.saved_reasoning_potential, 0),
+      label: 'reasoning tokens you could save'
+    };
+  }
+  function timeDimValue(d){
+    if (historicalDimsAvailable()){
+      var totals = lastPeek.totals;
+      return {
+        savedModelS: num(totals.timeSavedModelS, 0),
+        savedReasoningS: num(totals.timeSavedReasoningPotentialS, 0),
+        label: 'saved (historical)'
+      };
+    }
+    var time = d.time || {};
+    return {
+      savedModelS: num(time.saved_model_s, 0),
+      savedReasoningS: num(time.saved_reasoning_potential_s, 0),
+      label: 'saved (from model routing)'
+    };
+  }
   function renderDims(d){
     var dollars = d.dollars || {};
-    var tokens = d.tokens || {};
-    var time = d.time || {};
     var spent = num(dollars.spent, 0);
     var moneyInfo = moneyBaselineValue(d);
-    var tokensSaved = num(tokens.saved_reasoning_potential, 0);
-    var savedModelS = num(time.saved_model_s, 0);
-    var savedReasoningS = num(time.saved_reasoning_potential_s, 0);
+    var tokensInfo = tokensDimValue(d);
+    var timeInfo = timeDimValue(d);
 
     var html = '';
     html += '<div class="dim-card">' +
@@ -261,14 +291,14 @@
       '</div>';
     html += '<div class="dim-card">' +
       '<div class="label">Tokens</div>' +
-      '<div class="headline">' + tokenCount(tokensSaved) + '<span class="tag-potential">potential</span></div>' +
-      '<div class="sub">reasoning tokens you could save</div>' +
+      '<div class="headline">' + tokenCount(tokensInfo.tokensSaved) + '<span class="tag-potential">potential</span></div>' +
+      '<div class="sub">' + esc(tokensInfo.label) + '</div>' +
       '</div>';
     html += '<div class="dim-card">' +
       '<div class="label">Time</div>' +
-      '<div class="headline">' + seconds(savedModelS) + '</div>' +
-      '<div class="sub">saved (from model routing)</div>' +
-      '<div class="sub">+ ' + seconds(savedReasoningS) + ' potential from reasoning</div>' +
+      '<div class="headline">' + seconds(timeInfo.savedModelS) + '</div>' +
+      '<div class="sub">' + esc(timeInfo.label) + '</div>' +
+      '<div class="sub">+ ' + seconds(timeInfo.savedReasoningS) + ' potential from reasoning</div>' +
       '</div>';
     document.getElementById('dimGrid').innerHTML = html;
   }

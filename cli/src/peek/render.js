@@ -94,7 +94,7 @@ function render(report) {
   }
   L.push('  ' + c.dim('Assumes the model each call used was the intended ceiling; harness-auto-selected'));
   L.push('  ' + c.dim('models (titles, summaries) can nudge this. Install to measure the real thing:'));
-  L.push('  ' + '  npx cheaperapp install --all  ' + c.dim('&&') + '  cheaper gateway start');
+  L.push('  ' + '  npx cheaper install --all  ' + c.dim('&&') + '  cheaper gateway start');
   L.push('');
   return L.join('\n');
 }

@@ -4,5 +4,5 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   Write-Error "Node.js 16+ is required. Install from https://nodejs.org and re-run."
   exit 1
 }
-Write-Host "  Installing via npx cheaperapp ..."
-npx --yes cheaperapp@latest install --all
+Write-Host "  Installing via npx cheaper ..."
+npx --yes cheaper@latest install --all

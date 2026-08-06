@@ -56,7 +56,7 @@ The `cheaper` CLI registers this plugin as a local marketplace and enables it fo
 you:
 
 ```bash
-npx cheaperapp install plugin
+npx cheaper install plugin
 ```
 
 Under the hood that builds a one-plugin marketplace at `~/.cheaper/marketplace`,

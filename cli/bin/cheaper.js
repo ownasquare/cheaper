@@ -34,8 +34,8 @@ const HELP = `
     version, --version  Print version.
 
   ${c.bold('Quickstart')}
-    npx cheaperapp peek          ${c.dim('# see what you WOULD have saved, from your logs')}
-    npx cheaperapp install --all
+    npx cheaper peek          ${c.dim('# see what you WOULD have saved, from your logs')}
+    npx cheaper install --all
     cheaper gateway start
     export ANTHROPIC_BASE_URL=http://localhost:8787
     cheaper monitor
