@@ -179,6 +179,11 @@ function collectClaudeCode(opts) {
         records.push({
           harness: 'claude-code', ts: parseTs(o.timestamp || o.ts) || lastUser.ts,
           model, inTokens: inTok, outTokens: outTok,
+          // Token breakdown for cache-aware pricing (cache reads bill at ~0.1x input,
+          // cache writes at ~1.25x). Absent => treated as plain input.
+          inFresh: hasUsage ? (u.input_tokens || 0) : inTok,
+          cacheCreate: hasUsage ? (u.cache_creation_input_tokens || 0) : 0,
+          cacheRead: hasUsage ? (u.cache_read_input_tokens || 0) : 0,
           text: lastUser.text, source: sidechain ? 'subagent' : 'user',
           estimated: !hasUsage,
         });

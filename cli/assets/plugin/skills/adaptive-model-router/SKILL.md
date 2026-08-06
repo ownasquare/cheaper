@@ -265,7 +265,7 @@ End every completed reply with the branded Cheaper.app savings line — the user
 one-line, end-of-chat audit trail. Don't hand-write it; run:
 
 ```
-cheaper peek --tagline --current --harness claude-code
+cheaper peek --tagline --current --harness claude-code --format markdown
 ```
 
 and append its output verbatim as the final line. It already names the tiers that

@@ -19,7 +19,7 @@
 
 const http = require('http');
 const { TIERS, rank, modelTier } = require('./classify');
-const { detectFamily, costOf } = require('./pricing');
+const { detectFamily, costOfDetailed } = require('./pricing');
 const { HARNESSES, collectHarness, sessionStem } = require('./adapters');
 const { tokens: fmtTokens } = require('./render');
 
@@ -40,6 +40,18 @@ function money(n) {
 function harnessDef(key) {
   if (!key) return HARNESSES[0]; // default: claude-code
   return HARNESSES.find((d) => d.key === key) || null;
+}
+
+// Per-call token breakdown for cache-aware pricing. Claude Code records carry the
+// split (inFresh/cacheCreate/cacheRead); other harnesses only have a combined
+// inTokens, which we treat as fresh input so pricing is unchanged for them.
+function tokenBreakdown(r) {
+  return {
+    inFresh: r.inFresh != null ? r.inFresh : (r.inTokens || 0),
+    cacheCreate: r.cacheCreate || 0,
+    cacheRead: r.cacheRead || 0,
+    outTok: r.outTokens || 0,
+  };
 }
 
 // Realized savings for a scoped set of chat records. Baseline = the chat's ceiling
@@ -65,23 +77,33 @@ function realizedFromRecords(records) {
 
   const tierHist = { haiku: 0, sonnet: 0, opus: 0 };       // every priced call (diagnostics only)
   const savedTierHist = { haiku: 0, sonnet: 0, opus: 0 };  // ONLY the calls Cheaper routed cheaper
-  let dollarsSaved = 0, tokensSaved = 0, belowCeilingCalls = 0, topRank = ceilingRank;
+  let dollarsSaved = 0, dollarsSpent = 0, tokensSaved = 0, belowCeilingCalls = 0, topRank = ceilingRank;
+  let totalSpent = 0, totalTokens = 0; // the whole session's real (cache-aware) bill
   for (const r of priced) {
     const fam = detectFamily(r.model);
     const t = modelTier(r.model);
     tierHist[t] = (tierHist[t] || 0) + 1;
     if (rank(t) > topRank) topRank = rank(t); // a subagent above the user ceiling still ran
-    const inTok = r.inTokens || 0, outTok = r.outTokens || 0;
+    const bk = tokenBreakdown(r);
+    const spent = costOfDetailed(fam, t, bk); // cache-aware actual cost of this call
+    totalSpent += spent;
+    totalTokens += (r.inTokens || 0) + (r.outTokens || 0);
     if (rank(t) < ceilingRank) {
       // A call routed BELOW the session ceiling — i.e. work Cheaper delegated to a
       // cheaper tier. The main loop runs AT the ceiling and is the baseline, never a
       // "routed" call, so it is deliberately excluded from the savings breakdown.
-      const save = costOf(ceilingFamily, ceilingTier, inTok, outTok) - costOf(fam, t, inTok, outTok);
-      if (save > 0) { dollarsSaved += save; tokensSaved += inTok + outTok; belowCeilingCalls++; savedTierHist[t]++; }
+      const save = costOfDetailed(ceilingFamily, ceilingTier, bk) - spent; // vs the ceiling model
+      if (save > 0) {
+        dollarsSaved += save; dollarsSpent += spent; tokensSaved += (r.inTokens || 0) + (r.outTokens || 0);
+        belowCeilingCalls++; savedTierHist[t]++;
+      }
     }
   }
-  return { ceilingTier, topTier: TIERS[topRank], dollarsSaved, tokensSaved, belowCeilingCalls,
-           tierHist, savedTierHist, calls: priced.length, exact: false };
+  const wouldHave = dollarsSpent + dollarsSaved; // cost of the routed work at the ceiling model
+  const savedPct = wouldHave > 0 ? Math.round((dollarsSaved / wouldHave) * 100) : 0;
+  return { ceilingTier, topTier: TIERS[topRank], dollarsSaved, dollarsSpent, wouldHave, savedPct,
+           tokensSaved, totalSpent, totalTokens, belowCeilingCalls, tierHist, savedTierHist,
+           calls: priced.length, exact: false };
 }
 
 // Same shape, from the running gateway's EXACT session-filtered metrics summary.
@@ -121,8 +143,15 @@ function fromGateway(summary) {
   if (!tokensSaved && belowCeilingCalls > 0) {
     for (const t of present) { const d = byTier[t] || {}; tokensSaved += (d.in_tokens || 0) + (d.out_tokens || 0); }
   }
-  return { ceilingTier: topTier, topTier, dollarsSaved, tokensSaved, belowCeilingCalls,
-           tierHist, savedTierHist, calls: summary.total || 0, exact: true };
+  // Whole-session context: the gateway routes every call, so its spend IS the total.
+  const dol = summary.dollars || {};
+  const totalSpent = dol.spent || 0;
+  let totalTokens = 0;
+  for (const t of present) { const d = byTier[t] || {}; totalTokens += (d.in_tokens || 0) + (d.out_tokens || 0); }
+  const savedPct = dol.savings_pct || 0;
+  return { ceilingTier: topTier, topTier, dollarsSaved, dollarsSpent: totalSpent,
+           wouldHave: totalSpent + dollarsSaved, savedPct, tokensSaved, totalSpent, totalTokens,
+           belowCeilingCalls, tierHist, savedTierHist, calls: summary.total || 0, exact: true };
 }
 
 // Best-effort GET to the local gateway for exact, session-scoped metrics. Resolves
@@ -165,8 +194,27 @@ function joinAnd(parts) {
   return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 }
 
-function buildTagline(r) {
+const SITE = 'https://cheaper.app';
+// How the "Cheaper.app" brand token renders. `markdown` for chat harnesses that
+// render it (the model pastes a real link to cheaper.app); `plain` everywhere else.
+function brandFor(format) {
+  if (format === 'markdown' || format === 'md') return `[Cheaper.app](${SITE})`;
+  if (format === 'ansi') return `]8;;${SITE}\\Cheaper.app]8;;\\`;
+  return 'Cheaper.app';
+}
+
+// The whole-session context sentence: what the user actually paid this chat
+// (cache-aware), separate from what Cheaper's routing saved.
+function spendSentence(r) {
+  if (!r || !(r.totalSpent >= SHOW_MIN_USD)) return '';
+  const amt = (r.exact ? '' : '~') + money(r.totalSpent);
+  return ` You spent ${amt} and ${fmtTokens(r.totalTokens || 0)} tokens on this session.`;
+}
+
+function buildTagline(r, brand) {
   if (!r) return '';
+  brand = brand || 'Cheaper.app';
+  const spend = spendSentence(r);
   // The breakdown reports ONLY the tiers Cheaper routed cheaper work to (the savings
   // drivers) — never the main-loop / ceiling calls, which Cheaper did not route and
   // which would otherwise balloon the count while the savings stay flat.
@@ -181,13 +229,13 @@ function buildTagline(r) {
     const amt = (r.exact ? '' : '~') + money(r.dollarsSaved);
     const savedTop = Math.max(...TIERS.filter((t) => (r.savedTierHist[t] || 0) > 0).map(rank));
     const base = (r.ceilingTier && rank(r.ceilingTier) > savedTop) ? ` instead of ${r.ceilingTier}` : '';
-    return `Cheaper.app saved ${amt} and ${fmtTokens(r.tokensSaved)} tokens by using ${joinAnd(parts)}${base}.`;
+    return `${brand} saved ${amt} and ${fmtTokens(r.tokensSaved)} tokens by using ${joinAnd(parts)}${base}.${spend}`;
   }
   // No cheaper routing this chat: name the ACTUAL top tier that ran (a subagent may
   // have run above the user-turn ceiling), never understate it.
   const keptTier = r.topTier || r.ceilingTier;
   if (keptTier) {
-    return `Cheaper.app kept this chat on the ${keptTier} tier — no cheaper routing was warranted.`;
+    return `${brand} kept this chat on the ${keptTier} tier — no cheaper routing was warranted.${spend}`;
   }
   return '';
 }
@@ -207,7 +255,7 @@ async function computeSavings(opts) {
 async function run(opts = {}) {
   const o = Array.isArray(opts) ? { current: true } : (opts || {});
   const result = await computeSavings(o);
-  const line = buildTagline(result);
+  const line = buildTagline(result, brandFor(o.format));
   if (o.json) {
     console.log(JSON.stringify({
       line,

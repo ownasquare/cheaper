@@ -102,6 +102,14 @@ New: `cli/src/peek/tagline.js`, `cli/src/tagline_install.js`, `cli/test/tagline_
   a plugin/skill can't change the session model, so counting the main loop as "Cheaper using
   opus" overstated its role and made the count balloon while savings stayed flat. Now:
   `by using sonnet tier for 12 calls instead of opus`. Gateway path gets `downgraded_by_tier`.
+- **Cache-aware pricing + spend line + link (v0.2.4):** transcripts count cache-read tokens in
+  the input count, and those bill at ~0.1x (writes ~1.25x) — `peek` was charging every input
+  token at full rate, inflating totals **~7×** ($1,038 naive vs **$148 real** for a live
+  session). `pricing.costOfDetailed` now prices `inFresh/cacheCreate/cacheRead/outTok` correctly;
+  this also corrected the savings itself (the shipped `~$9.25` was `~$3.23` cache-aware). The
+  line now adds a whole-session-spend sentence (`You spent ~$X and N tokens on this session.`)
+  and a `--format markdown|plain` option so "Cheaper.app" renders as a live link to
+  https://cheaper.app in harnesses that render markdown (26/26 CLI tests).
 - **Sub-agent attribution (v0.2.2):** a chat's sub-agents live under a sibling `<id>/` dir;
   `--current` and the Stop hook's `--transcript` now scope by session id so those (usually
   Sonnet/Haiku) savings roll into the chat total instead of measuring only the Opus main loop.

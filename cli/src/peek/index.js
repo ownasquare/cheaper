@@ -9,12 +9,16 @@ const { render } = require('./render');
 
 function parseArgs(argv) {
   const o = { json: false, sinceDays: 0, limit: 3, only: null,
-              tagline: false, session: null, current: false, transcript: null };
+              tagline: false, session: null, current: false, transcript: null, format: 'plain' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--json') o.json = true;
     else if (a === '--tagline') o.tagline = true;
     else if (a === '--current') o.current = true;
+    else if (a === '--format') o.format = (argv[++i] || 'plain').toLowerCase();
+    else if (a.startsWith('--format=')) o.format = a.slice(9).toLowerCase();
+    else if (a === '--markdown' || a === '--md' || a === '--link') o.format = 'markdown';
+    else if (a === '--plain') o.format = 'plain';
     else if (a === '--session' || a === '-s') o.session = argv[++i] || null;
     else if (a === '--transcript' || a === '-t') o.transcript = argv[++i] || null;
     else if (a === '--days' || a === '-d') o.sinceDays = parseInt(argv[++i], 10) || 0;

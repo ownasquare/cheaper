@@ -102,6 +102,27 @@ function costOf(family, tierName, inTok, outTok) {
   return (inTok / 1e6) * r.in + (outTok / 1e6) * r.out;
 }
 
+// Prompt-cache multipliers on the INPUT rate (Anthropic ratios; a good default
+// elsewhere). Cache reads bill at ~10% of input, 5-minute cache writes at ~125%.
+// Harnesses that don't report a cache split just pass it all as fresh input.
+const CACHE_READ_MULT = 0.1;
+const CACHE_WRITE_MULT = 1.25;
+
+// Cache-aware cost of one call given its token breakdown. `toks` may carry
+// { inFresh, cacheCreate, cacheRead, outTok }; any missing piece is treated as 0,
+// and a record with only { inTokens, outTokens } prices identically to costOf().
+function costOfDetailed(family, tierName, toks) {
+  const r = rate(family, tierName);
+  const inFresh = toks.inFresh || 0;
+  const cc = toks.cacheCreate || 0;
+  const cr = toks.cacheRead || 0;
+  const out = toks.outTok || 0;
+  return (inFresh / 1e6) * r.in
+       + (cc / 1e6) * r.in * CACHE_WRITE_MULT
+       + (cr / 1e6) * r.in * CACHE_READ_MULT
+       + (out / 1e6) * r.out;
+}
+
 // Core per-call estimate. contentTierName is the tier the classifier picked from
 // the prompt text. Returns nulls when the model is unknown (can't price safely).
 function estimateCall(actualModel, inTok, outTok, contentTierName) {
@@ -119,4 +140,4 @@ function estimateCall(actualModel, inTok, outTok, contentTierName) {
   return { family, actualTier, effTier, actualCost, newCost, saved, downgraded: effRank < rank(actualTier) };
 }
 
-module.exports = { FAMILIES, BUCKET, detectFamily, rate, costOf, estimateCall };
+module.exports = { FAMILIES, BUCKET, detectFamily, rate, costOf, costOfDetailed, estimateCall };

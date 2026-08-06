@@ -44,7 +44,7 @@ function instruction(key) {
     'this and paste its output verbatim:',
     '',
     '```',
-    `cheaper peek --tagline --current --harness ${key}`,
+    `cheaper peek --tagline --current --harness ${key} --format markdown`,
     '```',
     '',
     'If it prints nothing, Cheaper had nothing cheaper to route this chat — omit the',

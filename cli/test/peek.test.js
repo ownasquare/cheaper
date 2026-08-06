@@ -140,7 +140,9 @@ test('realized savings: sub-agent calls below the ceiling model are credited', (
   assert.deepEqual(r.savedTierHist, { haiku: 1, sonnet: 1, opus: 0 });
   const line = buildTagline(r);
   assert.match(line, /^Cheaper\.app saved ~\$156 and 4\.0M tokens by using /);
-  assert.match(line, /haiku tier for 1 call and sonnet tier for 1 call instead of opus\.$/);
+  assert.ok(line.includes('haiku tier for 1 call and sonnet tier for 1 call instead of opus.'));
+  // Whole-session spend follows as its own sentence (opus 90 + haiku 6 + sonnet 18 = $114).
+  assert.match(line, / You spent ~\$114 and 6\.0M tokens on this session\.$/);
 });
 
 test('breakdown excludes the un-routed main loop — only routed-cheaper tiers are claimed', () => {
@@ -158,13 +160,49 @@ test('breakdown excludes the un-routed main loop — only routed-cheaper tiers a
   const line = buildTagline(r);
   // The 175 Opus calls MUST NOT be claimed as "opus tier for 175 calls".
   assert.ok(!/opus tier for/.test(line), 'main-loop opus must not be claimed: ' + line);
-  assert.match(line, /by using sonnet tier for 12 calls instead of opus\.$/);
+  assert.ok(line.includes('by using sonnet tier for 12 calls instead of opus.'));
+  assert.match(line, / You spent ~\$[\d.]+ and [\d.]+[KM] tokens on this session\.$/);
+});
+
+test('cache-aware pricing: reads bill ~0.1x, writes ~1.25x, fresh == costOf', () => {
+  const { costOfDetailed, costOf } = require('../src/peek/pricing');
+  // 1M cache-read tokens on opus → 15 * 0.1 = $1.50 (not $15).
+  assert.ok(Math.abs(costOfDetailed('anthropic', 'opus', { cacheRead: 1e6 }) - 1.5) < 1e-9);
+  // 1M cache-write tokens on opus → 15 * 1.25 = $18.75.
+  assert.ok(Math.abs(costOfDetailed('anthropic', 'opus', { cacheCreate: 1e6 }) - 18.75) < 1e-9);
+  // Fresh input + output prices identically to costOf().
+  assert.ok(Math.abs(costOfDetailed('anthropic', 'opus', { inFresh: 1e6, outTok: 1e6 })
+    - costOf('anthropic', 'opus', 1e6, 1e6)) < 1e-9);
+});
+
+test('total session spend is cache-aware; routed savings reported separately', () => {
+  // Opus main loop that is almost all cache-read (cheap) + one fresh Sonnet sub-agent.
+  const recs = [
+    { model: 'claude-opus-4', source: 'user', inTokens: 1e6, inFresh: 0, cacheCreate: 0, cacheRead: 1e6, outTokens: 0 },
+    { model: 'claude-sonnet-4-5', source: 'subagent', inTokens: 1e6, inFresh: 1e6, cacheCreate: 0, cacheRead: 0, outTokens: 1e6 },
+  ];
+  const r = realizedFromRecords(recs);
+  // Opus main loop: 1M cache-read → 15*0.1 = $1.50. Sonnet fresh: 3 + 15 = $18. Total $19.50.
+  assert.ok(Math.abs(r.totalSpent - 19.5) < 1e-6, 'totalSpent=' + r.totalSpent);
+  // Sonnet is below the opus ceiling → saved (fresh): 90 (opus) - 18 (sonnet) = $72.
+  assert.ok(Math.abs(r.dollarsSaved - 72) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
+  const line = buildTagline(r);
+  assert.match(line, /by using sonnet tier for 1 call instead of opus\./);
+  assert.match(line, / You spent ~\$19\.50 and 3\.0M tokens on this session\.$/);
+});
+
+test('brand renders as a markdown link when requested', () => {
+  const r = { ceilingTier: 'opus', topTier: 'opus', dollarsSaved: 5, tokensSaved: 1e6,
+    belowCeilingCalls: 1, savedTierHist: { haiku: 0, sonnet: 1, opus: 0 }, totalSpent: 10,
+    totalTokens: 2e6, exact: false };
+  const md = buildTagline(r, '[Cheaper.app](https://cheaper.app)');
+  assert.ok(md.startsWith('[Cheaper.app](https://cheaper.app) saved '), md);
 });
 
 test('honesty: a chat with no downgrade claims no dollars (brand line only)', () => {
   const r = realizedFromRecords([rec('claude-opus-4', 'user'), rec('claude-opus-4', 'subagent')]);
   assert.equal(r.dollarsSaved, 0);
-  assert.equal(buildTagline(r), 'Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.');
+  assert.ok(buildTagline(r).startsWith('Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.'));
 });
 
 test('honesty: unknown models are unpriceable and never invent a saving', () => {
@@ -226,7 +264,7 @@ test('sub-cent savings round away — no "$0.00 saved" claim', () => {
   const r = realizedFromRecords([rec('claude-opus-4', 'user'),
     rec('claude-haiku-4-5', 'subagent', 10, 10)]); // ~$0.0009 saved
   assert.ok(r.dollarsSaved > 0 && r.dollarsSaved < 0.01);
-  assert.equal(buildTagline(r), 'Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.');
+  assert.ok(buildTagline(r).startsWith('Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.'));
 });
 
 test('an exact sub-cent saving (0.5c–1c) is suppressed, not rounded up to $0.01', () => {
@@ -256,7 +294,7 @@ test('brand line names the true top tier when a subagent ran above the user ceil
   const r = realizedFromRecords([rec('claude-haiku-4-5', 'user'), rec('claude-opus-4', 'subagent')]);
   assert.equal(r.topTier, 'opus');
   assert.equal(r.dollarsSaved, 0); // nothing below the (haiku) user ceiling
-  assert.equal(buildTagline(r), 'Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.');
+  assert.ok(buildTagline(r).startsWith('Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.'));
 });
 
 test('scoping: --transcript / --session / --current read exactly one chat', () => {
