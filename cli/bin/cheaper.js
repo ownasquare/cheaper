@@ -23,11 +23,18 @@ const HELP = `
     gateway stop        Stop the gateway.
     gateway status      Is the gateway running?
     monitor             Live routing/savings monitor in the terminal.
+    launch, init        Open the live savings dashboard in your browser
+                        (starts the gateway if needed, keeps peek data fresh).
+    peek [options]      Scan your existing harness chat logs (.claude, .codex,
+                        …) and estimate the tokens + real $ adaptive routing
+                        would have saved — 100% local, nothing is sent anywhere.
+                        Options: --days N  --harness <key>  --limit N  --json
     status              Show what's installed and running.
     help, --help        This help.
     version, --version  Print version.
 
   ${c.bold('Quickstart')}
+    npx cheaperapp peek          ${c.dim('# see what you WOULD have saved, from your logs')}
     npx cheaperapp install --all
     cheaper gateway start
     export ANTHROPIC_BASE_URL=http://localhost:8787
@@ -46,23 +53,20 @@ async function main() {
       return require('../src/gateway').run(rest);
     case 'monitor':
       return require('../src/monitor').run();
+    case 'launch':
+    case 'init':
+      return require('../src/launch').run(rest);
+    case 'peek':
+      return require('../src/peek').run(rest);
     case 'status': {
-      const P = require('../src/paths');
-      const fs = require('fs');
-      const path = require('path');
-      const { pluginRegistered } = require('../src/install');
-      const { readJSON } = require('../src/util');
-      const has = (p) => (fs.existsSync(p) ? c.green('installed') : c.dim('not installed'));
-      const agentsInstalled = ['router-triage.md', 'router-solver-sonnet.md', 'router-solver-opus.md']
-        .every((f) => fs.existsSync(path.join(P.AGENTS_DIR, f)));
-      // The hook is "installed" only when it's actually wired into settings.json.
-      const hookWired = JSON.stringify(readJSON(P.SETTINGS, {}).hooks || {}).includes('router-policy');
+      const s = require('../src/install').status();
+      const yn = (b) => (b ? c.green('installed') : c.dim('not installed'));
       console.log('');
-      console.log('  skill    ' + has(path.join(P.SKILLS_DIR, 'adaptive-model-router')));
-      console.log('  agents   ' + (agentsInstalled ? c.green('installed') : c.dim('not installed')));
-      console.log('  hook     ' + (hookWired ? c.green('installed') : c.dim('not installed')));
-      console.log('  plugin   ' + (pluginRegistered() ? c.green('registered + enabled') : c.dim('not installed')));
-      console.log('  gateway  ' + has(P.GATEWAY_DIR));
+      console.log('  skill    ' + yn(s.skill));
+      console.log('  agents   ' + yn(s.agents));
+      console.log('  hook     ' + yn(s.hook));
+      console.log('  plugin   ' + (s.plugin ? c.green('registered + enabled') : c.dim('not installed')));
+      console.log('  gateway  ' + yn(s.gateway));
       require('../src/gateway').status();
       console.log('');
       return;

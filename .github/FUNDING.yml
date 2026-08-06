@@ -1,0 +1,4 @@
+# Shows a "Sponsor" button on the repo and links it to the cheaperapp Sponsors profile.
+# This file only wires the button — the profile itself must be created and enrolled
+# in the GitHub Sponsors dashboard by the account owner (identity + bank/payout + tax).
+github: [cheaperapp]

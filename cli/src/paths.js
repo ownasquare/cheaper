@@ -24,6 +24,9 @@ module.exports = {
   GATEWAY_DIR: path.join(CHEAPER_DIR, 'gateway'),
   GATEWAY_PID: path.join(CHEAPER_DIR, 'gateway.pid'),
   GATEWAY_LOG: path.join(CHEAPER_DIR, 'gateway.log'),
+  // A stable copy of this CLI (used by the `cli` component so a `cheaper` launcher
+  // keeps working even if the desktop app that dropped it is moved or removed).
+  CLI_HOME: path.join(CHEAPER_DIR, 'cli'),
 
   // Modern (registry v2) plugin wiring.
   MARKETPLACE_NAME,

@@ -22,13 +22,25 @@ function ensureInstalled() {
   }
 }
 
+// Install the gateway's Python deps portably. Try a plain install first — that works
+// for virtualenvs and non-managed Pythons on ANY pip version. Only if it fails (e.g. a
+// Homebrew/PEP-668 "externally-managed-environment") retry with --break-system-packages,
+// which older pip (<23.0.1) doesn't recognize. Never fatal: deps may already be present.
+function installGatewayDeps(py) {
+  const req = path.join(P.GATEWAY_DIR, 'requirements.txt');
+  const base = ['-m', 'pip', 'install', '-r', req, '--quiet'];
+  let r = spawnSync(py, base, { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
+  if (r.status === 0) return;
+  r = spawnSync(py, [...base, '--break-system-packages'], { stdio: 'inherit' });
+  if (r.status !== 0)
+    console.log(c.dim('  (dep install had warnings — continuing; already-installed deps still work)'));
+}
+
 function start(argv) {
   ensureInstalled();
   const py = pyExe();
   console.log(c.dim('  Installing gateway deps (first run may take a moment)...'));
-  spawnSync(py, ['-m', 'pip', 'install', '-r',
-    path.join(P.GATEWAY_DIR, 'requirements.txt'), '--quiet', '--break-system-packages'],
-    { stdio: 'inherit' });
+  installGatewayDeps(py);
 
   const out = fs.openSync(P.GATEWAY_LOG, 'a');
   const child = spawn(py, ['-m', 'uvicorn', '--app-dir', path.join(P.GATEWAY_DIR, 'app'),

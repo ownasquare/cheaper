@@ -6,20 +6,54 @@
 // pullUserText), `source` is 'user' | 'subagent', and `estimated` marks records
 // whose token counts we had to infer from text length.
 //
-// claude-code has a dedicated, well-understood parser (status: supported).
-// The rest run through a defensive generic engine and are marked experimental —
-// they extract only what they can verify and fabricate nothing.
+// Formats were reverse-engineered from public docs/source (see docs). Key hazards
+// handled here: (1) Claude Code splits one API turn across multiple JSONL lines
+// that repeat the SAME message.id + usage — we dedupe by message.id so tokens
+// aren't inflated. (2) sub-agents appear either as isSidechain:true inline OR in a
+// sibling <session>/subagents/agent-*.jsonl file. (3) Codex per-turn token counts
+// are version-fragile and cumulative in places, so we estimate codex tokens from
+// text rather than risk an N× inflation.
 
-const path = require('path');
 const { findFiles, readJsonl, readJson, expand, exists } = require('./fsutil');
+const { execSync } = require('child_process');
 
 const CAP = { maxFiles: 300 };
 
+// ---- installed-tool detection ----------------------------------------------
+// A harness counts as "installed" if its known history dir exists on disk OR
+// its CLI binary is resolvable on PATH. Fails soft: any problem -> false.
+function commandExists(bin) {
+  if (!bin) return false;
+  try {
+    const checkCmd = process.platform === 'win32' ? `where ${bin}` : `command -v ${bin}`;
+    execSync(checkCmd, { stdio: ['ignore', 'ignore', 'ignore'] });
+    return true;
+  } catch { return false; }
+}
+
+function historyDirFor(def) {
+  if (def.key === 'claude-code') {
+    return process.env.CLAUDE_CONFIG_DIR ? process.env.CLAUDE_CONFIG_DIR + '/projects' : '~/.claude/projects';
+  }
+  if (def.key === 'codex') {
+    return process.env.CODEX_HOME ? process.env.CODEX_HOME + '/sessions' : '~/.codex/sessions';
+  }
+  return def.dir || null;
+}
+
+function isInstalled(def) {
+  try {
+    const dir = historyDirFor(def);
+    if (dir && exists(expand(dir))) return true;
+    return commandExists(def.bin);
+  } catch { return false; }
+}
+
 // ---- text extraction (safety-critical) -------------------------------------
-// Pull only user-authored text. Anthropic/OpenAI message content may be a string
-// or an array of typed blocks; we keep 'text' blocks and DROP tool_use/tool_result
-// blocks, images, and anything else — those can carry command output, file dumps,
-// or secrets that must never be surfaced by a savings estimate.
+// Pull only user/assistant-authored TEXT. Content may be a string or an array of
+// typed blocks; we keep 'text'/'input_text'/'output_text' and DROP tool_use,
+// tool_result, function_call(_output), images — those can carry command output,
+// file dumps, or secrets that must never surface in a savings estimate.
 function pullUserText(content) {
   if (content == null) return '';
   if (typeof content === 'string') return content;
@@ -29,8 +63,9 @@ function pullUserText(content) {
       if (typeof b === 'string') { parts.push(b); continue; }
       if (b && typeof b === 'object') {
         const t = b.type;
-        if ((t === 'text' || t === undefined) && typeof b.text === 'string') parts.push(b.text);
-        else if (t === 'input_text' && typeof b.text === 'string') parts.push(b.text);
+        if ((t === 'text' || t === 'input_text' || t === 'output_text' || t === undefined) && typeof b.text === 'string') {
+          parts.push(b.text);
+        }
       }
     }
     return parts.join('\n');
@@ -45,23 +80,22 @@ function parseTs(v) {
   const n = Date.parse(v);
   return Number.isNaN(n) ? 0 : n;
 }
-
 function estTokens(text) { return Math.max(1, Math.ceil((text || '').length / 4)); }
+const IS_SUB_PATH = /(^|[\/\\])subagents[\/\\]/;
 
 // ---- Claude Code (~/.claude/projects/**/*.jsonl) ---------------------------
-// Each line is a transcript event. Assistant events carry message.model and
-// message.usage; sub-agent turns are flagged isSidechain:true. We classify each
-// model call by the user text that preceded it in the same file.
 function collectClaudeCode(opts) {
-  const dir = expand('~/.claude/projects');
+  const dir = expand(process.env.CLAUDE_CONFIG_DIR ? process.env.CLAUDE_CONFIG_DIR + '/projects' : '~/.claude/projects');
   const records = [];
-  const files = findFiles(dir, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays, maxDepth: 4 });
+  const files = findFiles(dir, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays, maxDepth: 5 });
   for (const f of files) {
+    const subFile = IS_SUB_PATH.test(f.file);
     let lastUser = { text: '', ts: 0 };
+    const seen = new Set(); // message.id / requestId already counted this file
     readJsonl(f.file, (o) => {
       const msg = o.message || o;
       const role = o.type === 'user' || o.type === 'assistant' ? o.type : msg.role;
-      const sidechain = o.isSidechain === true;
+      const sidechain = subFile || o.isSidechain === true;
       if (role === 'user') {
         const t = pullUserText(msg.content != null ? msg.content : o.content);
         if (t) lastUser = { text: t, ts: parseTs(o.timestamp || o.ts) };
@@ -70,6 +104,9 @@ function collectClaudeCode(opts) {
       if (role === 'assistant') {
         const model = msg.model;
         if (!model) return;
+        // Dedupe: many lines of one API turn repeat the same id + usage.
+        const id = msg.id || o.requestId || null;
+        if (id) { if (seen.has(id)) return; seen.add(id); }
         const u = msg.usage || {};
         const hasUsage = u && (u.input_tokens != null || u.output_tokens != null);
         const inTok = hasUsage
@@ -88,10 +125,45 @@ function collectClaudeCode(opts) {
   return { records, filesScanned: files.length, note: '' };
 }
 
+// ---- Codex (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) -------------------
+// Lines are {timestamp, type, payload}. type: session_meta | turn_context |
+// response_item | event_msg. Model lives on turn_context.payload.model; messages
+// live on response_item payloads (Responses-API items). Tokens are estimated
+// (codex token_count is cumulative/version-fragile — summing it would inflate).
+function collectCodex(opts) {
+  const dir = expand(process.env.CODEX_HOME ? process.env.CODEX_HOME + '/sessions' : '~/.codex/sessions');
+  if (!exists(dir)) return { records: [], filesScanned: 0, note: 'no history directory found' };
+  const records = [];
+  const files = findFiles(dir, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
+  for (const f of files) {
+    let model = null;
+    let lastUser = '';
+    readJsonl(f.file, (o) => {
+      const type = o.type;
+      const p = o.payload || {};
+      if (type === 'session_meta') { if (typeof p.model === 'string') model = p.model; return; }
+      if (type === 'turn_context') { if (typeof p.model === 'string') model = p.model; return; }
+      if (type === 'response_item') {
+        const item = p.type ? p : (p.item || p);
+        const role = item.role || item.type;
+        if (item.type && item.type !== 'message') return; // skip function_call / tool items
+        const text = pullUserText(item.content);
+        if (/user/i.test(role)) { if (text) lastUser = text; return; }
+        if (/assistant/i.test(role)) {
+          if (!model) return;
+          records.push({
+            harness: 'codex', ts: parseTs(o.timestamp), model,
+            inTokens: estTokens(lastUser || text), outTokens: 0,
+            text: lastUser || text, source: 'user', estimated: true,
+          });
+        }
+      }
+    });
+  }
+  return { records, filesScanned: files.length, note: records.length ? 'token counts estimated from prompt length' : 'no parseable model calls found' };
+}
+
 // ---- Generic engine (experimental) -----------------------------------------
-// Best-effort extraction for harnesses whose format we can't yet parse exactly.
-// Reads *.jsonl (turn-per-line) and *.json (session objects), pulls model + user
-// text + usage where present, and emits nothing when it can't find them.
 const SUBAGENT_HINT = /(sub-?agent|sidechain|delegated|task-tool|"agent")/i;
 
 function pushFromMessages(records, harness, messages, sessionModel, fileTs) {
@@ -105,16 +177,14 @@ function pushFromMessages(records, harness, messages, sessionModel, fileTs) {
     const hasUsage = u && (u.input_tokens != null || u.output_tokens != null ||
       u.prompt_tokens != null || u.completion_tokens != null);
     if (/user|human|prompt/i.test(role)) { if (text) lastUser = text; continue; }
-    // model/assistant turn
     if (/assistant|model|response|agent/i.test(role) || hasUsage) {
       if (!model) continue;
       const inTok = hasUsage ? (u.input_tokens || u.prompt_tokens || 0) : estTokens(lastUser || text);
       const outTok = hasUsage ? (u.output_tokens || u.completion_tokens || 0) : 0;
       records.push({
-        harness, ts: parseTs(m.timestamp || m.ts) || fileTs,
-        model, inTokens: inTok, outTokens: outTok,
-        text: lastUser || text, source: SUBAGENT_HINT.test(role) ? 'subagent' : 'user',
-        estimated: !hasUsage,
+        harness, ts: parseTs(m.timestamp || m.ts) || fileTs, model,
+        inTokens: inTok, outTokens: outTok, text: lastUser || text,
+        source: SUBAGENT_HINT.test(role) ? 'subagent' : 'user', estimated: !hasUsage,
       });
     }
   }
@@ -124,7 +194,6 @@ function collectGeneric(harness, dir, opts) {
   const root = expand(dir);
   if (!exists(root)) return { records: [], filesScanned: 0, note: 'no history directory found' };
   const records = [];
-  // JSONL: line-per-turn, with a session model possibly on an early line.
   const jsonl = findFiles(root, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
   for (const f of jsonl) {
     let sessionModel = null;
@@ -136,7 +205,6 @@ function collectGeneric(harness, dir, opts) {
     });
     pushFromMessages(records, harness, turns, sessionModel, 0);
   }
-  // JSON: whole-session objects with a messages/turns array.
   const json = findFiles(root, ['.json'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
   for (const f of json) {
     const o = readJson(f.file);
@@ -149,17 +217,20 @@ function collectGeneric(harness, dir, opts) {
 }
 
 // ---- registry --------------------------------------------------------------
-// status: 'supported' (verified parser) | 'experimental' (best-effort generic)
+// status: 'supported' (verified parser, real token counts)
+//         | 'experimental' (best-effort / estimated tokens)
 //         | 'sqlite' (stored in a DB we don't read yet).
 const HARNESSES = [
-  { key: 'claude-code', label: 'Claude Code', status: 'supported', collect: collectClaudeCode },
-  { key: 'codex', label: 'Codex', status: 'experimental', dir: '~/.codex' },
-  { key: 'gemini', label: 'Gemini CLI', status: 'experimental', dir: '~/.gemini' },
-  { key: 'grok', label: 'Grok', status: 'experimental', dir: '~/.grok' },
-  { key: 'opencode', label: 'OpenCode', status: 'experimental', dir: '~/.local/share/opencode' },
-  { key: 'copilot', label: 'Copilot', status: 'experimental', dir: '~/.copilot' },
-  { key: 'cursor', label: 'Cursor', status: 'sqlite',
-    note: 'Cursor stores chats in a SQLite DB (state.vscdb) — file-scan peek can’t read it yet.' },
+  { key: 'claude-code', label: 'Claude Code', status: 'supported', collect: collectClaudeCode, bin: 'claude' },
+  { key: 'codex', label: 'Codex', status: 'experimental', collect: collectCodex, bin: 'codex' },
+  { key: 'gemini', label: 'Gemini CLI', status: 'experimental', dir: '~/.gemini/tmp', bin: 'gemini' },
+  { key: 'grok', label: 'Grok', status: 'experimental', dir: '~/.grok', bin: 'grok' },
+  { key: 'opencode', label: 'OpenCode', status: 'experimental', dir: '~/.local/share/opencode', bin: 'opencode' },
+  { key: 'copilot', label: 'Copilot', status: 'experimental', dir: '~/.copilot', bin: 'copilot' },
+  // No custom note: render.js prints the clean 'DB-backed (not yet readable)' fallback
+  // for sqlite harnesses (matches the README sample and avoids a "Cursor … Cursor …"
+  // double-word in the output).
+  { key: 'cursor', label: 'Cursor', status: 'sqlite', bin: 'cursor' },
 ];
 
 function collectHarness(def, opts) {
@@ -169,4 +240,4 @@ function collectHarness(def, opts) {
   return { records: [], filesScanned: 0, note: 'no adapter' };
 }
 
-module.exports = { HARNESSES, collectHarness, pullUserText, parseTs, estTokens };
+module.exports = { HARNESSES, collectHarness, isInstalled, pullUserText, parseTs, estTokens };

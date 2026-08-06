@@ -4,6 +4,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const P = require('./paths');
 const { c, copyDir, removePath, nowIso, whichSync, ask, readJSON, readJSONForUpdate, writeJSON } = require('./util');
+const { installCliLauncher } = require('./clilink');
 
 const AGENT_FILES = [
   'router-triage.md',
@@ -215,8 +216,35 @@ const COMPONENTS = [
   { key: 'hook', label: 'Hook (always-on policy injection)', fn: installHook },
   { key: 'gateway', label: 'Gateway (proxy that routes every API call + monitor)', fn: installGateway },
   { key: 'plugin', label: 'Plugin (managed bundle of skill+agents+hook; alt. to the above)', fn: installPlugin },
+  { key: 'cli', label: 'CLI (a `cheaper` command on your PATH)', fn: installCliLauncher },
 ];
 const DEFAULT_KEYS = ['skill', 'agents', 'hook', 'gateway'];
+
+// Programmatic entry point (used by the CLI's run() and by the desktop app).
+// Applies the plugin-supersedes-standalone rule and returns per-component results.
+function install({ components } = {}) {
+  let chosen = components && components.length ? components.slice() : DEFAULT_KEYS.slice();
+  if (chosen.includes('plugin')) chosen = chosen.filter((k) => !['skill', 'agents', 'hook'].includes(k));
+  const results = [];
+  for (const comp of COMPONENTS.filter((x) => chosen.includes(x.key))) {
+    try { results.push({ key: comp.key, ok: true, msg: comp.fn() }); }
+    catch (e) { results.push({ key: comp.key, ok: false, msg: e.message }); }
+  }
+  return results;
+}
+
+// Component-install state (shared by `cheaper status` and the desktop app).
+function status() {
+  let hookWired = false;
+  try { hookWired = JSON.stringify(readJSON(P.SETTINGS, {}).hooks || {}).includes('router-policy'); } catch { /* ignore */ }
+  return {
+    skill: fs.existsSync(path.join(P.SKILLS_DIR, 'adaptive-model-router')),
+    agents: AGENT_FILES.every((f) => fs.existsSync(path.join(P.AGENTS_DIR, f))),
+    hook: hookWired,
+    plugin: pluginRegistered(),
+    gateway: fs.existsSync(P.GATEWAY_DIR),
+  };
+}
 
 async function run(argv) {
   const preset = new Set(argv.filter((a) => !a.startsWith('-')));
@@ -243,22 +271,14 @@ async function run(argv) {
   if (!chosen.length) { console.log(c.red('\n  Nothing selected. Aborting.\n')); return; }
 
   // The plugin supersedes standalone skill/agents/hook — don't install both.
-  if (chosen.includes('plugin')) {
-    const dropped = chosen.filter((k) => ['skill', 'agents', 'hook'].includes(k));
-    chosen = chosen.filter((k) => !['skill', 'agents', 'hook'].includes(k));
-    if (dropped.length)
-      console.log(c.dim(`  (plugin selected — it bundles skill+agents+hook, so those are installed via the plugin)`));
-  }
+  if (chosen.includes('plugin') && chosen.some((k) => ['skill', 'agents', 'hook'].includes(k)))
+    console.log(c.dim(`  (plugin selected — it bundles skill+agents+hook, so those are installed via the plugin)`));
 
   console.log('');
-  for (const comp of COMPONENTS.filter((x) => chosen.includes(x.key))) {
-    try {
-      const msg = comp.fn();
-      console.log('  ' + c.green('✓') + ' ' + msg);
-    } catch (e) {
-      console.log('  ' + c.red('✗') + ` ${comp.key}: ${e.message}`);
-    }
-  }
+  const results = install({ components: chosen });
+  for (const r of results)
+    console.log('  ' + (r.ok ? c.green('✓') : c.red('✗')) + ' ' + (r.ok ? r.msg : `${r.key}: ${r.msg}`));
+  chosen = results.map((r) => r.key); // reflect plugin-supersede filtering for the notes below
   console.log(c.dim('\n  Done. Notes:'));
   if (chosen.includes('gateway'))
     console.log(c.dim('   • Start the gateway:  ') + 'cheaper gateway start' +
@@ -271,6 +291,6 @@ async function run(argv) {
 }
 
 module.exports = {
-  run, COMPONENTS, DEFAULT_KEYS, AGENT_FILES,
+  run, install, status, COMPONENTS, DEFAULT_KEYS, AGENT_FILES,
   pluginRegistered, dewireStandaloneHook, isCheaperHookEntry, runClaude,
 };

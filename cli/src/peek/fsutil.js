@@ -8,7 +8,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const HOME = os.homedir();
+// Where '~' resolves. Overridable so tests point at fixtures and power users can
+// scan an alternate profile — without ever hard-coding the real home in logic.
+const HOME = process.env.CHEAPER_PEEK_HOME || os.homedir();
 const DAY = 86400 * 1000;
 
 function expand(p) {

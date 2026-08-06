@@ -56,8 +56,9 @@ function contentTier(text) {
 // Map an arbitrary model id back to a coarse capability tier (haiku|sonnet|opus).
 // This is what "the model the caller actually used" resolves to, so the ceiling
 // can be applied. Cheap signals win over top signals (e.g. "o3-mini" is cheap).
-const CHEAP_SIGNALS = /(haiku|mini|nano|flash|lite|small|instant|-8b|-7b|-3b|-1\.3b|tiny|micro|embed)/i;
-const TOP_SIGNALS = /(opus|ultra|-pro\b|reasoner|thinking|-o1|\bo1\b|-o3|\bo3\b|-o4|\bo4\b|405b|-72b|-large|grok-4|grok-3\b|deepseek-r1|qwq)/i;
+// Word-boundaried so "mini" doesn't fire inside "geMINI", etc.
+const CHEAP_SIGNALS = /(\bhaiku|\bmini\b|\bnano\b|\bflash\b|\blite\b|\bsmall\b|\binstant\b|\b8b\b|\b7b\b|\b3b\b|\btiny\b|\bmicro\b|\bembed)/i;
+const TOP_SIGNALS = /(\bopus|\bultra\b|[-\s]pro\b|\breasoner\b|\bthinking\b|\bo1\b|\bo3\b|\bo4\b|\b405b\b|\b72b\b|\blarge\b|grok-4|grok-3\b|deepseek-r1|\bqwq\b)/i;
 
 function modelTier(modelId) {
   const m = String(modelId || '').toLowerCase();

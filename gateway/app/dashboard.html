@@ -1,0 +1,588 @@
+<meta charset="utf-8">
+<title>Cheaper monitor</title>
+<style>
+  :root{
+    --bg:#0a0a0c; --card:#141418; --line:#212127; --text:#f2f2f5; --muted:#8b8b95;
+    --green:#34d399; --red:#f87171; --blue:#60a5fa; --pink:#f472b6;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    overflow-x:hidden;}
+  body{padding:20px;max-width:1200px;margin:0 auto;}
+  a{color:var(--green);}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;}
+  h1{font-size:1.6rem;font-weight:700;margin:0;letter-spacing:-0.01em;}
+  h1 .green{color:var(--green);}
+  .status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:0.85rem;color:var(--muted);}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 0 3px rgba(248,113,113,0.15);transition:background .2s,box-shadow .2s;}
+  .dot.on{background:var(--green);box-shadow:0 0 0 3px rgba(52,211,153,0.15);}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:20px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
+  .card .label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:6px;}
+  .card .value{font-size:1.55rem;font-weight:700;line-height:1.1;}
+  .card .sub{font-size:0.75rem;color:var(--muted);margin-top:4px;}
+  .value.green{color:var(--green);}
+  .value.red{color:var(--red);}
+  .bar-track{height:5px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:8px;}
+  .bar-fill{height:100%;background:var(--green);border-radius:3px;transition:width .3s;}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px;}
+  .panel h2{font-size:0.95rem;margin:0 0 12px 0;color:var(--text);font-weight:600;}
+  .empty-note{color:var(--muted);font-size:0.85rem;padding:12px 0;}
+  .tool-row{display:grid;grid-template-columns:120px 60px 1fr 90px;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:0.82rem;}
+  .tool-row:last-child{border-bottom:none;}
+  .tool-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+  .tool-calls{color:var(--muted);text-align:right;}
+  .two-tone{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line);}
+  .two-tone .seg-green{background:var(--green);}
+  .two-tone .seg-red{background:var(--red);}
+  .tool-saved{color:var(--green);text-align:right;font-weight:600;}
+  table{width:100%;border-collapse:collapse;font-size:0.82rem;}
+  thead th{text-align:left;color:var(--muted);font-weight:500;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;padding:6px 8px;border-bottom:1px solid var(--line);}
+  tbody td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top;}
+  tbody tr:last-child td{border-bottom:none;}
+  .table-wrap{overflow-x:auto;}
+  .pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:0.72rem;font-weight:600;}
+  .pill.haiku{background:rgba(52,211,153,0.15);color:var(--green);}
+  .pill.sonnet{background:rgba(96,165,250,0.15);color:var(--blue);}
+  .pill.opus{background:rgba(244,114,182,0.15);color:var(--pink);}
+  .pill.other{background:rgba(139,139,149,0.15);color:var(--muted);}
+  .muted{color:var(--muted);}
+  svg.spark{width:100%;height:90px;display:block;}
+  .peek-headline{font-size:1rem;margin-bottom:10px;}
+  .peek-headline .green{color:var(--green);font-weight:700;}
+  .harness-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:0.82rem;border-bottom:1px solid var(--line);}
+  .harness-row:last-child{border-bottom:none;}
+  .harness-row .hlabel{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .harness-row .hcalls{color:var(--muted);width:70px;text-align:right;}
+  .harness-row .hsaved{color:var(--green);font-weight:600;width:90px;text-align:right;}
+  .installed-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;}
+  .installed-dot.yes{background:var(--green);}
+  .opp{padding:8px 0;border-bottom:1px solid var(--line);font-size:0.8rem;}
+  .opp:last-child{border-bottom:none;}
+  .opp .route{color:var(--text);}
+  .opp .saved{color:var(--green);font-weight:600;}
+  .opp .meta{color:var(--muted);font-size:0.74rem;margin-top:2px;}
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  @media (max-width:760px){.two-col{grid-template-columns:1fr;} .tool-row{grid-template-columns:90px 40px 1fr 70px;font-size:0.76rem;}}
+
+  .counts-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:20px;}
+  .value.neutral{color:var(--text);}
+  .toggle{display:inline-flex;background:var(--line);border-radius:8px;padding:2px;gap:2px;margin-bottom:14px;}
+  .toggle button{appearance:none;border:none;background:transparent;color:var(--muted);font-size:0.78rem;font-weight:600;
+    padding:6px 12px;border-radius:6px;cursor:pointer;font-family:inherit;transition:background .15s,color .15s;}
+  .toggle button.active{background:var(--card);color:var(--green);}
+  .toggle button:hover:not(.active){color:var(--text);}
+  .dim-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;}
+  .dim-card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;}
+  .dim-card .label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:8px;}
+  .dim-card .headline{font-size:1.7rem;font-weight:700;line-height:1.1;color:var(--green);}
+  .dim-card .headline.small{font-size:1.15rem;}
+  .dim-card .sub{font-size:0.75rem;color:var(--muted);margin-top:6px;}
+  .dim-card .spent-sub{font-size:0.8rem;color:var(--red);font-weight:600;margin-top:8px;}
+  .tag-potential{display:inline-block;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;
+    color:var(--blue);background:rgba(96,165,250,0.15);border-radius:99px;padding:2px 7px;margin-left:6px;vertical-align:middle;}
+</style>
+
+<header>
+  <h1>Cheaper <span class="green">monitor</span></h1>
+  <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></div>
+</header>
+
+<div class="counts-row" id="countsRow"></div>
+
+<div class="grid" id="statCards"></div>
+
+<div class="panel">
+  <h2>Savings breakdown</h2>
+  <div class="toggle" id="baselineToggle" role="group" aria-label="Money baseline">
+    <button type="button" data-baseline="requested_default">vs your model</button>
+    <button type="button" data-baseline="highest_tier">vs all-frontier</button>
+    <button type="button" data-baseline="historical">vs your history</button>
+  </div>
+  <div class="dim-grid" id="dimGrid"></div>
+</div>
+
+<div class="panel">
+  <h2>Savings over time</h2>
+  <div id="sparkWrap"></div>
+</div>
+
+<div class="two-col">
+  <div class="panel">
+    <h2>Savings by tool</h2>
+    <div id="byTool"></div>
+  </div>
+  <div class="panel">
+    <h2>Recent decisions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Tier</th><th>Model</th><th>Reason</th><th>Source</th></tr></thead>
+        <tbody id="recentBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Savings by source</h2>
+  <div id="bySource"></div>
+</div>
+
+<div class="panel">
+  <h2>Peek &mdash; what you could have saved sooner</h2>
+  <div id="peekPanel"></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  function esc(s){
+    if(s===null||s===undefined) return "";
+    return String(s).replace(/[&<>"']/g, function(c){
+      return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];
+    });
+  }
+  function num(v, d){ v = Number(v); return isFinite(v) ? v : (d===undefined?0:d); }
+  function money(v){
+    v = num(v, 0);
+    var neg = v < 0;
+    v = Math.abs(v);
+    var s = v.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+    return (neg?"-":"") + "$" + s;
+  }
+  function pct(v){
+    v = num(v, 0);
+    return (v * (v <= 1 ? 100 : 1)).toFixed(1) + "%";
+  }
+  // downgrade_rate / savings_pct might arrive as 0..1 or already 0..100; normalize.
+  function pctSmart(v){
+    v = num(v, 0);
+    var p = v <= 1 ? v * 100 : v;
+    return p.toFixed(1) + "%";
+  }
+  function pctFrac(v){
+    v = num(v, 0);
+    return v <= 1 ? v * 100 : v;
+  }
+  function truncate(s, n){
+    s = String(s === undefined || s === null ? "" : s);
+    return s.length > n ? s.slice(0, n - 1) + "…" : s;
+  }
+  function tokenCount(v){
+    v = num(v, 0);
+    var neg = v < 0;
+    v = Math.abs(v);
+    var s;
+    if (v >= 1e6) s = (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    else if (v >= 1e3) s = (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+    else s = v.toLocaleString('en-US');
+    return (neg ? '-' : '') + s;
+  }
+  function seconds(v){
+    v = num(v, 0);
+    var neg = v < 0;
+    v = Math.abs(v);
+    if (v < 60) return (neg ? '-' : '') + (v < 10 ? v.toFixed(1) : Math.round(v)) + 's';
+    var h = Math.floor(v / 3600);
+    var m = Math.floor((v % 3600) / 60);
+    var s = Math.round(v % 60);
+    var out = '';
+    if (h > 0) out += h + 'h ';
+    if (h > 0 || m > 0) out += m + 'm ';
+    out += s + 's';
+    return (neg ? '-' : '') + out.trim();
+  }
+
+  var lastData = null;
+  var lastPeek = null;
+  var baselineChoice = 'requested_default';
+
+  // ---------- Stat cards ----------
+  function renderCards(d){
+    var total = num(d.total, 0);
+    var dr = pctFrac(d.downgrade_rate);
+    var dollars = d.dollars || {};
+    var saved = num(dollars.saved, 0);
+    var spent = num(dollars.spent, 0);
+    var savedPct = pctFrac(dollars.savings_pct);
+
+    var html = '';
+    html += '<div class="card"><div class="label">Total routed</div><div class="value">' + total.toLocaleString('en-US') + '</div></div>';
+    html += '<div class="card"><div class="label">Downgrade rate</div><div class="value green">' + dr.toFixed(1) + '%</div>' +
+            '<div class="bar-track"><div class="bar-fill" style="width:' + Math.min(100, Math.max(0, dr)) + '%"></div></div></div>';
+    html += '<div class="card"><div class="label">Saved</div><div class="value green">' + money(saved) + '</div><div class="sub">vs all-top-tier</div></div>';
+    html += '<div class="card"><div class="label">Spent</div><div class="value red">' + money(spent) + '</div></div>';
+    html += '<div class="card"><div class="label">Savings %</div><div class="value green">' + savedPct.toFixed(1) + '%</div></div>';
+    document.getElementById('statCards').innerHTML = html;
+  }
+
+  // ---------- Counts row ----------
+  function renderCounts(d){
+    var counts = d.counts || {};
+    var intercepted = num(counts.intercepted, 0);
+    var changed = num(counts.models_changed, 0);
+    var opps = num(counts.reasoning_opportunities, 0);
+    var html = '';
+    html += '<div class="card"><div class="label">Requests intercepted</div><div class="value neutral">' + intercepted.toLocaleString('en-US') + '</div></div>';
+    html += '<div class="card"><div class="label">Models changed</div><div class="value green">' + changed.toLocaleString('en-US') + '</div></div>';
+    html += '<div class="card"><div class="label">Reasoning-reduction opportunities</div><div class="value green">' + opps.toLocaleString('en-US') + '</div></div>';
+    document.getElementById('countsRow').innerHTML = html;
+  }
+
+  // ---------- Savings dimensions (money / tokens / time) ----------
+  function moneyBaselineValue(d){
+    var dollars = d.dollars || {};
+    var baselines = d.baselines || {};
+    if (baselineChoice === 'highest_tier') return { amount: num(baselines.highest_tier, 0), label: 'vs all-frontier' };
+    if (baselineChoice === 'historical') {
+      var totals = (lastPeek && lastPeek.totals) || {};
+      return { amount: num(totals.dollarsSaved, 0), label: 'vs your history' };
+    }
+    return { amount: num(baselines.requested_default, 0), label: 'vs your model' };
+  }
+  function renderDims(d){
+    var dollars = d.dollars || {};
+    var tokens = d.tokens || {};
+    var time = d.time || {};
+    var spent = num(dollars.spent, 0);
+    var moneyInfo = moneyBaselineValue(d);
+    var tokensSaved = num(tokens.saved_reasoning_potential, 0);
+    var savedModelS = num(time.saved_model_s, 0);
+    var savedReasoningS = num(time.saved_reasoning_potential_s, 0);
+
+    var html = '';
+    html += '<div class="dim-card">' +
+      '<div class="label">Money</div>' +
+      '<div class="headline">' + money(moneyInfo.amount) + '</div>' +
+      '<div class="sub">' + esc(moneyInfo.label) + '</div>' +
+      '<div class="spent-sub">' + money(spent) + ' spent</div>' +
+      '</div>';
+    html += '<div class="dim-card">' +
+      '<div class="label">Tokens</div>' +
+      '<div class="headline">' + tokenCount(tokensSaved) + '<span class="tag-potential">potential</span></div>' +
+      '<div class="sub">reasoning tokens you could save</div>' +
+      '</div>';
+    html += '<div class="dim-card">' +
+      '<div class="label">Time</div>' +
+      '<div class="headline">' + seconds(savedModelS) + '</div>' +
+      '<div class="sub">saved (from model routing)</div>' +
+      '<div class="sub">+ ' + seconds(savedReasoningS) + ' potential from reasoning</div>' +
+      '</div>';
+    document.getElementById('dimGrid').innerHTML = html;
+  }
+  function setBaseline(choice){
+    baselineChoice = choice;
+    var buttons = document.querySelectorAll('#baselineToggle button');
+    for (var i = 0; i < buttons.length; i++){
+      buttons[i].classList.toggle('active', buttons[i].getAttribute('data-baseline') === choice);
+    }
+    renderDims(lastData || {});
+  }
+  (function initToggle(){
+    var toggle = document.getElementById('baselineToggle');
+    toggle.addEventListener('click', function(evt){
+      var btn = evt.target.closest('button[data-baseline]');
+      if (!btn) return;
+      setBaseline(btn.getAttribute('data-baseline'));
+    });
+    setBaseline(baselineChoice);
+  })();
+
+  // ---------- By source ----------
+  function renderBySource(d){
+    var bySource = d.by_source || {};
+    var order = [
+      {key:'user', label:'User'},
+      {key:'subagent', label:'Sub-agent'},
+      {key:'other', label:'Other'}
+    ];
+    var el = document.getElementById('bySource');
+    var rows = order.map(function(o){
+      var s = bySource[o.key] || {};
+      return { label: o.label, calls: num(s.calls, 0), saved: num(s.saved, 0), spent: num(s.spent, 0) };
+    });
+    var visible = rows.filter(function(r){ return r.calls > 0; });
+    if (!visible.length){
+      el.innerHTML = '<div class="empty-note">No source-attributed traffic yet.</div>';
+      return;
+    }
+    var html = '';
+    rows.forEach(function(r){
+      if (r.calls === 0){
+        html += '<div class="harness-row muted">' +
+          '<span class="hlabel">' + esc(r.label) + '</span>' +
+          '<span class="hcalls">0 calls</span>' +
+          '<span class="hsaved muted">' + money(0) + '</span>' +
+          '</div>';
+        return;
+      }
+      html += '<div class="harness-row">' +
+        '<span class="hlabel">' + esc(r.label) + '</span>' +
+        '<span class="hcalls">' + r.calls.toLocaleString('en-US') + ' calls</span>' +
+        '<span class="hsaved">' + money(r.saved) + '</span>' +
+        '<span style="color:var(--red);font-weight:600;font-size:0.82rem;width:90px;text-align:right;">' + money(r.spent) + '</span>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+  }
+
+  // ---------- Sparkline ----------
+  function renderSpark(d){
+    var ts = (d.timeseries && Array.isArray(d.timeseries.points)) ? d.timeseries.points : [];
+    var wrap = document.getElementById('sparkWrap');
+    if (ts.length < 2){
+      wrap.innerHTML = '<div class="empty-note">waiting for traffic…</div>';
+      return;
+    }
+    var W = 600, H = 90, pad = 4;
+    var vals = ts.map(function(p){ return num(p.saved, 0); });
+    var max = Math.max.apply(null, vals.concat([0.01]));
+    var min = 0;
+    var n = ts.length;
+    var stepX = (W - pad*2) / Math.max(1, n - 1);
+    function yFor(v){
+      var t = (v - min) / (max - min || 1);
+      return H - pad - t * (H - pad*2);
+    }
+    var pts = vals.map(function(v, i){ return [pad + i*stepX, yFor(v)]; });
+    var linePath = pts.map(function(p, i){ return (i===0?'M':'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
+    var areaPath = linePath + ' L' + pts[pts.length-1][0].toFixed(1) + ',' + (H-pad) +
+                   ' L' + pts[0][0].toFixed(1) + ',' + (H-pad) + ' Z';
+    var svg = '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' +
+      '<path d="' + areaPath + '" fill="rgba(52,211,153,0.15)" stroke="none"></path>' +
+      '<path d="' + linePath + '" fill="none" stroke="#34d399" stroke-width="2" vector-effect="non-scaling-stroke"></path>' +
+      '</svg>';
+    wrap.innerHTML = svg;
+  }
+
+  // ---------- By tool ----------
+  function renderByTool(d){
+    var list = Array.isArray(d.by_tool) ? d.by_tool : [];
+    var el = document.getElementById('byTool');
+    if (!list.length){
+      el.innerHTML = '<div class="empty-note">No routed traffic yet &mdash; point a tool at the gateway (see Docs).</div>';
+      return;
+    }
+    var maxTotal = 0;
+    list.forEach(function(t){ maxTotal = Math.max(maxTotal, num(t.saved,0) + num(t.spent,0)); });
+    maxTotal = maxTotal || 1;
+    var html = '';
+    list.forEach(function(t){
+      var saved = num(t.saved, 0), spent = num(t.spent, 0);
+      var tot = saved + spent;
+      var savedPctW = tot > 0 ? (saved / tot) * 100 : 0;
+      var spentPctW = tot > 0 ? (spent / tot) * 100 : 0;
+      html += '<div class="tool-row">' +
+        '<div class="tool-name" title="' + esc(t.tool) + '">' + esc(truncate(t.tool || 'unknown', 18)) + '</div>' +
+        '<div class="tool-calls">' + num(t.calls,0).toLocaleString('en-US') + '</div>' +
+        '<div class="two-tone"><div class="seg-green" style="width:' + savedPctW.toFixed(1) + '%"></div><div class="seg-red" style="width:' + spentPctW.toFixed(1) + '%"></div></div>' +
+        '<div class="tool-saved">' + money(saved) + '</div>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+  }
+
+  // ---------- Recent decisions ----------
+  function tierPillClass(tier){
+    tier = String(tier || '').toLowerCase();
+    if (tier === 'haiku' || tier === 'sonnet' || tier === 'opus') return tier;
+    return 'other';
+  }
+  function renderRecent(d){
+    var list = Array.isArray(d.recent) ? d.recent.slice() : [];
+    list.sort(function(a,b){ return num(b.ts,0) - num(a.ts,0); });
+    list = list.slice(0, 15);
+    var body = document.getElementById('recentBody');
+    if (!list.length){
+      body.innerHTML = '<tr><td colspan="5" class="muted">No decisions yet.</td></tr>';
+      return;
+    }
+    var html = '';
+    list.forEach(function(r){
+      var t = num(r.ts, 0) * 1000;
+      var timeStr = t > 0 ? new Date(t).toLocaleTimeString('en-US', {hour12:false}) : '—';
+      var tier = r.tier || 'unknown';
+      html += '<tr>' +
+        '<td class="muted">' + esc(timeStr) + '</td>' +
+        '<td><span class="pill ' + tierPillClass(tier) + '">' + esc(tier) + '</span></td>' +
+        '<td>' + esc(truncate(r.original_model || '—', 28)) + '</td>' +
+        '<td title="' + esc(r.reason || '') + '">' + esc(truncate(r.reason || '', 70)) + '</td>' +
+        '<td class="muted">' + esc(truncate(r.source || '', 20)) + '</td>' +
+        '</tr>';
+    });
+    body.innerHTML = html;
+  }
+
+  // ---------- Main render ----------
+  function render(data){
+    if (!data || typeof data !== 'object') data = {};
+    lastData = data;
+    renderCards(data);
+    renderCounts(data);
+    renderDims(data);
+    renderSpark(data);
+    renderByTool(data);
+    renderBySource(data);
+    renderRecent(data);
+  }
+
+  function setStatus(connected, reconnecting){
+    var dot = document.getElementById('statusDot');
+    var text = document.getElementById('statusText');
+    if (connected){
+      dot.classList.add('on');
+      text.textContent = 'live';
+    } else {
+      dot.classList.remove('on');
+      text.textContent = reconnecting ? 'reconnecting…' : 'connecting…';
+    }
+  }
+
+  // ---------- WebSocket with fallback polling ----------
+  var ws = null;
+  var wsEverConnected = false;
+  var reconnectDelay = 1000;
+  var reconnectTimer = null;
+  var pollTimer = null;
+  var wsConnectAttempts = 0;
+  var MAX_WS_ATTEMPTS_BEFORE_FALLBACK = 4;
+
+  function startPolling(){
+    if (pollTimer) return;
+    setStatus(false, true);
+    function poll(){
+      fetch('/metrics').then(function(r){ return r.json(); }).then(function(j){
+        render(j);
+      }).catch(function(){ /* ignore transient errors */ });
+    }
+    poll();
+    pollTimer = setInterval(poll, 5000);
+  }
+  function stopPolling(){
+    if (pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function connectWS(){
+    var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    try {
+      ws = new WebSocket(url);
+    } catch (e){
+      wsConnectAttempts++;
+      scheduleReconnect();
+      return;
+    }
+
+    ws.onopen = function(){
+      wsEverConnected = true;
+      wsConnectAttempts = 0;
+      reconnectDelay = 1000;
+      stopPolling();
+      setStatus(true, false);
+    };
+    ws.onmessage = function(evt){
+      var msg;
+      try { msg = JSON.parse(evt.data); } catch(e){ return; }
+      render(msg);
+    };
+    ws.onerror = function(){
+      /* onclose will follow; handled there */
+    };
+    ws.onclose = function(){
+      setStatus(false, true);
+      wsConnectAttempts++;
+      if (!wsEverConnected && wsConnectAttempts >= MAX_WS_ATTEMPTS_BEFORE_FALLBACK){
+        startPolling();
+      }
+      scheduleReconnect();
+    };
+  }
+
+  function scheduleReconnect(){
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(function(){
+      reconnectTimer = null;
+      reconnectDelay = Math.min(reconnectDelay * 1.6, 15000);
+      connectWS();
+    }, reconnectDelay);
+  }
+
+  connectWS();
+
+  // ---------- Peek panel ----------
+  function renderPeek(p){
+    var el = document.getElementById('peekPanel');
+    if (!p || p.available === false){
+      el.innerHTML = '<div class="empty-note">Run <code>cheaper peek</code> to see your historical savings.</div>';
+      return;
+    }
+    var totals = p.totals || {};
+    var savedPct = pctFrac(totals.savedPct);
+    var html = '<div class="peek-headline">Could have saved <span class="green">' + money(totals.dollarsSaved) + '</span>' +
+      ' (' + savedPct.toFixed(1) + '% off)';
+    if (totals.annualizedSaved !== undefined && totals.annualizedSaved !== null){
+      html += ' &middot; <span class="muted">annualized ~' + money(totals.annualizedSaved) + '</span>';
+    }
+    html += '</div>';
+
+    var harnesses = Array.isArray(p.harnesses) ? p.harnesses : [];
+    if (harnesses.length){
+      html += '<div style="margin:10px 0;">';
+      harnesses.forEach(function(h){
+        var installedKnown = (h.installed === true || h.installed === false);
+        html += '<div class="harness-row">';
+        if (installedKnown){
+          html += '<span class="installed-dot ' + (h.installed ? 'yes' : '') + '" title="' + (h.installed ? 'installed' : 'not installed') + '"></span>';
+        }
+        html += '<span class="hlabel">' + esc(h.label || h.key || 'unknown') + '</span>';
+        html += '<span class="hcalls">' + num(h.calls,0).toLocaleString('en-US') + ' calls</span>';
+        html += '<span class="hsaved">' + money(h.dollarsSaved) + '</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+
+    // Top 5 opportunities across harness examples
+    var opps = [];
+    harnesses.forEach(function(h){
+      var examples = Array.isArray(h.examples) ? h.examples : [];
+      examples.forEach(function(ex){ opps.push(ex); });
+    });
+    opps.sort(function(a,b){ return num(b.saved,0) - num(a.saved,0); });
+    opps = opps.slice(0, 5);
+    if (opps.length){
+      html += '<div style="margin-top:6px;"><div class="label" style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:6px;">Biggest opportunities</div>';
+      opps.forEach(function(o){
+        html += '<div class="opp">' +
+          '<span class="route">' + esc(o.from || '?') + ' &rarr; ' + esc(o.to || '?') + '</span>' +
+          ' &nbsp;<span class="saved">' + money(o.saved) + '</span>' +
+          '<div class="meta">' + esc(o.source || '') + (o.reason ? ' &mdash; ' + esc(truncate(o.reason, 90)) : '') + '</div>' +
+          '</div>';
+      });
+      html += '</div>';
+    }
+
+    if (!harnesses.length && !opps.length){
+      html += '<div class="empty-note">No harness detail available yet.</div>';
+    }
+
+    el.innerHTML = html;
+  }
+
+  function fetchPeek(){
+    fetch('/peek').then(function(r){ return r.json(); }).then(function(j){
+      lastPeek = j;
+      renderPeek(j);
+      if (baselineChoice === 'historical') renderDims(lastData || {});
+    }).catch(function(){
+      renderPeek({available:false});
+    });
+  }
+  fetchPeek();
+  setInterval(fetchPeek, 60000);
+
+  // Initial empty render so panels aren't blank before first data arrives
+  render({});
+})();
+</script>

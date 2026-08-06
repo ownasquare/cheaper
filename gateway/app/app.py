@@ -14,15 +14,35 @@ Monitor:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from router import RouterConfig, decide, extract_text
-from metrics import Metrics
+from metrics import Metrics, normalize_effort
+
+
+def _extract_effort(body: dict) -> str:
+    """The reasoning effort the caller REQUESTED (measure-only — never modified).
+    Handles OpenAI reasoning_effort / reasoning.effort and Anthropic extended thinking."""
+    if not isinstance(body, dict):
+        return "none"
+    re = body.get("reasoning_effort")
+    if re:
+        return normalize_effort(re)
+    r = body.get("reasoning")
+    if isinstance(r, dict) and r.get("effort"):
+        return normalize_effort(r.get("effort"))
+    th = body.get("thinking")
+    if isinstance(th, dict) and (th.get("type") == "enabled" or th.get("budget_tokens")):
+        bt = th.get("budget_tokens") or 0
+        return "high" if bt >= 8000 else "medium" if bt >= 2000 else "low"
+    return "none"
 
 UPSTREAM = os.environ.get("ANTHROPIC_UPSTREAM_URL", "https://api.anthropic.com").rstrip("/")
 
@@ -47,6 +67,19 @@ def _config_from_env() -> RouterConfig:
 CFG = _config_from_env()
 MODE = os.environ.get("ROUTER_MODE", "heuristic").lower()  # heuristic | triage
 METRICS = Metrics()
+
+# --- Live push: one asyncio.Event per connected /ws client, set on each routed
+#     request so the dashboard updates in real time (5s heartbeat as a fallback).
+_ws_events: set[asyncio.Event] = set()
+
+
+def _notify_metrics() -> None:
+    for ev in list(_ws_events):
+        ev.set()
+
+
+_PEEK_JSON = Path(os.path.expanduser("~")) / ".cheaper" / "peek.json"
+_DASH_PATH = Path(__file__).resolve().parent / "dashboard.html"
 
 # OpenAI-compatible front-end (for Codex/Cursor/Copilot/OpenCode/… — any tool that
 # points its OpenAI base URL here). Set these to models your account actually has.
@@ -96,12 +129,49 @@ async def healthz():
 
 @app.get("/metrics")
 async def metrics():
-    return JSONResponse(METRICS.summary())
+    return JSONResponse(await asyncio.to_thread(METRICS.summary))
+
+
+@app.get("/peek")
+async def peek():
+    """Serve the historical `peek` report that the CLI / desktop refresh to
+    ~/.cheaper/peek.json. Returns {available:false} until one has been generated."""
+    try:
+        return JSONResponse(json.loads(_PEEK_JSON.read_text()))
+    except Exception:
+        return JSONResponse({"available": False})
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    return _DASHBOARD_HTML
+    try:
+        return HTMLResponse(_DASH_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return HTMLResponse(_DASHBOARD_HTML)  # inline fallback
+
+
+@app.websocket("/ws")
+async def ws(websocket: WebSocket):
+    """Push a fresh metrics summary on connect, on every routed request, and at
+    least every 5s. Send-only; the client never sends frames back."""
+    await websocket.accept()
+    ev = asyncio.Event()
+    _ws_events.add(ev)
+    try:
+        while True:
+            payload = await asyncio.to_thread(METRICS.summary)
+            await websocket.send_json({"type": "metrics", **payload})
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+            ev.clear()
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    except Exception:
+        pass
+    finally:
+        _ws_events.discard(ev)
 
 
 @app.post("/v1/messages")
@@ -141,7 +211,8 @@ async def messages(request: Request):
         requested_tier=str(req_tier), reason=decision.reason, source=source,
         in_tokens=usage.get("input_tokens") or (text_len // 4),
         out_tokens=usage.get("output_tokens") or 0,
-        status=usage.get("status", 0))
+        status=usage.get("status", 0), requested_effort=_extract_effort(body))
+    _notify_metrics()
     return resp
 
 
@@ -222,7 +293,9 @@ async def chat_completions(request: Request):
         tier=decision.tier, model=decision.model, original_model=str(original_model),
         requested_tier="", reason=decision.reason, source=source,
         in_tokens=usage.get("input_tokens") or (text_len // 4),
-        out_tokens=usage.get("output_tokens") or 0, status=usage.get("status", 0))
+        out_tokens=usage.get("output_tokens") or 0, status=usage.get("status", 0),
+        requested_effort=_extract_effort(body))
+    _notify_metrics()
     return resp
 
 

@@ -1,0 +1,12 @@
+# Keep the published npm tarball clean. (Without this file npm falls back to
+# .gitignore, which doesn't cover these.)
+
+# Python build artifacts — regenerated whenever the bundled gateway runs; never ship them.
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+
+# The gateway's own test suite isn't needed at runtime (`cheaper gateway start` only
+# uses assets/gateway/app + requirements.txt).
+assets/gateway/tests/

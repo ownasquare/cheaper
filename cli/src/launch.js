@@ -1,0 +1,131 @@
+'use strict';
+// `cheaper launch` / `cheaper init` — ensure the gateway is up, refresh the local
+// peek report so the dashboard's /peek panel has fresh data, open the dashboard in
+// the default browser, and (unless --once) keep the process alive to keep
+// refreshing peek every 2 minutes while the user watches the live monitor.
+
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const { spawn } = require('child_process');
+const P = require('./paths');
+const { c } = require('./util');
+const gateway = require('./gateway');
+const { PORT } = gateway;
+
+const HEALTH_TIMEOUT_MS = 15000;
+const HEALTH_POLL_MS = 500;
+const PEEK_REFRESH_MS = 120000;
+
+function isGatewayRunning() {
+  try {
+    const pid = parseInt(fs.readFileSync(P.GATEWAY_PID, 'utf8'), 10);
+    process.kill(pid, 0);
+    return true;
+  } catch { return false; }
+}
+
+function healthCheck() {
+  return new Promise((resolve) => {
+    const req = http.get(`http://localhost:${PORT}/healthz`, (res) => {
+      let d = '';
+      res.on('data', (x) => (d += x));
+      res.on('end', () => {
+        try { resolve(JSON.parse(d).ok === true); }
+        catch { resolve(false); }
+      });
+    });
+    req.on('error', () => resolve(false));
+    req.setTimeout(2000, () => { req.destroy(); resolve(false); });
+  });
+}
+
+async function waitForHealthy(timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await healthCheck()) return true;
+    await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
+  }
+  return false;
+}
+
+// Ensure the gateway is running and healthy. Returns true if we can proceed.
+async function ensureGatewayUp() {
+  if (!isGatewayRunning()) {
+    console.log(c.dim('  Gateway not running — starting it...'));
+    gateway.run(['start']); // reuses gateway.js's existing start path (may exit(1) if not installed)
+  }
+  const healthy = await waitForHealthy(HEALTH_TIMEOUT_MS);
+  if (!healthy) {
+    console.log(c.red(`  Gateway did not become healthy on port ${PORT} within ${HEALTH_TIMEOUT_MS / 1000}s.`));
+    console.log(c.dim('  Check the log:  ') + P.GATEWAY_LOG);
+    console.log(c.dim('  Or try:  ') + 'cheaper gateway start');
+    return false;
+  }
+  return true;
+}
+
+// Refresh ~/.cheaper/peek.json so the dashboard's /peek panel stays current.
+// A peek failure must never crash the monitor.
+function refreshPeek() {
+  try {
+    const { scan } = require('./peek');
+    const report = scan({});
+    fs.mkdirSync(P.CHEAPER_DIR, { recursive: true });
+    fs.writeFileSync(path.join(P.CHEAPER_DIR, 'peek.json'), JSON.stringify(report));
+  } catch (e) {
+    console.log(c.dim('  (peek refresh failed — continuing) ') + c.dim(String(e && e.message || e)));
+  }
+}
+
+function openDashboard(url) {
+  try {
+    if (process.platform === 'darwin') {
+      spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+    } else if (process.platform === 'win32') {
+      spawn('cmd', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+    }
+  } catch { /* best effort — never fatal */ }
+}
+
+function parseArgs(argv) {
+  const o = { open: true, once: false };
+  for (const a of argv) {
+    if (a === '--no-open') o.open = false;
+    else if (a === '--once') o.once = true;
+  }
+  return o;
+}
+
+async function run(argv = []) {
+  const o = parseArgs(argv);
+
+  const ok = await ensureGatewayUp();
+  if (!ok) { process.exitCode = 1; return; }
+
+  const dashUrl = `http://localhost:${PORT}/dashboard`;
+
+  refreshPeek();
+  if (o.open) openDashboard(dashUrl);
+
+  console.log('');
+  console.log('  ' + c.green(dashUrl));
+  console.log('  ' + c.bold('live monitor running') + c.dim(' — Ctrl-C to stop (the gateway keeps running)'));
+  console.log('');
+
+  if (o.once) return;
+
+  const timer = setInterval(refreshPeek, PEEK_REFRESH_MS);
+  process.on('SIGINT', () => {
+    clearInterval(timer);
+    console.log(c.dim('\n  stopped (gateway keeps running).'));
+    process.exit(0);
+  });
+
+  // Keep the process alive for the refresh timer.
+  await new Promise(() => {});
+}
+
+module.exports = { run };

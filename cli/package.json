@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "description": "Cheaper \u2014 install and run adaptive Claude model routing (skill, hook, plugin, gateway) with one command.",
   "bin": {
-    "cheaper": "bin/cheaper.js"
+    "cheaper": "bin/cheaper.js",
+    "cheaperapp": "bin/cheaper.js"
   },
   "scripts": {
     "test": "node bin/cheaper.js --help"
@@ -11,7 +12,10 @@
   "files": [
     "bin",
     "src",
-    "assets"
+    "assets/plugin",
+    "assets/gateway/app/*.py",
+    "assets/gateway/requirements.txt",
+    "assets/gateway/.env.example"
   ],
   "engines": {
     "node": ">=16"

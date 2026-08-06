@@ -75,6 +75,9 @@ const FAMILIES = {
 // tier name (haiku|sonnet|opus) -> pricing bucket (cheap|mid|top)
 const BUCKET = { haiku: 'cheap', sonnet: 'mid', opus: 'top' };
 
+// Returns null for models we don't actually recognize. That is deliberate: an
+// unknown model must be UNPRICEABLE (saved=0), never priced against arbitrary
+// 'other' rates and reported as a saving that didn't happen.
 function detectFamily(modelId) {
   const m = String(modelId || '').toLowerCase();
   if (!m) return null;
@@ -86,7 +89,7 @@ function detectFamily(modelId) {
   if (/qwen|qwq/.test(m)) return 'qwen';
   if (/(llama|meta-llama)/.test(m)) return 'meta';
   if (/(mistral|mixtral|codestral|ministral)/.test(m)) return 'mistral';
-  return 'other';
+  return null; // unrecognized -> unpriceable
 }
 
 function rate(family, tierName) {
