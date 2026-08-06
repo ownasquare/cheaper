@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cheaperapp",
+  "account_id": "84a701a23afcd1b863bbf7f1b29bafa2",
+  "compatibility_date": "2026-08-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "cheaper.app",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.cheaper.app",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "./web",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

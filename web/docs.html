@@ -1,0 +1,75 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Docs — Cheaper</title><meta name="description" content="Install Cheaper, route your calls, and watch the savings.">
+<link rel="stylesheet" href="style.css"><script>try{var _t=localStorage.getItem("cheaper-theme")}catch(e){}document.documentElement.setAttribute("data-theme",(typeof _t!=="undefined"&&_t)||"light");</script>
+</head><body>
+<div class="wrap"><nav>
+  <a class="brand" href="index.html">Cheap<span class="a">er</span></a>
+  <div class="navlinks">
+    <a href="docs.html">Docs</a>
+    <a href="changelog.html">Changelog</a>
+    <a href="claude-code-savings-tracker.html">Trackers</a>
+    <a href="compare/ccusage.html">Compare</a>
+    <a href="https://github.com/ownasquare/cheaper">GitHub</a>
+    <a href="https://discord.gg/">Discord</a>
+  </div>
+  <div class="navright"><a class="stars" href="https://github.com/ownasquare/cheaper">★ GitHub</a></div>
+</nav>
+<div class="page">
+<div class="pill">Documentation</div>
+<h1>Docs</h1>
+<p class="lead">Install Cheaper, route your calls, and watch the savings.</p>
+<h2>Install</h2>
+<pre><code>npx cheaperapp install --all</code></pre>
+<p>The installer lets you pick components: the <b>skill</b> (routing procedure), the
+<b>hook</b> (always-on policy), the <b>plugin</b> (skill + hook + tiered agents), and the
+<b>gateway</b> (the proxy that routes every API call).</p>
+<h2>Run the gateway</h2>
+<pre><code>cheaper gateway start
+export ANTHROPIC_BASE_URL=http://localhost:8787
+cheaper monitor            # live downgrade-rate + estimated savings</code></pre>
+<h2>How routing decides</h2>
+<p>Each request is classified: simple work runs on the cheapest tier; auto-escalate categories
+(concurrency, security, proofs, hard debugging, high-stakes judgment, dense synthesis) jump straight
+to the top tier. By default the model your client requested is a <b>ceiling</b> — Cheaper only ever
+downgrades, never overspends. Set <code>ROUTER_ALLOW_UPGRADE=true</code> for full adaptive upgrades.</p>
+<h2>Where it applies</h2>
+<p>The gateway covers any client that can set <code>ANTHROPIC_BASE_URL</code> (Claude Code, the SDKs,
+your own apps). For the Claude desktop app, the plugin (skill + hook + tiered agents) is the lever, since
+that app doesn't expose a custom base URL.</p>
+<h2>Config</h2>
+<p>Env vars: <code>ROUTER_MODE</code>, <code>ROUTER_MODEL_HAIKU/SONNET/OPUS</code>,
+<code>ROUTER_ALLOW_UPGRADE</code>, <code>ROUTER_MIN_TIER</code>, <code>CHEAPER_DB</code>. See the repo's
+<a class="link" href="https://github.com/ownasquare/cheaper">README</a>.</p>
+</div>
+</div>
+<footer><div class="wrap"><div class="fgrid">
+  <div class="fcol">
+    <div class="fbrand">Cheap<span class="a">er</span></div>
+    <div class="fnote">Adaptive Claude model routing. Cheap by default, sharp when it counts.</div>
+    <div class="fnote">An <a class="link" href="https://ownasquare.com">Own a Square</a> project.</div>
+  </div>
+  <div class="fcol"><h4>Product</h4>
+    <a href="docs.html">Docs</a><a href="changelog.html">Changelog</a>
+    <a href="https://github.com/ownasquare/cheaper/blob/main/LICENSE">License (MIT)</a></div>
+  <div class="fcol"><h4>Trackers</h4>
+    <a href="claude-code-savings-tracker.html">Claude Code</a>
+    <a href="cursor-savings.html">Cursor</a>
+    <a href="codex-savings.html">Codex</a>
+    <a href="ai-tokens-savings-tracker.html">AI tokens</a></div>
+  <div class="fcol"><h4>Compare</h4>
+    <a href="compare/ccusage.html">vs ccusage</a>
+    <a href="compare/rtk.html">vs rtk</a>
+    <a href="compare/graphify.html">vs graphify</a></div>
+  <div class="fcol"><h4>Community</h4>
+    <a href="https://github.com/ownasquare/cheaper">GitHub</a><a href="https://www.npmjs.com/package/cheaperapp">npm</a>
+    <a href="https://discord.gg/">Discord</a><a href="https://github.com/sponsors/cheaperapp">Sponsor</a></div>
+</div>
+<div class="fbar"><div>© 2026 Own a Square · Cheaper</div>
+  <div>
+    <a href="https://x.com/_cheaperapp">X</a> ·
+    <a href="https://www.youtube.com/@cheaperapp">YouTube</a> ·
+    <a href="https://www.linkedin.com/showcase/cheaperapp">LinkedIn</a>
+  </div></div></div></footer>
+<script src="theme.js" defer></script>
+</body></html>

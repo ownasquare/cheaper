@@ -1,0 +1,27 @@
+{
+  "description": "Adaptive model router — inject the routing policy on session start and every prompt so triage-and-escalate stays active.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/context/router-policy.md\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/context/router-policy.md\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

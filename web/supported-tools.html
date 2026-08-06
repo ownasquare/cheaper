@@ -1,0 +1,88 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Supported tools — Cheaper</title>
+<meta name="description" content="Cheaper routes any AI coding tool that can point at a custom base URL — via the Anthropic or OpenAI-compatible API.">
+<link rel="stylesheet" href="style.css">
+<script>try{var _t=localStorage.getItem("cheaper-theme")}catch(e){}document.documentElement.setAttribute("data-theme",(typeof _t!=="undefined"&&_t)||"light");</script>
+</head><body>
+<div class="wrap">
+<nav>
+  <a class="brand" href="index.html">Cheap<span class="a">er</span></a>
+  <div class="navlinks">
+    <a href="docs.html">Docs</a><a href="changelog.html">Changelog</a>
+    <a href="claude-code-savings-tracker.html">Trackers</a>
+    <a href="supported-tools.html">Tools</a>
+    <a href="compare/ccusage.html">Compare</a>
+    <a href="https://github.com/ownasquare/cheaper">GitHub</a>
+  </div>
+  <div class="navright"><a class="stars" href="https://github.com/ownasquare/cheaper">★ GitHub</a></div>
+</nav>
+
+<div class="page">
+<div class="pill">Supported tools</div>
+<h1>Route more than Claude</h1>
+<p class="lead">Cheaper is a gateway that speaks two protocols — the Anthropic Messages API and the
+OpenAI-compatible Chat Completions API — so any tool that lets you set a custom base URL can route
+through it and get cheaper-by-default model selection.</p>
+
+<p>The rule of thumb: if a tool exposes a <b>base URL</b> (or "custom endpoint") setting, point it at
+your running gateway (<code>http://localhost:8787</code>) using the matching protocol below. Your own
+API key still flows straight through to the provider.</p>
+
+<h2>Connect via the Anthropic API</h2>
+<p>Set <code>ANTHROPIC_BASE_URL=http://localhost:8787</code>.</p>
+<div class="toolgrid">
+  <div class="t">Claude <small>· Claude Code</small></div>
+  <div class="t">Anthropic SDKs <small>· your apps</small></div>
+  <div class="t">Cline <small>· Anthropic mode</small></div>
+</div>
+
+<h2>Connect via the OpenAI-compatible API</h2>
+<p>Point the tool's OpenAI base URL at <code>http://localhost:8787</code> (endpoint
+<code>/v1/chat/completions</code>).</p>
+<div class="toolgrid">
+  <div class="t">Codex</div><div class="t">Cursor</div><div class="t">Copilot</div>
+  <div class="t">Goose</div><div class="t">OpenCode</div><div class="t">Kilo Code</div>
+  <div class="t">Roo Code</div><div class="t">Cursor Agent</div><div class="t">Kiro</div>
+  <div class="t">Qwen</div><div class="t">Antigravity</div><div class="t">Crush</div>
+  <div class="t">Droid</div><div class="t">Pi</div><div class="t">OpenClaw</div>
+  <div class="t">OMP</div><div class="t">Gemini <small>· OpenAI-compat mode</small></div>
+</div>
+
+<h2>How much a tool is "supported"</h2>
+<p>Coverage depends on the tool, not on Cheaper:</p>
+<table>
+  <tr><th>Situation</th><th>Result</th></tr>
+  <tr><td>Tool lets you set an Anthropic or OpenAI base URL</td><td class="yes">Fully routed + monitored</td></tr>
+  <tr><td>Tool speaks a native, non-OpenAI protocol (e.g. Google Gemini) with no compat mode</td><td class="no">Needs a protocol adapter (planned)</td></tr>
+  <tr><td>Tool hard-codes its endpoint with no custom base URL</td><td class="no">Not routable by any proxy</td></tr>
+</table>
+<p class="fnote">Tool names are the vendors' marks, listed to show interoperability. Exact settings (env var vs.
+config file) differ per tool — check each tool's own docs for where to set the base URL. Where a tool
+only speaks a provider protocol Cheaper doesn't yet translate, an adapter is on the roadmap; the
+Anthropic and OpenAI-compatible front-ends ship today.</p>
+<p><a class="link" href="docs.html">Set up the gateway →</a></p>
+</div>
+</div>
+
+<footer><div class="wrap"><div class="fgrid">
+  <div class="fcol"><div class="fbrand">Cheap<span class="a">er</span></div>
+    <div class="fnote">Adaptive model routing. Cheap by default, sharp when it counts.</div>
+    <div class="fnote">An <a class="link" href="https://ownasquare.com">Own a Square</a> project.</div></div>
+  <div class="fcol"><h4>Product</h4><a href="docs.html">Docs</a><a href="changelog.html">Changelog</a>
+    <a href="supported-tools.html">Supported tools</a>
+    <a href="https://github.com/ownasquare/cheaper/blob/main/LICENSE">License (MIT)</a></div>
+  <div class="fcol"><h4>Trackers</h4><a href="claude-code-savings-tracker.html">Claude Code</a>
+    <a href="cursor-savings.html">Cursor</a><a href="codex-savings.html">Codex</a>
+    <a href="ai-tokens-savings-tracker.html">AI tokens</a></div>
+  <div class="fcol"><h4>Compare</h4><a href="compare/ccusage.html">vs ccusage</a>
+    <a href="compare/rtk.html">vs rtk</a><a href="compare/graphify.html">vs graphify</a></div>
+  <div class="fcol"><h4>Community</h4><a href="https://github.com/ownasquare/cheaper">GitHub</a>
+    <a href="https://www.npmjs.com/package/cheaperapp">npm</a><a href="https://discord.gg/">Discord</a>
+    <a href="https://github.com/sponsors/cheaperapp">Sponsor</a></div>
+</div>
+<div class="fbar"><div>© 2026 Own a Square · Cheaper</div>
+  <div><a href="https://x.com/_cheaperapp">X</a> · <a href="https://www.youtube.com/@cheaperapp">YouTube</a> ·
+  <a href="https://www.linkedin.com/showcase/cheaperapp">LinkedIn</a></div></div></div></footer>
+<script src="theme.js" defer></script>
+</body></html>

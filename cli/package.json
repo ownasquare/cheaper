@@ -1,0 +1,29 @@
+{
+  "name": "cheaperapp",
+  "version": "0.1.0",
+  "description": "Cheaper \u2014 install and run adaptive Claude model routing (skill, hook, plugin, gateway) with one command.",
+  "bin": {
+    "cheaper": "bin/cheaper.js"
+  },
+  "scripts": {
+    "test": "node bin/cheaper.js --help"
+  },
+  "files": [
+    "bin",
+    "src",
+    "assets"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "claude",
+    "anthropic",
+    "model-routing",
+    "cost",
+    "gateway",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Beladed"
+}

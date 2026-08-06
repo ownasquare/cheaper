@@ -1,0 +1,9 @@
+{
+  "name": "adaptive-model-router",
+  "version": "0.2.0",
+  "description": "Always-on adaptive model routing: triage each request with the cheapest model first and escalate to a stronger one only when warranted, and size spawned subtask agents by complexity. Bundles the routing skill plus a hook that keeps the policy active every turn.",
+  "author": {
+    "name": "Beladed"
+  },
+  "keywords": ["model-routing", "cost-optimization", "triage", "subagents", "adaptive"]
+}

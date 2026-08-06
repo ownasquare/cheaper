@@ -1,0 +1,136 @@
+name: Release
+
+# Push a version tag to build all installers, publish a GitHub Release, upload the
+# installers to Cloudflare R2 (served at https://dl.cheaper.app), and publish the CLI.
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Repository secrets:
+#   CLOUDFLARE_API_TOKEN   - R2 write token for the ownasquare account (Workers R2 Storage: Edit)
+#   CLOUDFLARE_ACCOUNT_ID  - 84a701a23afcd1b863bbf7f1b29bafa2
+#   NPM_TOKEN              - (optional) npm automation token to publish `cheaperapp`
+# Optional signing: CSC_LINK/CSC_KEY_PASSWORD (macOS), WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD (Windows).
+# The R2 bucket is expected to be named "cheaper-downloads".
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-installers:
+    name: Build installers (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            script: "dist:mac"
+          - os: windows-latest
+            script: "dist:win"
+          - os: ubuntu-latest
+            script: "dist:linux"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install rpm tooling (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm install
+      - name: Build installers
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: npm run ${{ matrix.script }}
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.exe
+            desktop/dist/*.deb
+            desktop/dist/*.rpm
+            desktop/dist/*.AppImage
+
+  release:
+    name: GitHub Release + R2 upload
+    needs: build-installers
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_BUCKET: cheaper-downloads
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release and attach installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Cheaper ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            artifacts/*
+
+      - name: Upload installers to R2 under stable keys
+        if: ${{ env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          set -euo pipefail
+          put() {  # $1 = glob, $2 = stable R2 key
+            local f
+            f=$(ls artifacts/$1 2>/dev/null | head -n1 || true)
+            if [ -z "$f" ]; then echo "::warning::no file for $1 -> $2"; return; fi
+            echo "Uploading $f -> r2://$R2_BUCKET/$2"
+            npx --yes wrangler@4 r2 object put "$R2_BUCKET/$2" --file "$f" --remote
+          }
+          put "*arm64.dmg"  "cheaper-macos-arm64.dmg"
+          put "*x64.dmg"    "cheaper-macos-x64.dmg"
+          put "*.exe"       "cheaper-windows-x64.exe"
+          put "*.deb"       "cheaper-linux-amd64.deb"
+          put "*.rpm"       "cheaper-linux-x86_64.rpm"
+
+  publish-npm:
+    name: Publish cheaperapp to npm
+    needs: build-installers
+    runs-on: ubuntu-latest
+    env:
+      HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: env.HAS_NPM == 'true'
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - name: Verify tag matches package version
+        if: env.HAS_NPM == 'true'
+        working-directory: cli
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::Tag '$TAG' != cli/package.json version '$PKG'"; exit 1
+          fi
+      - name: Publish
+        if: env.HAS_NPM == 'true'
+        working-directory: cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
