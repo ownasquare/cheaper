@@ -136,9 +136,29 @@ test('realized savings: sub-agent calls below the ceiling model are credited', (
   // haiku saved: (15+75)-(1+5)=84 ; sonnet saved: (15+75)-(3+15)=72 ; total 156.
   assert.ok(Math.abs(r.dollarsSaved - 156) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
   assert.equal(r.tokensSaved, 4_000_000); // 2M haiku + 2M sonnet
+  // The breakdown reports ONLY the routed-cheaper tiers, not the opus main loop.
+  assert.deepEqual(r.savedTierHist, { haiku: 1, sonnet: 1, opus: 0 });
   const line = buildTagline(r);
   assert.match(line, /^Cheaper\.app saved ~\$156 and 4\.0M tokens by using /);
-  assert.match(line, /haiku tier for 1 call, sonnet tier for 1 call, opus tier for 1 call\.$/);
+  assert.match(line, /haiku tier for 1 call and sonnet tier for 1 call instead of opus\.$/);
+});
+
+test('breakdown excludes the un-routed main loop — only routed-cheaper tiers are claimed', () => {
+  // Mirrors this real session: a big Opus main loop Cheaper did NOT route, a few Opus
+  // sub-agent escalations, and the Sonnet sub-agents that actually saved money.
+  const recs = [];
+  for (let i = 0; i < 168; i++) recs.push(rec('claude-opus-4', 'user', 1000, 1000));      // main loop (ceiling)
+  for (let i = 0; i < 7; i++) recs.push(rec('claude-opus-4', 'subagent', 1000, 1000));     // opus escalations
+  for (let i = 0; i < 12; i++) recs.push(rec('claude-sonnet-4-5', 'subagent', 20000, 3000)); // the savings
+  const r = realizedFromRecords(recs);
+  assert.equal(r.ceilingTier, 'opus');
+  assert.equal(r.savedTierHist.sonnet, 12);
+  assert.equal(r.savedTierHist.opus, 0);        // Opus is never a "saving"
+  assert.equal(r.belowCeilingCalls, 12);
+  const line = buildTagline(r);
+  // The 175 Opus calls MUST NOT be claimed as "opus tier for 175 calls".
+  assert.ok(!/opus tier for/.test(line), 'main-loop opus must not be claimed: ' + line);
+  assert.match(line, /by using sonnet tier for 12 calls instead of opus\.$/);
 });
 
 test('honesty: a chat with no downgrade claims no dollars (brand line only)', () => {
@@ -159,10 +179,10 @@ test('honesty: unknown models are unpriceable and never invent a saving', () => 
 
 test('exact (gateway) savings drop the "~"; estimate keeps it', () => {
   const est = buildTagline({ ceilingTier: 'opus', dollarsSaved: 1.23, tokensSaved: 3e6,
-    belowCeilingCalls: 4, tierHist: { haiku: 3, sonnet: 1, opus: 1 }, exact: false });
+    belowCeilingCalls: 4, savedTierHist: { haiku: 3, sonnet: 1, opus: 0 }, exact: false });
   assert.match(est, /saved ~\$1\.23 and 3\.0M tokens/);
   const exact = buildTagline({ ceilingTier: 'opus', dollarsSaved: 1.23, tokensSaved: 3e6,
-    belowCeilingCalls: 4, tierHist: { haiku: 3, sonnet: 1, opus: 1 }, exact: true });
+    belowCeilingCalls: 4, savedTierHist: { haiku: 3, sonnet: 1, opus: 0 }, exact: true });
   assert.match(exact, /saved \$1\.23 and 3\.0M tokens/);
   assert.ok(!exact.includes('~'));
 });
@@ -178,11 +198,12 @@ test('fromGateway maps a session-filtered summary to the tagline shape', () => {
     dollars: { saved: 1.23 },
     counts: { models_changed: 4 },
     tokens: { downgraded: 3_000_000 }, // gateway's exact tokens-on-downgraded-rows
+    downgraded_by_tier: { haiku: 3, sonnet: 1, opus: 0 }, // the money-saving rows
   });
   assert.equal(g.exact, true);
   assert.equal(g.dollarsSaved, 1.23);
   assert.equal(g.tokensSaved, 3_000_000); // straight from tokens.downgraded
-  assert.deepEqual(g.tierHist, { haiku: 3, sonnet: 1, opus: 1 });
+  assert.deepEqual(g.savedTierHist, { haiku: 3, sonnet: 1, opus: 0 }); // routed-cheaper only
 });
 
 test('gateway uniform-downgrade never prints "$X and 0 tokens"', () => {
@@ -210,7 +231,7 @@ test('sub-cent savings round away — no "$0.00 saved" claim', () => {
 
 test('an exact sub-cent saving (0.5c–1c) is suppressed, not rounded up to $0.01', () => {
   const r = { exact: true, dollarsSaved: 0.006, tokensSaved: 20, belowCeilingCalls: 1,
-    tierHist: { haiku: 1, sonnet: 0, opus: 1 }, ceilingTier: 'opus', topTier: 'opus' };
+    savedTierHist: { haiku: 1, sonnet: 0, opus: 0 }, ceilingTier: 'opus', topTier: 'opus' };
   const line = buildTagline(r);
   assert.ok(!line.includes('$0.01'), 'must not present $0.006 as an exact $0.01: ' + line);
   assert.match(line, /kept this chat on the opus tier/);

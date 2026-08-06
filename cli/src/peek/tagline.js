@@ -63,7 +63,8 @@ function realizedFromRecords(records) {
   }
   const ceilingTier = TIERS[ceilingRank];
 
-  const tierHist = { haiku: 0, sonnet: 0, opus: 0 };
+  const tierHist = { haiku: 0, sonnet: 0, opus: 0 };       // every priced call (diagnostics only)
+  const savedTierHist = { haiku: 0, sonnet: 0, opus: 0 };  // ONLY the calls Cheaper routed cheaper
   let dollarsSaved = 0, tokensSaved = 0, belowCeilingCalls = 0, topRank = ceilingRank;
   for (const r of priced) {
     const fam = detectFamily(r.model);
@@ -72,12 +73,15 @@ function realizedFromRecords(records) {
     if (rank(t) > topRank) topRank = rank(t); // a subagent above the user ceiling still ran
     const inTok = r.inTokens || 0, outTok = r.outTokens || 0;
     if (rank(t) < ceilingRank) {
+      // A call routed BELOW the session ceiling — i.e. work Cheaper delegated to a
+      // cheaper tier. The main loop runs AT the ceiling and is the baseline, never a
+      // "routed" call, so it is deliberately excluded from the savings breakdown.
       const save = costOf(ceilingFamily, ceilingTier, inTok, outTok) - costOf(fam, t, inTok, outTok);
-      if (save > 0) { dollarsSaved += save; tokensSaved += inTok + outTok; belowCeilingCalls++; }
+      if (save > 0) { dollarsSaved += save; tokensSaved += inTok + outTok; belowCeilingCalls++; savedTierHist[t]++; }
     }
   }
   return { ceilingTier, topTier: TIERS[topRank], dollarsSaved, tokensSaved, belowCeilingCalls,
-           tierHist, calls: priced.length, exact: false };
+           tierHist, savedTierHist, calls: priced.length, exact: false };
 }
 
 // Same shape, from the running gateway's EXACT session-filtered metrics summary.
@@ -96,6 +100,18 @@ function fromGateway(summary) {
   const topTier = TIERS[topRank];
   const dollarsSaved = (summary.dollars && summary.dollars.saved) || 0;
   const belowCeilingCalls = (summary.counts && summary.counts.models_changed) || 0;
+  // Per-tier histogram of the DOWNGRADED (money-saving) rows only — what Cheaper
+  // actually routed to a cheaper tier, never the calls that ran at the requested
+  // ceiling. Prefer the gateway's exact figure; fall back for an older gateway.
+  const savedTierHist = { haiku: 0, sonnet: 0, opus: 0 };
+  const dbt = summary.downgraded_by_tier;
+  if (dbt) {
+    for (const t of TIERS) savedTierHist[t] = dbt[t] || 0;
+  } else {
+    for (const t of present) if (rank(t) < topRank) savedTierHist[t] = (byTier[t] && byTier[t].count) || 0;
+    const below = TIERS.reduce((s, t) => s + savedTierHist[t], 0);
+    if (below === 0 && belowCeilingCalls > 0) savedTierHist[present[0]] = belowCeilingCalls; // uniform downgrade
+  }
   // Tokens attributable to routing. The gateway's dollarsSaved uses a
   // requested-vs-spent baseline, so tokensSaved must NOT be derived from run-tier
   // histograms (that yields "$X and 0 tokens" on a uniformly-downgraded session).
@@ -106,7 +122,7 @@ function fromGateway(summary) {
     for (const t of present) { const d = byTier[t] || {}; tokensSaved += (d.in_tokens || 0) + (d.out_tokens || 0); }
   }
   return { ceilingTier: topTier, topTier, dollarsSaved, tokensSaved, belowCeilingCalls,
-           tierHist, calls: summary.total || 0, exact: true };
+           tierHist, savedTierHist, calls: summary.total || 0, exact: true };
 }
 
 // Best-effort GET to the local gateway for exact, session-scoped metrics. Resolves
@@ -143,23 +159,34 @@ function collectSessionRecords(opts) {
 }
 
 // The branded line — or '' when there is genuinely nothing to say.
+function joinAnd(parts) {
+  if (parts.length <= 1) return parts.join('');
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
 function buildTagline(r) {
   if (!r) return '';
-  const tierParts = [];
+  // The breakdown reports ONLY the tiers Cheaper routed cheaper work to (the savings
+  // drivers) — never the main-loop / ceiling calls, which Cheaper did not route and
+  // which would otherwise balloon the count while the savings stay flat.
+  const parts = [];
   for (const t of TIERS) {
-    const n = (r.tierHist && r.tierHist[t]) || 0;
-    if (n > 0) tierParts.push(`${t} tier for ${n} call${n === 1 ? '' : 's'}`);
+    const n = (r.savedTierHist && r.savedTierHist[t]) || 0;
+    if (n > 0) parts.push(`${t} tier for ${n} call${n === 1 ? '' : 's'}`);
   }
   const realSaving = r.dollarsSaved >= SHOW_MIN_USD && r.belowCeilingCalls > 0 &&
-    r.tokensSaved > 0 && tierParts.length > 0;
+    r.tokensSaved > 0 && parts.length > 0;
   if (realSaving) {
     const amt = (r.exact ? '' : '~') + money(r.dollarsSaved);
-    return `Cheaper.app saved ${amt} and ${fmtTokens(r.tokensSaved)} tokens by using ${tierParts.join(', ')}.`;
+    const savedTop = Math.max(...TIERS.filter((t) => (r.savedTierHist[t] || 0) > 0).map(rank));
+    const base = (r.ceilingTier && rank(r.ceilingTier) > savedTop) ? ` instead of ${r.ceilingTier}` : '';
+    return `Cheaper.app saved ${amt} and ${fmtTokens(r.tokensSaved)} tokens by using ${joinAnd(parts)}${base}.`;
   }
   // No cheaper routing this chat: name the ACTUAL top tier that ran (a subagent may
   // have run above the user-turn ceiling), never understate it.
   const keptTier = r.topTier || r.ceilingTier;
-  if (tierParts.length && keptTier) {
+  if (keptTier) {
     return `Cheaper.app kept this chat on the ${keptTier} tier — no cheaper routing was warranted.`;
   }
   return '';

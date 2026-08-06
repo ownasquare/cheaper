@@ -92,10 +92,16 @@ New: `cli/src/peek/tagline.js`, `cli/src/tagline_install.js`, `cli/test/tagline_
 
 ## Validation / proof
 
-- **Unit:** `node --test cli/test/` → **22/22 pass** (realized-savings math, ceiling logic,
+- **Unit:** `node --test cli/test/` → **23/23 pass** (realized-savings math, ceiling logic,
   cross-family pricing, `~`-vs-exact invariant, unknown-model exclusion, sub-cent suppression,
   gateway uniform-downgrade tokens, true-top-tier brand line, session/`--transcript`/`--current`
-  scoping, **sub-agent-transcript inclusion**, installer idempotency + removal, Cursor `.mdc`).
+  scoping, sub-agent-transcript inclusion, **main-loop-excluded breakdown**, installer
+  idempotency + removal, Cursor `.mdc`).
+- **Breakdown honesty (v0.2.3):** the line's tier breakdown lists ONLY the calls Cheaper
+  routed to a cheaper tier (`savedTierHist`), never the un-routed main-loop / ceiling calls —
+  a plugin/skill can't change the session model, so counting the main loop as "Cheaper using
+  opus" overstated its role and made the count balloon while savings stayed flat. Now:
+  `by using sonnet tier for 12 calls instead of opus`. Gateway path gets `downgraded_by_tier`.
 - **Sub-agent attribution (v0.2.2):** a chat's sub-agents live under a sibling `<id>/` dir;
   `--current` and the Stop hook's `--transcript` now scope by session id so those (usually
   Sonnet/Haiku) savings roll into the chat total instead of measuring only the Opus main loop.

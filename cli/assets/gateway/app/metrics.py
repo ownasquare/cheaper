@@ -164,6 +164,7 @@ class Metrics:
         ts_acc: dict = {}
         models_changed = 0
         tokens_downgraded = 0
+        downgraded_by_tier = {"haiku": 0, "sonnet": 0, "opus": 0}
         reasoning_opps = 0
         tokens_saved_potential = 0
         time_saved_model = 0.0
@@ -191,6 +192,7 @@ class Metrics:
                     a["down"] += 1
                     models_changed += 1
                     tokens_downgraded += it + ot
+                    downgraded_by_tier[tier] = downgraded_by_tier.get(tier, 0) + 1
                 b = int(ts // ts_bucket) * ts_bucket
                 g = ts_acc.setdefault(b, {"t": b, "saved": 0.0, "spent": 0.0, "calls": 0})
                 g["saved"] += saved
@@ -249,6 +251,9 @@ class Metrics:
             },
             "tokens": {"saved_reasoning_potential": tokens_saved_potential,
                        "downgraded": tokens_downgraded},
+            # Per-tier count of the DOWNGRADED (money-saving) rows — what Cheaper routed
+            # to cheaper tiers, so the tagline breakdown excludes at-ceiling main-loop calls.
+            "downgraded_by_tier": downgraded_by_tier,
             "time": {
                 "saved_model_s": round(time_saved_model, 1),
                 "saved_reasoning_potential_s": round(time_saved_reasoning, 1),

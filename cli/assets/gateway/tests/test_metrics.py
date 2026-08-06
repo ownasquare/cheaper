@@ -72,6 +72,7 @@ def test_tokens_downgraded_is_reported():
                      requested_tier="opus", reason="s", in_tokens=1000, out_tokens=500, session="c")
         s = m.summary(session="c")
         assert s["tokens"]["downgraded"] == 6000  # 4 rows * (1000+500)
+        assert s["downgraded_by_tier"] == {"haiku": 4, "sonnet": 0, "opus": 0}
 
 
 def test_old_db_without_session_column_still_records():

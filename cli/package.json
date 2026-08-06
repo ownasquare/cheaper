@@ -1,6 +1,6 @@
 {
   "name": "cheaper",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Cheaper — install and run adaptive Claude model routing (skill, hook, plugin, gateway) with one command.",
   "bin": {
     "cheaper": "bin/cheaper.js"
