@@ -292,3 +292,48 @@ test('scoping: --transcript / --session / --current read exactly one chat', () =
     delete require.cache[require.resolve('../src/peek/adapters')];
   }
 });
+
+test('scoping rolls in the session\'s own sub-agent transcripts (Claude Code)', () => {
+  // A chat's sub-agents live in a sibling <id>/ dir; their savings MUST be credited,
+  // else a chat that delegated to cheaper tiers reports $0 (measuring only the main loop).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-sub-'));
+  const proj = path.join(dir, '.claude', 'projects', 'demo');
+  const subs = path.join(proj, 'ses01', 'subagents');
+  fs.mkdirSync(subs, { recursive: true });
+  const mk = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+  // Main transcript: one Opus turn (the ceiling).
+  fs.writeFileSync(path.join(proj, 'ses01.jsonl'), mk([
+    { type: 'assistant', isSidechain: false, message: { id: 'm', role: 'assistant', model: 'claude-opus-4',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:00Z' },
+  ]));
+  // A SEPARATE sub-agent transcript for the same session: a Haiku worker below the ceiling.
+  fs.writeFileSync(path.join(subs, 'agent-1.jsonl'), mk([
+    { type: 'assistant', message: { id: 's', role: 'assistant', model: 'claude-haiku-4-5',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:05Z' },
+  ]));
+  const saved = process.env.CHEAPER_PEEK_HOME;
+  process.env.CHEAPER_PEEK_HOME = dir;
+  try {
+    delete require.cache[require.resolve('../src/peek/fsutil')];
+    delete require.cache[require.resolve('../src/peek/adapters')];
+    const { HARNESSES, collectHarness } = require('../src/peek/adapters');
+    const def = HARNESSES.find((d) => d.key === 'claude-code');
+
+    // --transcript of the MAIN file must pull in the sibling sub-agent transcript.
+    const t = collectHarness(def, { transcript: path.join(proj, 'ses01.jsonl') });
+    assert.equal(t.records.length, 2, 'main + sub-agent');
+    const rt = realizedFromRecords(t.records);
+    assert.ok(rt.dollarsSaved > 80, 'sub-agent savings credited: ' + rt.dollarsSaved);
+    assert.equal(rt.tierHist.haiku, 1);
+
+    // --session and --current give the same whole-session view.
+    assert.equal(collectHarness(def, { session: 'ses01' }).records.length, 2);
+    assert.equal(collectHarness(def, { current: true }).records.length, 2);
+  } finally {
+    if (saved === undefined) delete process.env.CHEAPER_PEEK_HOME;
+    else process.env.CHEAPER_PEEK_HOME = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete require.cache[require.resolve('../src/peek/fsutil')];
+    delete require.cache[require.resolve('../src/peek/adapters')];
+  }
+});

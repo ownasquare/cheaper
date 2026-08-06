@@ -92,39 +92,58 @@ const IS_SUB_PATH = /(^|[\/\\])subagents[\/\\]/;
 //   opts.current     — the newest PRIMARY (non-subagent) transcript = active chat.
 // With none of these set, scanning is unchanged (all history).
 function sessionStem(file) { return path.basename(String(file)).replace(/\.jsonl?$/i, ''); }
-function transcriptFiles(opts) {
-  const want = Array.isArray(opts.transcript) ? opts.transcript : [opts.transcript];
-  const out = [];
-  for (const p of want) { const abs = expand(p); if (p && exists(abs)) out.push({ file: abs, size: 0, mtime: 0 }); }
-  return out;
+
+// A single session id gathers the WHOLE conversation. Claude Code stores a chat's
+// main transcript at <project>/<id>.jsonl and that SAME chat's sub-agent transcripts
+// under a sibling <project>/<id>/ directory — both carry the id in their path. So
+// matching on the id rolls the sub-agent (Haiku/Sonnet) savings into the chat's
+// total, instead of measuring only the (usually top-tier) main loop and reporting $0.
+function fileMatchesSession(file, id) {
+  const f = String(file);
+  return sessionStem(f) === id || f.includes(id);
 }
-function scopeFiles(files, opts) {
-  if (opts.session) {
-    const id = String(opts.session);
-    return files.filter((f) => sessionStem(f.file) === id || String(f.file).includes(id));
+
+// Which session to scope to: an id string, null (no scoping — all history), or false
+// (--current asked but this harness has no top-level transcript here).
+function resolveSessionId(files, opts) {
+  if (opts.session) return String(opts.session);
+  if (opts.transcript) {
+    const first = Array.isArray(opts.transcript) ? opts.transcript[0] : opts.transcript;
+    return sessionStem(first);
   }
   if (opts.current) {
-    // Top-level transcripts only — never fall back to a subagent sidecar as "current"
-    // (that would report a spawned agent's usage as the chat's own).
+    // Current chat = the newest TOP-LEVEL transcript in THIS project (never a sub-agent
+    // sidecar, never another repo's concurrent chat). We then pull that id's sub-agents.
     const primary = files.filter((f) => !IS_SUB_PATH.test(f.file));
-    if (!primary.length) return [];
-    // Prefer the INVOKING project's own transcripts so a concurrent chat in a DIFFERENT
-    // repo (with a newer mtime) can't be misattributed as this chat. Claude Code names
-    // each project dir after the cwd ('/' and '.' -> '-'); harnesses that don't fall
-    // back to newest-overall (best effort — the Stop hook uses exact --transcript).
+    if (!primary.length) return false;
     const slug = String(process.cwd()).replace(/[/.]/g, '-');
     const inProject = slug ? primary.filter((f) => String(f.file).includes(slug)) : [];
-    const pool = inProject.length ? inProject : primary;
-    return [pool[0]]; // findFiles already sorted newest-first
+    const pool = inProject.length ? inProject : primary; // findFiles is newest-first
+    return sessionStem(pool[0].file);
   }
-  return files;
+  return null;
 }
-// The files a harness adapter should actually read under the current scope. An
-// explicit transcript path wins outright (no directory walk, works even if the
-// file is old or outside the recent-files cap).
+
+function filterFilesBySession(files, opts) {
+  const id = resolveSessionId(files, opts || {});
+  if (id === null) return files;   // unscoped
+  if (id === false) return [];     // --current with nothing here
+  return files.filter((f) => fileMatchesSession(f.file, id));
+}
+
+// The files a harness adapter should read under the current scope: the whole session
+// (main transcript + its sub-agent transcripts), or all history when unscoped.
 function scopedFiles(dir, opts, exts, findOpts) {
-  if (opts && opts.transcript) return transcriptFiles(opts);
-  return scopeFiles(findFiles(dir, exts, findOpts), opts || {});
+  const o = opts || {};
+  const hit = filterFilesBySession(findFiles(dir, exts, findOpts), o);
+  // Guarantee an explicit --transcript file is present even if the walk/cap missed it.
+  if (o.transcript && Array.isArray(hit)) {
+    for (const p of (Array.isArray(o.transcript) ? o.transcript : [o.transcript])) {
+      const abs = p && expand(p);
+      if (abs && exists(abs) && !hit.some((f) => f.file === abs)) hit.push({ file: abs, size: 0, mtime: 0 });
+    }
+  }
+  return hit;
 }
 
 // ---- Claude Code (~/.claude/projects/**/*.jsonl) ---------------------------
@@ -251,7 +270,7 @@ function collectGeneric(harness, dir, opts) {
   }
   // An explicit --transcript path is already consumed by the .jsonl pass above;
   // don't re-read it as a .json array too.
-  const json = (opts && opts.transcript) ? [] : scopeFiles(findFiles(root, ['.json'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays }), opts || {});
+  const json = (opts && opts.transcript) ? [] : filterFilesBySession(findFiles(root, ['.json'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays }), opts || {});
   for (const f of json) {
     const o = readJson(f.file);
     if (!o || typeof o !== 'object') continue;

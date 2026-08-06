@@ -92,10 +92,14 @@ New: `cli/src/peek/tagline.js`, `cli/src/tagline_install.js`, `cli/test/tagline_
 
 ## Validation / proof
 
-- **Unit:** `node --test cli/test/` → **21/21 pass** (realized-savings math, ceiling logic,
+- **Unit:** `node --test cli/test/` → **22/22 pass** (realized-savings math, ceiling logic,
   cross-family pricing, `~`-vs-exact invariant, unknown-model exclusion, sub-cent suppression,
   gateway uniform-downgrade tokens, true-top-tier brand line, session/`--transcript`/`--current`
-  scoping, installer idempotency + removal, Cursor `.mdc`).
+  scoping, **sub-agent-transcript inclusion**, installer idempotency + removal, Cursor `.mdc`).
+- **Sub-agent attribution (v0.2.2):** a chat's sub-agents live under a sibling `<id>/` dir;
+  `--current` and the Stop hook's `--transcript` now scope by session id so those (usually
+  Sonnet/Haiku) savings roll into the chat total instead of measuring only the Opus main loop.
+  Verified live on this session: `~$9.25 and 739.1K tokens … sonnet ×12, opus ×161`.
 - **Gateway:** `python3 -m pytest gateway/tests` → **23/23 pass** (incl. session-scoping,
   None-vs-empty semantics, `tokens.downgraded`, legacy-DB migration).
 - **Adversarial verification** (4-agent workflow, run `wf_6fd48327-7f4`): 12 findings (4 high),
