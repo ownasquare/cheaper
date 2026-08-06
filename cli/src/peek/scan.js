@@ -92,6 +92,10 @@ function scan(opts = {}) {
     sinceDays: opts.sinceDays || 0,
     limit: opts.limit || 3,
     only: opts.only || null, // restrict to one harness key
+    // Session scoping (used by `peek --tagline`): read only the current chat.
+    session: opts.session || null,       // a session id (transcript basename stem)
+    current: opts.current || false,      // newest primary transcript = active chat
+    transcript: opts.transcript || null, // an explicit transcript file path
   };
   const harnesses = [];
   for (const def of HARNESSES) {

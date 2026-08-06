@@ -128,8 +128,11 @@ async def healthz():
 
 
 @app.get("/metrics")
-async def metrics():
-    return JSONResponse(await asyncio.to_thread(METRICS.summary))
+async def metrics(request: Request):
+    # ?session=<id> scopes the summary to one chat — what `cheaper peek --tagline`
+    # requests so the end-of-chat line reports EXACT per-conversation savings.
+    session = request.query_params.get("session")
+    return JSONResponse(await asyncio.to_thread(METRICS.summary, session=session))
 
 
 @app.get("/peek")
@@ -179,6 +182,9 @@ async def messages(request: Request):
     raw = await request.body()
     headers = _fwd_headers(request)
     source = request.headers.get("x-cheaper-source") or request.headers.get("user-agent", "")[:60]
+    # Optional chat id the client forwards so per-chat savings can be attributed
+    # exactly (the end-of-chat tagline). Absent for clients that don't send it.
+    session = request.headers.get("x-cheaper-session") or request.headers.get("x-session-id") or ""
 
     if request.headers.get("x-router-bypass", "").lower() in ("1", "true", "yes"):
         return await _forward(ANTHROPIC_MSG_URL, raw, headers, request)
@@ -211,7 +217,8 @@ async def messages(request: Request):
         requested_tier=str(req_tier), reason=decision.reason, source=source,
         in_tokens=usage.get("input_tokens") or (text_len // 4),
         out_tokens=usage.get("output_tokens") or 0,
-        status=usage.get("status", 0), requested_effort=_extract_effort(body))
+        status=usage.get("status", 0), requested_effort=_extract_effort(body),
+        session=session)
     _notify_metrics()
     return resp
 
@@ -267,6 +274,7 @@ async def chat_completions(request: Request):
     headers = _fwd_headers(request)
     source = (request.headers.get("x-cheaper-source")
               or request.headers.get("user-agent", "")[:52]) + " (openai)"
+    session = request.headers.get("x-cheaper-session") or request.headers.get("x-session-id") or ""
 
     if request.headers.get("x-router-bypass", "").lower() in ("1", "true", "yes"):
         return await _forward(OPENAI_CHAT_URL, raw, headers, request)
@@ -294,7 +302,7 @@ async def chat_completions(request: Request):
         requested_tier="", reason=decision.reason, source=source,
         in_tokens=usage.get("input_tokens") or (text_len // 4),
         out_tokens=usage.get("output_tokens") or 0, status=usage.get("status", 0),
-        requested_effort=_extract_effort(body))
+        requested_effort=_extract_effort(body), session=session)
     _notify_metrics()
     return resp
 

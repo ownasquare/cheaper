@@ -16,8 +16,10 @@ For every new session (and every prompt within it), the hook puts the routing
 policy in front of Claude. Claude then triages: simple requests are handled at the
 cheapest level; correctness-critical or complex ones are delegated to a
 stronger-model subagent (Haiku → Sonnet → Opus). When Claude spawns agents for
-subtasks, each is sized to its subtask's difficulty. Replies are tagged with which
-tier handled them.
+subtasks, each is sized to its subtask's difficulty. Every completed reply ends
+with the **Cheaper.app savings line** — the real tokens and dollars this chat saved
+and which tiers did the work (via `cheaper peek --tagline`), with a `Stop`-hook
+backstop so it lands even if the model forgets.
 
 ## Honest limits
 

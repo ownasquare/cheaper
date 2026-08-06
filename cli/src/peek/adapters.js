@@ -14,6 +14,7 @@
 // are version-fragile and cumulative in places, so we estimate codex tokens from
 // text rather than risk an N× inflation.
 
+const path = require('path');
 const { findFiles, readJsonl, readJson, expand, exists } = require('./fsutil');
 const { execSync } = require('child_process');
 
@@ -83,11 +84,54 @@ function parseTs(v) {
 function estTokens(text) { return Math.max(1, Math.ceil((text || '').length / 4)); }
 const IS_SUB_PATH = /(^|[\/\\])subagents[\/\\]/;
 
+// ---- session / transcript scoping ------------------------------------------
+// `peek --tagline` reports ONE conversation, not all history. These helpers pare
+// a findFiles() result down to the chat we care about:
+//   opts.transcript  — an exact transcript file path (what a Stop hook passes).
+//   opts.session     — a session id; matches a transcript by basename stem.
+//   opts.current     — the newest PRIMARY (non-subagent) transcript = active chat.
+// With none of these set, scanning is unchanged (all history).
+function sessionStem(file) { return path.basename(String(file)).replace(/\.jsonl?$/i, ''); }
+function transcriptFiles(opts) {
+  const want = Array.isArray(opts.transcript) ? opts.transcript : [opts.transcript];
+  const out = [];
+  for (const p of want) { const abs = expand(p); if (p && exists(abs)) out.push({ file: abs, size: 0, mtime: 0 }); }
+  return out;
+}
+function scopeFiles(files, opts) {
+  if (opts.session) {
+    const id = String(opts.session);
+    return files.filter((f) => sessionStem(f.file) === id || String(f.file).includes(id));
+  }
+  if (opts.current) {
+    // Top-level transcripts only — never fall back to a subagent sidecar as "current"
+    // (that would report a spawned agent's usage as the chat's own).
+    const primary = files.filter((f) => !IS_SUB_PATH.test(f.file));
+    if (!primary.length) return [];
+    // Prefer the INVOKING project's own transcripts so a concurrent chat in a DIFFERENT
+    // repo (with a newer mtime) can't be misattributed as this chat. Claude Code names
+    // each project dir after the cwd ('/' and '.' -> '-'); harnesses that don't fall
+    // back to newest-overall (best effort — the Stop hook uses exact --transcript).
+    const slug = String(process.cwd()).replace(/[/.]/g, '-');
+    const inProject = slug ? primary.filter((f) => String(f.file).includes(slug)) : [];
+    const pool = inProject.length ? inProject : primary;
+    return [pool[0]]; // findFiles already sorted newest-first
+  }
+  return files;
+}
+// The files a harness adapter should actually read under the current scope. An
+// explicit transcript path wins outright (no directory walk, works even if the
+// file is old or outside the recent-files cap).
+function scopedFiles(dir, opts, exts, findOpts) {
+  if (opts && opts.transcript) return transcriptFiles(opts);
+  return scopeFiles(findFiles(dir, exts, findOpts), opts || {});
+}
+
 // ---- Claude Code (~/.claude/projects/**/*.jsonl) ---------------------------
 function collectClaudeCode(opts) {
   const dir = expand(process.env.CLAUDE_CONFIG_DIR ? process.env.CLAUDE_CONFIG_DIR + '/projects' : '~/.claude/projects');
   const records = [];
-  const files = findFiles(dir, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays, maxDepth: 5 });
+  const files = scopedFiles(dir, opts, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays, maxDepth: 5 });
   for (const f of files) {
     const subFile = IS_SUB_PATH.test(f.file);
     let lastUser = { text: '', ts: 0 };
@@ -132,9 +176,9 @@ function collectClaudeCode(opts) {
 // (codex token_count is cumulative/version-fragile — summing it would inflate).
 function collectCodex(opts) {
   const dir = expand(process.env.CODEX_HOME ? process.env.CODEX_HOME + '/sessions' : '~/.codex/sessions');
-  if (!exists(dir)) return { records: [], filesScanned: 0, note: 'no history directory found' };
   const records = [];
-  const files = findFiles(dir, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
+  const files = scopedFiles(dir, opts, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
+  if (!files.length) return { records: [], filesScanned: 0, note: exists(dir) ? '' : 'no history directory found' };
   for (const f of files) {
     let model = null;
     let lastUser = '';
@@ -192,9 +236,9 @@ function pushFromMessages(records, harness, messages, sessionModel, fileTs) {
 
 function collectGeneric(harness, dir, opts) {
   const root = expand(dir);
-  if (!exists(root)) return { records: [], filesScanned: 0, note: 'no history directory found' };
+  if (!exists(root) && !(opts && opts.transcript)) return { records: [], filesScanned: 0, note: 'no history directory found' };
   const records = [];
-  const jsonl = findFiles(root, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
+  const jsonl = scopedFiles(root, opts, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
   for (const f of jsonl) {
     let sessionModel = null;
     const turns = [];
@@ -205,7 +249,9 @@ function collectGeneric(harness, dir, opts) {
     });
     pushFromMessages(records, harness, turns, sessionModel, 0);
   }
-  const json = findFiles(root, ['.json'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays });
+  // An explicit --transcript path is already consumed by the .jsonl pass above;
+  // don't re-read it as a .json array too.
+  const json = (opts && opts.transcript) ? [] : scopeFiles(findFiles(root, ['.json'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays }), opts || {});
   for (const f of json) {
     const o = readJson(f.file);
     if (!o || typeof o !== 'object') continue;
@@ -227,6 +273,7 @@ const HARNESSES = [
   { key: 'grok', label: 'Grok', status: 'experimental', dir: '~/.grok', bin: 'grok' },
   { key: 'opencode', label: 'OpenCode', status: 'experimental', dir: '~/.local/share/opencode', bin: 'opencode' },
   { key: 'copilot', label: 'Copilot', status: 'experimental', dir: '~/.copilot', bin: 'copilot' },
+  { key: 'pi', label: 'PI.dev', status: 'experimental', dir: '~/.pi', bin: 'pi' },
   // No custom note: render.js prints the clean 'DB-backed (not yet readable)' fallback
   // for sqlite harnesses (matches the README sample and avoids a "Cursor … Cursor …"
   // double-word in the output).
@@ -240,4 +287,4 @@ function collectHarness(def, opts) {
   return { records: [], filesScanned: 0, note: 'no adapter' };
 }
 
-module.exports = { HARNESSES, collectHarness, isInstalled, pullUserText, parseTs, estTokens };
+module.exports = { HARNESSES, collectHarness, isInstalled, pullUserText, parseTs, estTokens, sessionStem };

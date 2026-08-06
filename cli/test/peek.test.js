@@ -10,6 +10,12 @@ const path = require('path');
 
 const { contentTier, modelTier, effectiveTier } = require('../src/peek/classify');
 const { estimateCall, detectFamily } = require('../src/peek/pricing');
+const { realizedFromRecords, buildTagline, fromGateway } = require('../src/peek/tagline');
+
+// Helper: a normalized call record as the adapters emit them.
+function rec(model, source, inTok = 1_000_000, outTok = 1_000_000) {
+  return { harness: 'claude-code', model, inTokens: inTok, outTokens: outTok, text: '', source };
+}
 
 test('classifier mirrors the router tiers', () => {
   assert.equal(contentTier('rename this variable').tier, 'haiku');
@@ -112,5 +118,177 @@ test('end-to-end scan over a synthetic fixture home', () => {
     delete require.cache[require.resolve('../src/peek/fsutil')];
     delete require.cache[require.resolve('../src/peek/adapters')];
     delete require.cache[require.resolve('../src/peek/scan')];
+  }
+});
+
+// ---- tagline: realized per-chat savings (baseline = the chat's ceiling tier) ----
+
+test('realized savings: sub-agent calls below the ceiling model are credited', () => {
+  // Main loop ran on Opus (the ceiling); Cheaper routed two sub-agents cheaper.
+  const r = realizedFromRecords([
+    rec('claude-opus-4', 'user'),      // ceiling = opus, no saving on itself
+    rec('claude-haiku-4-5', 'subagent'),
+    rec('claude-sonnet-4-5', 'subagent'),
+  ]);
+  assert.equal(r.ceilingTier, 'opus');
+  assert.equal(r.belowCeilingCalls, 2);
+  assert.deepEqual(r.tierHist, { haiku: 1, sonnet: 1, opus: 1 });
+  // haiku saved: (15+75)-(1+5)=84 ; sonnet saved: (15+75)-(3+15)=72 ; total 156.
+  assert.ok(Math.abs(r.dollarsSaved - 156) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
+  assert.equal(r.tokensSaved, 4_000_000); // 2M haiku + 2M sonnet
+  const line = buildTagline(r);
+  assert.match(line, /^Cheaper\.app saved ~\$156 and 4\.0M tokens by using /);
+  assert.match(line, /haiku tier for 1 call, sonnet tier for 1 call, opus tier for 1 call\.$/);
+});
+
+test('honesty: a chat with no downgrade claims no dollars (brand line only)', () => {
+  const r = realizedFromRecords([rec('claude-opus-4', 'user'), rec('claude-opus-4', 'subagent')]);
+  assert.equal(r.dollarsSaved, 0);
+  assert.equal(buildTagline(r), 'Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.');
+});
+
+test('honesty: unknown models are unpriceable and never invent a saving', () => {
+  // Ceiling is opus; the "cheap" call is an unknown model -> excluded, not credited.
+  const r = realizedFromRecords([rec('claude-opus-4', 'user'), rec('totally-made-up-model', 'subagent')]);
+  assert.equal(r.dollarsSaved, 0);
+  assert.equal(r.tierHist.haiku, 0);
+  // All-unknown -> nothing priceable -> null -> empty line.
+  assert.equal(realizedFromRecords([rec('totally-made-up-model', 'user')]), null);
+  assert.equal(buildTagline(null), '');
+});
+
+test('exact (gateway) savings drop the "~"; estimate keeps it', () => {
+  const est = buildTagline({ ceilingTier: 'opus', dollarsSaved: 1.23, tokensSaved: 3e6,
+    belowCeilingCalls: 4, tierHist: { haiku: 3, sonnet: 1, opus: 1 }, exact: false });
+  assert.match(est, /saved ~\$1\.23 and 3\.0M tokens/);
+  const exact = buildTagline({ ceilingTier: 'opus', dollarsSaved: 1.23, tokensSaved: 3e6,
+    belowCeilingCalls: 4, tierHist: { haiku: 3, sonnet: 1, opus: 1 }, exact: true });
+  assert.match(exact, /saved \$1\.23 and 3\.0M tokens/);
+  assert.ok(!exact.includes('~'));
+});
+
+test('fromGateway maps a session-filtered summary to the tagline shape', () => {
+  const g = fromGateway({
+    total: 5,
+    by_tier: {
+      haiku: { count: 3, in_tokens: 1e6, out_tokens: 1e6 },
+      sonnet: { count: 1, in_tokens: 5e5, out_tokens: 5e5 },
+      opus: { count: 1, in_tokens: 2e5, out_tokens: 2e5 },
+    },
+    dollars: { saved: 1.23 },
+    counts: { models_changed: 4 },
+    tokens: { downgraded: 3_000_000 }, // gateway's exact tokens-on-downgraded-rows
+  });
+  assert.equal(g.exact, true);
+  assert.equal(g.dollarsSaved, 1.23);
+  assert.equal(g.tokensSaved, 3_000_000); // straight from tokens.downgraded
+  assert.deepEqual(g.tierHist, { haiku: 3, sonnet: 1, opus: 1 });
+});
+
+test('gateway uniform-downgrade never prints "$X and 0 tokens"', () => {
+  // The core value-prop case: an opus-requesting session routed entirely to haiku.
+  const summary = {
+    total: 5,
+    by_tier: { haiku: { count: 5, in_tokens: 2e6, out_tokens: 1e6 } },
+    dollars: { saved: 4.2 },
+    counts: { models_changed: 5 },
+    // Old gateway without tokens.downgraded → fall back to processed tokens.
+  };
+  const g = fromGateway(summary);
+  assert.ok(g.tokensSaved > 0, 'tokensSaved must not be 0 when dollars were saved');
+  const line = buildTagline(g);
+  assert.ok(!line.includes('0 tokens'), 'no "0 tokens" contradiction: ' + line);
+  assert.match(line, /^Cheaper\.app saved \$4\.20 and 3\.0M tokens by using haiku tier for 5 calls\.$/);
+});
+
+test('sub-cent savings round away — no "$0.00 saved" claim', () => {
+  const r = realizedFromRecords([rec('claude-opus-4', 'user'),
+    rec('claude-haiku-4-5', 'subagent', 10, 10)]); // ~$0.0009 saved
+  assert.ok(r.dollarsSaved > 0 && r.dollarsSaved < 0.01);
+  assert.equal(buildTagline(r), 'Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.');
+});
+
+test('an exact sub-cent saving (0.5c–1c) is suppressed, not rounded up to $0.01', () => {
+  const r = { exact: true, dollarsSaved: 0.006, tokensSaved: 20, belowCeilingCalls: 1,
+    tierHist: { haiku: 1, sonnet: 0, opus: 1 }, ceilingTier: 'opus', topTier: 'opus' };
+  const line = buildTagline(r);
+  assert.ok(!line.includes('$0.01'), 'must not present $0.006 as an exact $0.01: ' + line);
+  assert.match(line, /kept this chat on the opus tier/);
+});
+
+test('cross-family: below-ceiling calls are priced at the ceiling MODEL, not the sub-task family', () => {
+  // Ceiling model is gemini-2.5-pro (google/opus tier). A Claude Haiku sub-agent below it
+  // must be credited (gemini-pro cost − haiku cost), NOT (Anthropic Opus − Anthropic Haiku).
+  const r = realizedFromRecords([
+    rec('gemini-2.5-pro', 'user'),        // google, opus tier → the ceiling
+    rec('claude-haiku-4-5', 'subagent'),  // anthropic, haiku tier → below ceiling
+  ]);
+  assert.equal(r.ceilingTier, 'opus');
+  // baseline = google opus (1.25 + 10) = 11.25 ; actual = anthropic haiku (1 + 5) = 6 ; saved 5.25.
+  assert.ok(Math.abs(r.dollarsSaved - 5.25) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
+  // NOT the fabricated $84 that anthropic-opus-vs-anthropic-haiku would give.
+  assert.ok(r.dollarsSaved < 10, 'must not invent Anthropic-Opus-scale savings: ' + r.dollarsSaved);
+});
+
+test('brand line names the true top tier when a subagent ran above the user ceiling', () => {
+  // User turn on Haiku, but an Opus subagent actually ran — the "kept on" line must say opus.
+  const r = realizedFromRecords([rec('claude-haiku-4-5', 'user'), rec('claude-opus-4', 'subagent')]);
+  assert.equal(r.topTier, 'opus');
+  assert.equal(r.dollarsSaved, 0); // nothing below the (haiku) user ceiling
+  assert.equal(buildTagline(r), 'Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.');
+});
+
+test('scoping: --transcript / --session / --current read exactly one chat', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-scope-'));
+  const proj = path.join(dir, '.claude', 'projects', 'demo');
+  fs.mkdirSync(proj, { recursive: true });
+  const mk = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+  // sessA: trivial prompt on Opus + a Haiku sub-agent -> downgradable.
+  fs.writeFileSync(path.join(proj, 'sessA.jsonl'), mk([
+    { type: 'user', message: { role: 'user', content: 'rename foo' }, timestamp: '2026-01-01T00:00:00Z' },
+    { type: 'assistant', isSidechain: false, message: { id: 'a1', role: 'assistant', model: 'claude-opus-4',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:01Z' },
+    { type: 'assistant', isSidechain: true, message: { id: 'a2', role: 'assistant', model: 'claude-haiku-4-5',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:02Z' },
+  ]));
+  // sessB: only an Opus main turn -> nothing to downgrade.
+  fs.writeFileSync(path.join(proj, 'sessB.jsonl'), mk([
+    { type: 'user', message: { role: 'user', content: 'prove the lock is race-free' }, timestamp: '2026-01-02T00:00:00Z' },
+    { type: 'assistant', isSidechain: false, message: { id: 'b1', role: 'assistant', model: 'claude-opus-4',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-02T00:00:01Z' },
+  ]));
+  // Make sessB the newest so --current resolves to it deterministically.
+  const t = Date.now() / 1000;
+  fs.utimesSync(path.join(proj, 'sessA.jsonl'), t - 100, t - 100);
+  fs.utimesSync(path.join(proj, 'sessB.jsonl'), t, t);
+
+  const saved = process.env.CHEAPER_PEEK_HOME;
+  process.env.CHEAPER_PEEK_HOME = dir;
+  try {
+    delete require.cache[require.resolve('../src/peek/fsutil')];
+    delete require.cache[require.resolve('../src/peek/adapters')];
+    const { HARNESSES, collectHarness } = require('../src/peek/adapters');
+    const def = HARNESSES.find((d) => d.key === 'claude-code');
+
+    // --transcript sessA -> both calls, downgradable.
+    const a = collectHarness(def, { transcript: path.join(proj, 'sessA.jsonl') });
+    assert.equal(a.records.length, 2);
+    assert.ok(realizedFromRecords(a.records).dollarsSaved > 80);
+
+    // --session sessB -> only sessB's one Opus call, no saving.
+    const b = collectHarness(def, { session: 'sessB' });
+    assert.equal(b.records.length, 1);
+    assert.equal(realizedFromRecords(b.records).dollarsSaved, 0);
+
+    // --current -> newest (sessB).
+    const cur = collectHarness(def, { current: true });
+    assert.equal(cur.records.length, 1);
+    assert.equal(cur.records[0].model, 'claude-opus-4');
+  } finally {
+    if (saved === undefined) delete process.env.CHEAPER_PEEK_HOME;
+    else process.env.CHEAPER_PEEK_HOME = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete require.cache[require.resolve('../src/peek/fsutil')];
+    delete require.cache[require.resolve('../src/peek/adapters')];
   }
 });

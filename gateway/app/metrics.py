@@ -96,36 +96,54 @@ class Metrics:
                 c.execute("ALTER TABLE decisions ADD COLUMN requested_effort TEXT")
             except sqlite3.OperationalError:
                 pass  # column already exists
+            # Additive migration: the chat/session id, so peek can attribute EXACT
+            # realized savings to ONE conversation for the end-of-chat tagline.
+            try:
+                c.execute("ALTER TABLE decisions ADD COLUMN session TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             c.commit()
 
     def _conn(self):
         return sqlite3.connect(self.db_path, timeout=5)
 
     def record(self, *, tier, model, original_model, requested_tier, reason,
-               source="", in_tokens=0, out_tokens=0, status=0, requested_effort=""):
+               source="", in_tokens=0, out_tokens=0, status=0, requested_effort="",
+               session=""):
         with self._lock, closing(self._conn()) as c:
             c.execute(
                 "INSERT INTO decisions "
                 "(ts, tier, model, original_model, requested_tier, reason, source, "
-                " in_tokens, out_tokens, status, requested_effort) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " in_tokens, out_tokens, status, requested_effort, session) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (time.time(), tier, model, original_model, requested_tier,
                  reason[:300], source, in_tokens, out_tokens, status,
-                 normalize_effort(requested_effort)))
+                 normalize_effort(requested_effort), session or ""))
             c.commit()
 
-    def summary(self, *, ts_bucket: int = 3600, max_rows: int = 5000) -> dict:
+    def summary(self, *, ts_bucket: int = 3600, max_rows: int = 5000,
+                session: str | None = None) -> dict:
+        # Optional per-chat scoping: `cheaper peek --tagline` passes ?session=<id> so
+        # the end-of-chat line reports EXACT realized savings for one conversation
+        # instead of the whole rolling ledger.
+        # Distinguish None (no filter → whole ledger, e.g. the dashboard) from a
+        # present session value (scope to that chat). An EMPTY string is a real value,
+        # so a blank ?session= scopes to the empty-session rows — it never silently
+        # falls back to the whole ledger and over-exposes other chats.
+        where = " WHERE session = ?" if session is not None else ""
+        sp = (session,) if session is not None else ()
         with closing(self._conn()) as c:
             rows = c.execute("SELECT tier, COUNT(*), SUM(in_tokens), SUM(out_tokens) "
-                             "FROM decisions GROUP BY tier").fetchall()
-            total = c.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] or 0
+                             "FROM decisions" + where + " GROUP BY tier", sp).fetchall()
+            total = c.execute("SELECT COUNT(*) FROM decisions" + where, sp).fetchone()[0] or 0
             recent = c.execute(
-                "SELECT ts, tier, original_model, reason, source FROM decisions "
-                "ORDER BY ts DESC LIMIT 20").fetchall()
+                "SELECT ts, tier, original_model, reason, source FROM decisions" + where +
+                " ORDER BY ts DESC LIMIT 20", sp).fetchall()
             detail = c.execute(
                 "SELECT ts, tier, original_model, in_tokens, out_tokens, source, "
                 "requested_tier, requested_effort "
-                "FROM decisions ORDER BY ts DESC LIMIT ?", (max_rows,)).fetchall()
+                "FROM decisions" + where + " ORDER BY ts DESC LIMIT ?",
+                sp + (max_rows,)).fetchall()
         by_tier = {t: {"count": n, "in_tokens": it or 0, "out_tokens": ot or 0}
                    for (t, n, it, ot) in rows}
 
@@ -145,6 +163,7 @@ class Metrics:
         by_tool_acc: dict = {}
         ts_acc: dict = {}
         models_changed = 0
+        tokens_downgraded = 0
         reasoning_opps = 0
         tokens_saved_potential = 0
         time_saved_model = 0.0
@@ -171,6 +190,7 @@ class Metrics:
                 if est["downgraded"]:
                     a["down"] += 1
                     models_changed += 1
+                    tokens_downgraded += it + ot
                 b = int(ts // ts_bucket) * ts_bucket
                 g = ts_acc.setdefault(b, {"t": b, "saved": 0.0, "spent": 0.0, "calls": 0})
                 g["saved"] += saved
@@ -227,7 +247,8 @@ class Metrics:
                 "models_changed": models_changed,
                 "reasoning_opportunities": reasoning_opps,
             },
-            "tokens": {"saved_reasoning_potential": tokens_saved_potential},
+            "tokens": {"saved_reasoning_potential": tokens_saved_potential,
+                       "downgraded": tokens_downgraded},
             "time": {
                 "saved_model_s": round(time_saved_model, 1),
                 "saved_reasoning_potential_s": round(time_saved_reasoning, 1),

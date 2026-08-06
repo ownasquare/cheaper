@@ -151,13 +151,13 @@ its "signals" section into the triage prompt for borderline domains.
 
 Read only the first line of the Haiku agent's output.
 
-- **`ROUTER: HANDLED`** → The cheap tier answered. Cheaper its answer to the user.
+- **`ROUTER: HANDLED`** → The cheap tier answered. Relay its answer to the user.
   You're done. This is the cheapest path and should be the common case.
 
 - **`ROUTER: ESCALATE tier=sonnet`** → Spawn a Sonnet subagent
   (`subagent_type: general-purpose`, `model: sonnet`) with the original request
   plus any `notes:` the triage agent passed along (so Sonnet builds on the cheap
-  tier's work instead of starting over). Cheaper Sonnet's answer.
+  tier's work instead of starting over). Relay Sonnet's answer.
 
 - **`ROUTER: ESCALATE tier=opus`** → Same, but with `model: opus`.
 
@@ -259,19 +259,24 @@ vulnerability." A good decomposition sizes each leg:
 Spending Opus on all ten reads would burn tokens; spending Haiku on the security
 judgment would risk missing a real vulnerability. Sizing per leg gets both right.
 
-## Be transparent about routing
+## Close with the Cheaper.app savings line
 
-After answering, tell the user which tier handled the request, in a short tag so
-they can see the router working and trust it. Keep it to one line, e.g.:
+End every completed reply with the branded Cheaper.app savings line — the user's
+one-line, end-of-chat audit trail. Don't hand-write it; run:
 
-> _Routed to Haiku (simple lookup)._
+```
+cheaper peek --tagline --current --harness claude-code
+```
 
-or
+and append its output verbatim as the final line. It already names the tiers that
+did the work plus the real tokens and dollars saved, e.g.:
 
-> _Triaged on Haiku → escalated to Opus (subtle concurrency bug, correctness-critical)._
+> Cheaper.app saved ~$0.42 and 18.3K tokens by using haiku tier for 7 calls, sonnet tier for 2 calls, opus tier for 1 call.
 
-Don't over-explain. The user wants the answer plus a light audit trail, not a
-lecture on the routing.
+If the command prints nothing, Cheaper had nothing cheaper to route this chat —
+omit the line. Never compose, estimate, or round the numbers yourself; only that
+command's output is authoritative. (A plugin Stop hook re-runs the same command
+against this exact chat as a backstop, so the line survives even if you forget.)
 
 ## Guardrails that keep this cheap
 
@@ -293,7 +298,7 @@ lecture on the routing.
 
 Incoming request: Haiku triage subagent → if `HANDLED`, cheaper answer → if
 `ESCALATE`, spawn Sonnet/Opus subagent with the carried-over notes → cheaper answer →
-tag which tier handled it.
+close with the Cheaper.app savings line (`cheaper peek --tagline`).
 
 Spawning your own subtask agents: size each one's `model` by the rubric (haiku for
 mechanical, sonnet for moderate, opus for correctness-critical), triage only the

@@ -29,6 +29,15 @@ const HELP = `
                         …) and estimate the tokens + real $ adaptive routing
                         would have saved — 100% local, nothing is sent anywhere.
                         Options: --days N  --harness <key>  --limit N  --json
+                        --tagline           Print the one-line, Cheaper.app-branded
+                                            savings summary for a single chat (what
+                                            each harness appends at end of chat).
+                        --transcript <file> | --session <id> | --current
+                                            Scope --tagline to one conversation.
+    taglines [options]  Wire the Cheaper.app end-of-chat savings line into every
+                        supported harness (Codex, Cursor, Copilot, Grok, Gemini,
+                        OpenCode, PI.dev). Claude Code is handled by the plugin.
+                        Options: --all  --harness <key>  --remove  --dry-run
     status              Show what's installed and running.
     help, --help        This help.
     version, --version  Print version.
@@ -58,6 +67,8 @@ async function main() {
       return require('../src/launch').run(rest);
     case 'peek':
       return require('../src/peek').run(rest);
+    case 'taglines':
+      return require('../src/tagline_install').run(rest);
     case 'status': {
       const s = require('../src/install').status();
       const yn = (b) => (b ? c.green('installed') : c.dim('not installed'));
