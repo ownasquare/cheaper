@@ -17,6 +17,7 @@
   "build": {
     "appId": "com.beladed.cheaper",
     "productName": "Cheaper",
+    "directories": { "buildResources": "buildResources" },
     "files": ["main.js", "renderer/**", "assets/**"],
     "extraResources": [{ "from": "../cli/assets/gateway", "to": "gateway" }],
     "mac": {
