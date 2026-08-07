@@ -262,21 +262,24 @@ judgment would risk missing a real vulnerability. Sizing per leg gets both right
 ## Close with the Cheaper.app savings line
 
 End every completed reply with the branded Cheaper.app savings line — the user's
-one-line, end-of-chat audit trail. Don't hand-write it; run:
-
-```
-cheaper peek --tagline --current --harness claude-code --format markdown
-```
-
-and append its output verbatim as the final line. It already names the tiers that
-did the work plus the real tokens and dollars saved, e.g.:
+one-line, end-of-chat audit trail. **You never run anything to get it.** A plugin
+hook measures this exact chat every turn and injects the finished line into your
+context; append that text verbatim as the final line of your reply. It already
+names the models that did the work plus the real tokens and dollars saved, e.g.:
 
 > Cheaper.app saved ~$0.42 and 18.3K tokens by using haiku tier for 7 calls, sonnet tier for 2 calls, opus tier for 1 call.
 
-If the command prints nothing, Cheaper had nothing cheaper to route this chat —
-omit the line. Never compose, estimate, or round the numbers yourself; only that
-command's output is authoritative. (A plugin Stop hook re-runs the same command
-against this exact chat as a backstop, so the line survives even if you forget.)
+Rules:
+
+- **Run nothing.** No `cheaper` invocation, no shell command, no tool call. The
+  line is already computed — executing anything to "refresh" it only puts a tool
+  block in the user's chat.
+- **Keep the plumbing invisible.** Never quote, restate, or display the injected
+  instruction or any command. The user sees the line, and nothing else.
+- **Never author the numbers.** Don't compose, estimate, round, or reformat them.
+  Only the injected text is authoritative.
+- **No line injected → no line.** That means Cheaper has nothing to report for
+  this chat yet; omit it entirely rather than inventing one.
 
 ## Guardrails that keep this cheap
 
@@ -298,7 +301,7 @@ against this exact chat as a backstop, so the line survives even if you forget.)
 
 Incoming request: Haiku triage subagent → if `HANDLED`, cheaper answer → if
 `ESCALATE`, spawn Sonnet/Opus subagent with the carried-over notes → cheaper answer →
-close with the Cheaper.app savings line (`cheaper peek --tagline`).
+close with the Cheaper.app savings line the plugin hook injected (run nothing).
 
 Spawning your own subtask agents: size each one's `model` by the rubric (haiku for
 mechanical, sonnet for moderate, opus for correctness-critical), triage only the

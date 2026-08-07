@@ -129,6 +129,35 @@ def _decision_type(requested_tier, routed_tier) -> str:
     return "kept"
 
 
+def row_is_priceable(status, usage_source) -> tuple[bool, str]:
+    """May this row contribute to a DOLLAR figure? Returns (ok, reason_when_not).
+
+    Two independent exclusions, both fail-closed:
+
+    * ``usage_source == 'estimate'`` -- nobody reported usage for this call, so any
+      figure derived from it is a guess wearing a measurement's clothes.
+    * a status the gateway actually observed that is outside 2xx -- Claude Code retries
+      ``overloaded_error`` and 429s automatically, and each retry gets a DISTINCT
+      ``anthropic-request-id``, so the provider key cannot collapse them. A six-retry
+      storm on one turn would otherwise book six times the saving for one delivered
+      answer.
+
+    Status ``0``/NULL means UNKNOWN, not "failed": every row written before the column
+    was populated reads as 0, and excluding those would blank the whole existing
+    ledger. Unknown-status rows are priced and counted separately so the ambiguity is
+    visible rather than assumed away.
+    """
+    if (usage_source or "").strip().lower() == "estimate":
+        return False, "estimated_usage"
+    try:
+        st = int(status or 0)
+    except (TypeError, ValueError):
+        st = 0
+    if st and not (200 <= st < 300):
+        return False, "non_2xx"
+    return True, ""
+
+
 def _period_starts(now: datetime | None = None) -> dict:
     """Epoch-second lower bounds for Today / week / month / quarter / year / all-time,
     computed in LOCAL time so the buckets line up with the user's wall clock. A row
@@ -183,6 +212,42 @@ class Metrics:
                 c.execute("ALTER TABLE decisions ADD COLUMN session TEXT")
             except sqlite3.OperationalError:
                 pass  # column already exists
+            # Additive migration: the PROVIDER's own idempotency key, plus how the
+            # token counts on this row were obtained.
+            #
+            #   request_id  `anthropic-request-id` / `request-id` / `x-request-id`.
+            #               Measured 1:1 with the API call over 12,741 transcript rows
+            #               (0 of 5,127 request ids mapped to more than one message id).
+            #               It is the join key the per-call event store dedupes on --
+            #               and, critically, it SURVIVES a resume/fork/rotate, which a
+            #               positional index or a content hash does not.
+            #   message_id  the assistant message id, a second strong key for the
+            #               buffered path where the body is in hand.
+            #   usage_source 'body'    provider-reported usage  -> priceable
+            #                'estimate' we had to guess         -> NEVER priced
+            for _col in ("request_id", "message_id", "usage_source"):
+                try:
+                    c.execute(f"ALTER TABLE decisions ADD COLUMN {_col} TEXT")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+            # The 16 heaviest rows on the live DB are invisible to every scoped query:
+            # `WHERE session = ''` does not match `session IS NULL`, so the sum of the
+            # per-session totals did not equal the ungrouped total -- by 1,890,068 of
+            # 1,890,408 in-tokens. Normalise the sentinel so one comparison covers both.
+            c.execute("UPDATE decisions SET session = '' WHERE session IS NULL")
+            # Zero indexes existed. Every query here is ORDER BY ts DESC, optionally
+            # filtered by session.
+            c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions(ts DESC)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_decisions_sess "
+                      "ON decisions(session, ts DESC)")
+            # PARTIAL unique index: pre-migration rows all have request_id NULL and must
+            # not collide with each other (SQLite treats NULLs as distinct in a plain
+            # UNIQUE index, but the partial predicate makes the intent explicit and keeps
+            # the index small). Paired with INSERT OR IGNORE in record(), a retried or
+            # replayed write for the same provider call is a no-op instead of a double
+            # count -- the single most important property of a financial record.
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_decisions_rid "
+                      "ON decisions(request_id) WHERE request_id IS NOT NULL")
             c.commit()
 
     def _conn(self):
@@ -190,18 +255,47 @@ class Metrics:
 
     def record(self, *, tier, model, original_model, requested_tier, reason,
                source="", in_tokens=0, out_tokens=0, status=0, requested_effort="",
-               session="", cache_read=0, cache_create_5m=0, cache_create_1h=0):
+               session="", cache_read=0, cache_create_5m=0, cache_create_1h=0,
+               request_id=None, message_id=None, usage_source=None, ts=None):
+        """Append one routed call.
+
+        `INSERT OR IGNORE` + the partial unique index on request_id makes this
+        IDEMPOTENT for any call the provider gave us an id for: a retried write, a
+        replayed buffer, or two code paths both recording the same forward all collapse
+        to one row. Without it the store double-counts silently, which is the failure
+        this whole workstream exists to eliminate.
+
+        `in_tokens` may be None. That is a real state -- "the provider did not report
+        usage" -- and it is stored as NULL rather than as a character-count guess.
+        The old `len(extract_text(body)) // 4` fallback substituted the whole
+        conversation's size for the FRESH input count; measured against real traffic
+        that is wrong by ~34,000x, and it printed with no hedge.
+        """
+        us = (usage_source or "").strip().lower()
+        if us not in ("body", "estimate"):
+            # '' = unknown (a legacy row, or a caller that predates the column).
+            # Deliberately NOT defaulted to 'body': claiming a figure is measured when
+            # nobody said so is exactly the concealment shape this column exists to end.
+            us = ""
         with self._lock, closing(self._conn()) as c:
             c.execute(
-                "INSERT INTO decisions "
+                "INSERT OR IGNORE INTO decisions "
                 "(ts, tier, model, original_model, requested_tier, reason, source, "
                 " in_tokens, out_tokens, status, requested_effort, session, "
-                " cache_read, cache_create_5m, cache_create_1h) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (time.time(), tier, model, original_model, requested_tier,
-                 reason[:300], source, in_tokens, out_tokens, status,
+                " cache_read, cache_create_5m, cache_create_1h, "
+                " request_id, message_id, usage_source) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (float(ts) if ts is not None else time.time(),
+                 tier, model, original_model, requested_tier,
+                 reason[:300], source,
+                 None if in_tokens is None else int(in_tokens),
+                 None if out_tokens is None else int(out_tokens),
+                 status,
                  normalize_effort(requested_effort), session or "",
-                 int(cache_read or 0), int(cache_create_5m or 0), int(cache_create_1h or 0)))
+                 int(cache_read or 0), int(cache_create_5m or 0), int(cache_create_1h or 0),
+                 (str(request_id)[:120] or None) if request_id else None,
+                 (str(message_id)[:120] or None) if message_id else None,
+                 us))
             c.commit()
 
     def logs(self, *, limit: int = 100, offset: int = 0,
@@ -236,21 +330,26 @@ class Metrics:
                 "SELECT ts, tier, model, original_model, requested_tier, reason, source, "
                 "in_tokens, out_tokens, "
                 "COALESCE(cache_read,0), COALESCE(cache_create_5m,0), COALESCE(cache_create_1h,0), "
-                "COALESCE(session,'') "
+                "COALESCE(session,''), COALESCE(status,0), COALESCE(usage_source,''), "
+                "COALESCE(request_id,'') "
                 "FROM decisions" + where + " ORDER BY ts DESC LIMIT ? OFFSET ?",
                 sp + (limit, offset)).fetchall()
         rows = []
-        for (ts, tier, served, om, rtier, reason, src, it, ot, cr, c5, c1, sess) in raw:
+        for (ts, tier, served, om, rtier, reason, src, it, ot, cr, c5, c1,
+             sess, status, usrc, rid) in raw:
             it = it or 0
             ot = ot or 0
             original_cost = actual_cost = savings = None
-            if _PRICING:
+            ok, why = row_is_priceable(status, usrc)
+            if _PRICING and ok:
                 kw = dict(cache_read=cr or 0, cache_create_5m=c5 or 0,
                           cache_create_1h=c1 or 0, at=_day(ts))
                 original_cost = cost_of_model(om, it, ot, **kw)
                 actual_cost = cost_of_model(served, it, ot, **kw)
                 if original_cost is not None and actual_cost is not None:
                     savings = original_cost - actual_cost
+                elif not why:
+                    why = "model_not_in_catalog"
             rows.append({
                 "ts": ts,
                 "source": src or "",
@@ -260,14 +359,29 @@ class Metrics:
                 "original_cost": round(original_cost, 6) if original_cost is not None else None,
                 "actual_cost": round(actual_cost, 6) if actual_cost is not None else None,
                 "savings": round(savings, 6) if savings is not None else None,
+                # The Logs table renders an em dash with this as its tooltip, never
+                # "$0.00" -- zero is a measured result and "no claim made" is not.
+                "unpriced_reason": why or ("model_not_in_catalog"
+                                           if (_PRICING and savings is None) else ""),
+                # basis/grain are NON-HIDEABLE columns in the Logs view and appear in
+                # every export row. A later "simplify the table" change that drops them
+                # would silently re-mix measured and estimated figures in one column.
+                "basis": "measured" if (usrc or "") == "body" else (
+                    "estimated" if (usrc or "") == "estimate" else "unknown"),
+                "grain": "call",
                 # Extra context the Logs/Monitor UI uses but which is not part of the
                 # required column set.
                 "tier": tier or "",
                 "requested_tier": rtier or "",
                 "reason": reason or "",
                 "session": sess or "",
+                "status": int(status or 0),
+                "request_id": rid or "",
                 "in_tokens": it,
                 "out_tokens": ot,
+                "cache_read": cr or 0,
+                "cache_create_5m": c5 or 0,
+                "cache_create_1h": c1 or 0,
             })
         return {"rows": rows, "total": total}
 
@@ -297,7 +411,8 @@ class Metrics:
             detail = c.execute(
                 "SELECT ts, tier, original_model, in_tokens, out_tokens, source, "
                 "requested_tier, requested_effort, model, "
-                "COALESCE(cache_read,0), COALESCE(cache_create_5m,0), COALESCE(cache_create_1h,0) "
+                "COALESCE(cache_read,0), COALESCE(cache_create_5m,0), COALESCE(cache_create_1h,0), "
+                "COALESCE(status,0), COALESCE(usage_source,'') "
                 "FROM decisions" + where + " ORDER BY ts DESC LIMIT ?",
                 sp + (max_rows,)).fetchall()
         by_tier = {t: {"count": n, "in_tokens": it or 0, "out_tokens": ot or 0}
@@ -344,8 +459,17 @@ class Metrics:
         # like every other aggregate on this summary.
         period_starts = _period_starts()
         periods_acc = {k: {"saved": 0.0, "spent": 0.0, "calls": 0} for k in period_starts}
+        # Rows deliberately excluded from every dollar figure, counted so the exclusion
+        # is VISIBLE. A silently shrinking denominator is how "we weren't watching"
+        # becomes indistinguishable from "$0.00".
+        unpriced = {"estimated_usage": 0, "non_2xx": 0, "model_not_in_catalog": 0}
         if _PRICING:
-            for (ts, tier, om, it, ot, src, rtier, reff, served, cr, c5, c1) in detail:
+            for (ts, tier, om, it, ot, src, rtier, reff, served, cr, c5, c1,
+                 status, usrc) in detail:
+                ok, why = row_is_priceable(status, usrc)
+                if not ok:
+                    unpriced[why] = unpriced.get(why, 0) + 1
+                    continue
                 it = it or 0
                 ot = ot or 0
                 # in_tokens is the FRESH input count; cached traffic is billed separately.
@@ -368,6 +492,7 @@ class Metrics:
                     spent = est["new_cost"] if is_priceable(om) else 0.0
                     saved = 0.0
                     changed = False
+                    unpriced["model_not_in_catalog"] = unpriced.get("model_not_in_catalog", 0) + 1
                 billed_top = cost_of(detect_family(om) or "other", "opus", it, ot) \
                     if detect_family(om) else 0.0
                 dollars["saved"] += saved
@@ -479,6 +604,17 @@ class Metrics:
                 "models_changed": models_changed,
                 "models_upcharged": models_upcharged,
                 "reasoning_opportunities": reasoning_opps,
+                # Rows that contributed NOTHING to any dollar figure, by reason. The
+                # invariant a reader can check: priced + sum(unpriced.values()) equals
+                # the number of rows examined (min(total, max_rows)).
+                "unpriced": dict(unpriced),
+                "unpriced_total": sum(unpriced.values()),
+                "priced": max(0, min(total, max_rows) - sum(unpriced.values())),
+                "examined": min(total, max_rows),
+                # An honest truncation flag: summary() has always capped its aggregates
+                # at max_rows and said nothing, so a ledger past the cap silently
+                # under-reported. Say when the figures are a sample.
+                "truncated": total > max_rows,
             },
             "tokens": {"saved_reasoning_potential": tokens_saved_potential,
                        "downgraded": tokens_downgraded},

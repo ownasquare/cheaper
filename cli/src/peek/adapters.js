@@ -15,7 +15,7 @@
 // text rather than risk an N× inflation.
 
 const path = require('path');
-const { findFiles, readJsonl, readJson, expand, exists } = require('./fsutil');
+const { findFiles, readJsonl, readJson, expand, exists, fileIdentity } = require('./fsutil');
 const { execSync } = require('child_process');
 
 const CAP = { maxFiles: 300 };
@@ -188,6 +188,13 @@ function collectClaudeCode(opts) {
   for (const f of files) {
     const subFile = IS_SUB_PATH.test(f.file);
     let lastUser = { text: '', ts: 0 };
+    // Path-free provenance for the event store. `sfile` is sha256(abs path)[:12] and
+    // `sbase` a uuid basename — never the path itself, which names the user and often
+    // their client. `fsha` lets an export state whether the source still matches.
+    const ident = fileIdentity(f.file);
+    // readJsonl fires onMeta after reading the bytes and BEFORE parsing any line, so
+    // this is populated by the time the first record is built.
+    let fsha = null;
     readJsonl(f.file, (o) => {
       const msg = o.message || o;
       const role = o.type === 'user' || o.type === 'assistant' ? o.type : msg.role;
@@ -237,6 +244,21 @@ function collectClaudeCode(opts) {
           serviceTier: (hasUsage && u.service_tier) || null,
           text: lastUser.text, source: sidechain ? 'subagent' : 'user',
           estimated: !hasUsage,
+          // ---- identity + provenance, for the per-call event store ----
+          // The PROVIDER's own keys. `requestId` is 1:1 with the API call and survives
+          // a resume, a fork and a transcript rotation; a positional index does not
+          // (files sort newest-first, and anything over 32 MB is read tail-only, so a
+          // single `touch` reshuffles every index).
+          requestId: o.requestId || null,
+          messageId: msg.id || null,
+          // The session id read from INSIDE the record, never from the filename.
+          // `--current` resolves by cwd-slug + newest-mtime, which can select another
+          // harness's concurrent chat in the same project; the record cannot lie.
+          sessionId: o.sessionId || null,
+          sub: sidechain,
+          // Path-FREE provenance: a hash of the path, plus a uuid basename. Never the
+          // path itself — it names the user and often their client.
+          sfile: ident.sfile, sbase: ident.sbase, fsha,
         };
         // An un-keyed line cannot be deduped, so it stands alone. A keyed one keeps
         // whichever occurrence reports the MOST usage: the repeats are the same turn
@@ -248,7 +270,7 @@ function collectClaudeCode(opts) {
           byId.set(id, rec);
         }
       }
-    });
+    }, { onMeta: (m) => { fsha = m.sha; } });
   }
   for (const rec of byId.values()) records.push(rec);
   return { records, filesScanned: files.length, note: '' };

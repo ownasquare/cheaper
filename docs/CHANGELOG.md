@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.3.0 — the savings store: per-call, event-time, and honest about what it doesn't know
+
+**Read this first: some periods that used to show a dollar figure now show a label
+instead, and "today" will usually get smaller.** Both changes are corrections.
+
+### The headline defect: savings were bucketed by when the TAGLINE ran
+
+`cheaper savings` bucketed every chat on `at` — the moment the end-of-chat line last
+printed — not on when the calls happened. On a real machine all six recorded chats
+carried an `at` inside a single four-hour band, for work spanning weeks, so the command
+reported **100% of lifetime savings under "today"** and $0.00 for every prior day. Worse,
+re-running an old chat's tagline *moved* its money out of the old period into the new
+one, so "savings yesterday" was not stable and could silently drop to zero.
+
+This could not be patched in the chat-grain ledger: it stored one timestamp and one
+frozen dollar figure for a multi-day, multi-million-token conversation. So there is now a
+**per-call event store** (`~/.cheaper/events/`, append-only JSONL, zero dependencies) and
+every figure is derived from it.
+
+### What changed
+
+- **One time frame.** Each event stores `ts`, the UTC offset in force at `ts`, and a
+  derived `pday`. The calendar bucket, the price date and the priceability check all read
+  `pday`. They used to disagree — pricing on the UTC date, bucketing on local midnight —
+  and with `claude-sonnet-5` on a promotional rate through 2026-08-31, that was a live
+  ±50% error on any call after 17:00 local on a UTC-7 machine.
+- **Disjoint period windows.** The ladder is now Today · Earlier this week · Earlier this
+  month · Earlier this quarter · Earlier this year · Before this year. These **partition**
+  history, so they add up to lifetime. The old nested "since" windows meant a reader who
+  added the column counted today six times.
+- **Dollars are derived, never stored.** Events carry only tokens plus a frozen
+  counterfactual (baseline model, eligibility, classifier verdict), so a catalog
+  correction restates history instead of being unable to reach it.
+- **Idempotent by the provider's own key.** Rows are deduped on
+  `anthropic-request-id`, which the gateway now captures on both the buffered and the
+  streamed path. Replaying a tagline, re-importing, or a synced-folder conflicted copy
+  can no longer double-count.
+- **Streamed calls are finally measured.** The gateway parsed no usage at all while
+  streaming — and Claude Code always streams — so every streamed row was stored with a
+  character-count guess for input and a hard 0 for output. It now reads the provider's
+  own `message_start`/`message_delta` usage out of the SSE stream without altering a byte.
+- **Retries are never priced.** A non-2xx response is recorded and excluded. Claude Code
+  retries 429s automatically and each retry gets a distinct request id, so a six-retry
+  storm used to book six times the saving for one delivered answer.
+
+### What now refuses to show a number
+
+Every one of these renders a labelled non-number, never `$0.00`:
+
+- a period **before the store was watching** → *not covered* (with the date range)
+- a partially covered period → only the covered sub-window, with its bounds printed
+- a window where **more than 20% of the tokens are unpriceable** → dollars withheld,
+  call and token counts still exact, and the reason named
+- a model absent from the price catalog → an em dash with a tooltip, and an **empty**
+  cell in CSV/TSV exports (`null` in JSON) — never `0`
+- a deleted session (`cheaper forget`) → totals drop **with a stated reason**
+
+**Measured and estimated are never summed.** They get separate columns for Saved, Spent
+*and* Events, because adding a per-call measured figure to a per-chat estimated one is
+the same concealment in a place where the separation is less visible.
+
+### Security
+
+- The gateway now requires a local token (`~/.cheaper/dash.token`, 0600) on `/metrics`,
+  `/peek`, `/logs`, `/report`, `/dashboard`, `/ws` and every `/api/v1/*` route. Loopback
+  is not a trust boundary on a shared machine — any other account could read the full
+  usage record. `/healthz` and the proxy routes stay open.
+- The dashboard moves the token into `sessionStorage`, strips it from the address bar,
+  and is issued an `HttpOnly; SameSite=Strict` session cookie so a plain reload still
+  works.
+- CSV/TSV exports guard spreadsheet formula injection (`= + - @ | %`) while keeping
+  negative deltas as real numbers.
+
+### New commands
+
+`cheaper import --since <date> [--dry-run]` · `cheaper forget --session <id>` ·
+`cheaper compact` · `cheaper export --format csv|tsv|json|ndjson` ·
+`cheaper logs|reports|monitor|dashboard --json|--terminal` (the no-flag default still
+opens the browser).
+
+### New surfaces
+
+`/api/v1/{logs, reports/periods, reports/breakdown, reports/trend, export, report.html}`,
+a rebuilt Logs audit register and Reports tab, a `cheaper://` desktop deep link, and a
+3-OS release matrix.
+
+---
+
 ## 0.3.0 — pricing correctness
 
 **Read this first: your reported savings will go down, and the old numbers were wrong.**

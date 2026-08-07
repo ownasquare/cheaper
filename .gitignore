@@ -10,3 +10,13 @@ venv/
 .env
 .DS_Store
 docs/handoffs/
+
+# Playwright: the seeded sandbox, the captured PNGs for human review, and the HTML
+# report. All are rebuilt from scratch on every run — `tests/e2e/seed.js` wipes and
+# re-seeds the sandbox — so committing them would just be stale bytes.
+# The screenshot BASELINES under tests/e2e/*-snapshots/ are NOT ignored: those are the
+# comparison targets and must be versioned.
+.playwright-tmp/
+.playwright-shots/
+.playwright-report/
+test-results/

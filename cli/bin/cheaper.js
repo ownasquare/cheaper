@@ -24,10 +24,27 @@ const HELP = `
     gateway status      Is the gateway running?
     dashboard | reports | logs | monitor
                         Open the live localhost dashboard at that tab in your
-                        browser (starts the gateway if needed). Add --terminal to
-                        the monitor command for the in-terminal TUI. launch = Dashboard.
-    savings             Realized savings by period: today / this week / month /
-                        quarter / year / all-time (lifetime). --json for machines.
+                        browser (starts the gateway if needed). launch = Dashboard.
+                        Every one also PRINTS, so nothing is browser-only:
+                        --terminal          render the same view in the terminal
+                        --json              the same data, for scripts
+                        monitor --json [--watch]  raw /metrics, single-shot or streamed
+    savings             Realized savings by period, bucketed on WHEN THE CALLS
+                        HAPPENED. Disjoint windows that add up to lifetime.
+                        --json for machines.
+    export [options]    Stream the full audit register to a file.
+                        --format csv|tsv|json|ndjson   --out FILE
+                        --from/--to YYYY-MM-DD  --tz IANA  --basis measured|estimated
+                        --guard safe|raw   (safe blocks spreadsheet formula execution
+                                            and is therefore not byte-reversible)
+    import --since D    Backfill per-call events from your existing transcripts.
+                        Walks every file with no cap, timestamps each call at its OWN
+                        event time, and marks backfilled rows permanently ESTIMATED.
+                        --dry-run first.  --harness <key>  --json
+    forget --session I  Exclude one chat from every total, leaving a tombstone so the
+                        drop is stated rather than silent.
+    compact             Seal finished months: merge, dedupe, verify, gzip. Explicit
+                        only — never runs from a hook. --dry-run  --json
     peek [options]      Scan your existing harness chat logs (.claude, .codex,
                         …) and estimate the tokens + real $ adaptive routing
                         would have saved — 100% local, nothing is sent anywhere.
@@ -63,16 +80,19 @@ async function main() {
       return require('../src/uninstall').run(rest);
     case 'gateway':
       return require('../src/gateway').run(rest);
+    // Every localhost view has a print equivalent. The NO-FLAG default is unchanged in
+    // all four cases — it opens the browser, which is muscle memory — and `--terminal`
+    // / `--json` are strictly additive.
     case 'monitor':
-      // Browser Monitor tab by default; the in-terminal TUI on --terminal/--tty.
-      if (rest.includes('--terminal') || rest.includes('--tty'))
-        return require('../src/monitor').run();
+      if (rest.includes('--terminal') || rest.includes('--tty') || rest.includes('--json'))
+        return require('../src/monitor').run(rest);
       return require('../src/launch').run(rest, { tab: 'monitor' });
     case 'reports':
-      return require('../src/launch').run(rest, { tab: 'reports' });
+      return require('../src/reports').run(rest);
     case 'logs':
-      return require('../src/launch').run(rest, { tab: 'logs' });
+      return require('../src/logs').run(rest);
     case 'dashboard':
+      if (rest.includes('--json')) return require('../src/dashboard').run(rest);
       return require('../src/launch').run(rest, { tab: 'dashboard' });
     case 'launch':
     case 'init':
@@ -81,6 +101,14 @@ async function main() {
       return require('../src/peek').run(rest);
     case 'savings':
       return require('../src/savings').run(rest);
+    case 'export':
+      return require('../src/export').run(rest);
+    case 'import':
+      return require('../src/import').run(rest);
+    case 'forget':
+      return require('../src/forget').forget(rest);
+    case 'compact':
+      return require('../src/forget').compact(rest);
     case 'taglines':
       return require('../src/tagline_install').run(rest);
     case 'status': {

@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const P = require('./paths');
 const { c } = require('./util');
 const gateway = require('./gateway');
+const { withToken } = require('./token');
 const { PORT } = gateway;
 
 const HEALTH_TIMEOUT_MS = 15000;
@@ -107,14 +108,20 @@ async function run(argv = [], opts = {}) {
 
   // Deep-link to a specific dashboard tab (dashboard/reports/logs/monitor) so
   // `cheaper logs`, `cheaper reports`, etc. open the RIGHT view, not the generic page.
+  //
+  // The token is read AFTER ensureGatewayUp(): on a clean machine the gateway mints it
+  // during start-up, so reading it earlier would hand the browser a token-less URL and
+  // 401 the very first dashboard a new user ever opens.
   const tab = (opts && opts.tab) || '';
-  const dashUrl = `http://localhost:${PORT}/dashboard` + (tab ? '#' + tab : '');
+  const dashUrl = withToken(`http://localhost:${PORT}/dashboard` + (tab ? '#' + tab : ''));
 
   refreshPeek();
   if (o.open) openDashboard(dashUrl);
 
   console.log('');
-  console.log('  ' + c.green(dashUrl));
+  // Print the URL WITHOUT the secret. It is copied into chats, screenshots and issue
+  // reports; the browser already has the tokened copy it needs.
+  console.log('  ' + c.green(`http://localhost:${PORT}/dashboard` + (tab ? '#' + tab : '')));
   console.log('  ' + c.bold('live monitor running') + c.dim(' — Ctrl-C to stop (the gateway keeps running)'));
   console.log('');
 
@@ -131,4 +138,7 @@ async function run(argv = [], opts = {}) {
   await new Promise(() => {});
 }
 
-module.exports = { run };
+// `ensureGatewayUp` is exported because `cheaper export` streams from the gateway and
+// must use the SAME lifecycle every other consumer does — one health-gated process, not
+// a second way of starting one.
+module.exports = { run, ensureGatewayUp, isGatewayRunning, refreshPeek };

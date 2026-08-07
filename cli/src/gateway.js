@@ -95,8 +95,9 @@ async function start(argv, opts = {}) {
   console.log('  ' + c.green('✓') + ` gateway started (pid ${child.pid}) on port ${PORT}`
     + (served ? '' : c.amber(' — not answering yet; check: cheaper gateway status')));
   console.log(c.dim('  Point your client at it:  ') + `export ANTHROPIC_BASE_URL=http://localhost:${PORT}`);
-  console.log(c.dim('  Monitor:  ') + dashUrl);
-  if (opts.open) await promptThenOpen(dashUrl, 'the dashboard');
+  console.log(c.dim('  Monitor:  ') + dashUrl + c.dim('   (open it with `cheaper dashboard` — it carries the local token)'));
+  // Only the browser gets the tokened URL; the printed one above stays shareable.
+  if (opts.open) await promptThenOpen(require('./token').withToken(dashUrl), 'the dashboard');
 }
 
 function stop() {

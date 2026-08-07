@@ -1,5 +1,5 @@
 {
-  "description": "Adaptive model router — inject the routing policy on session start and every prompt so triage-and-escalate stays active.",
+  "description": "Adaptive model router — inject the routing policy on session start and every prompt so triage-and-escalate stays active, and hand the model the already-computed Cheaper.app savings line so it never has to run a command to close a reply.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,11 +7,6 @@
           {
             "type": "command",
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/context/router-policy.md\"",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/inject-tagline-cmd.js\"",
             "timeout": 10
           }
         ]
@@ -28,7 +23,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/inject-tagline-cmd.js\"",
-            "timeout": 10
+            "timeout": 15
           }
         ]
       }

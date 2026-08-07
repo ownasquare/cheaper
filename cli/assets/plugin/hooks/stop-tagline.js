@@ -46,11 +46,16 @@ function main() {
 
   const bin = resolveCheaper();
   const args = ['peek', '--tagline', '--transcript', transcript];
+  // CHEAPER_FROM_HOOK marks this as the hot path. The store's compactor REFUSES to run
+  // when it is set: this hook fires on every assistant turn and SIGTERMs its child at
+  // 12s, so a lazily-triggered compaction would be killed mid-way through the one
+  // operation in the whole product that can destroy data.
+  const env = Object.assign({}, process.env, { CHEAPER_FROM_HOOK: '1' });
   let r;
   try {
     r = bin
-      ? spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8', timeout: 12000 })
-      : spawnSync('cheaper', args, { encoding: 'utf8', timeout: 12000 });
+      ? spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8', timeout: 12000, env })
+      : spawnSync('cheaper', args, { encoding: 'utf8', timeout: 12000, env });
   } catch { return; }
   const line = ((r && r.stdout) || '').trim();
   if (line) process.stdout.write(line + '\n');

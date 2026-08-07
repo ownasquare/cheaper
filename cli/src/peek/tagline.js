@@ -32,7 +32,9 @@ function catalogAgeDays() {
 }
 const { HARNESSES, collectHarness, sessionStem, sessionIdFor } = require('./adapters');
 const { tokens: fmtTokens } = require('./render');
+const { pdayOf } = require('./periods');
 const ledger = require('./ledger');
+const events = require('./events');
 
 // The smallest saving we'll claim. Set at a full cent so an exact figure is never a
 // rounded-UP sub-cent value (e.g. $0.006 shown as an exact "$0.01").
@@ -76,7 +78,14 @@ function tokenBreakdown(r) {
 // catalog's as-of date) means a window that has expired in the real world is also
 // expired here, even on a catalog that has not been refreshed.
 function billingCtx(r) {
-  const day = r.ts ? new Date(r.ts).toISOString().slice(0, 10) : null;
+  // `pday` — the LOCAL calendar day, derived from ts + the offset in force at ts — is
+  // the single time frame the whole product uses. This line used to be
+  // `new Date(r.ts).toISOString().slice(0,10)`, i.e. the UTC date, while periods.js
+  // bucketed on local midnight. With a dated catalog window live (claude-sonnet-5 at
+  // $2/$10 through 2026-08-31), every such call after 17:00 local on the 31st on a
+  // UTC-7 machine priced as September — +50% in and out — while still being reported
+  // inside "This month (August)".
+  const day = r.ts ? pdayOf(r.ts, r.tzo) : null;
   return { speed: r.speed || null, serviceTier: r.serviceTier || null, at: day || undefined };
 }
 
@@ -126,7 +135,10 @@ function realizedFromRecords(records) {
   // Priceability is the ONLY gate. The old `&& modelTier(r.model)` conjunct was dead
   // code when modelTier defaulted to 'sonnet'; now that it fails closed it would have
   // silently dropped every model newer than CATALOG_AS_OF.
-  const priced = (records || []).filter((r) => isPriceable(r.model));
+  // Priceability is resolved at the CALL'S OWN DAY, matching costOfModel. Resolving it
+  // at today meant a promo window closing (or a catalog going stale) could blank a
+  // historical figure that had already been read and acted on.
+  const priced = (records || []).filter((r) => isPriceable(r.model, billingCtx(r)));
   if (!priced.length) return null;
   const idOf = (r) => resolveModel(r.model).id;   // canonical catalog id
   const at = sessionDate(priced);
@@ -238,6 +250,11 @@ function fetchGatewaySession(sessionId, timeoutMs = 600) {
       const req = http.get({
         host: '127.0.0.1', port,
         path: '/metrics?session=' + encodeURIComponent(sessionId),
+        // The gateway gates /metrics on the same-machine token. Sending it as a HEADER
+        // keeps the secret out of the gateway's access log. A 401 lands in the
+        // statusCode branch below and falls back to the transcript estimate — the
+        // tagline degrades, it never breaks the chat's closing line.
+        headers: require('../token').tokenHeaders(),
         timeout: timeoutMs,
       }, (res) => {
         if (res.statusCode !== 200) { res.resume(); return finish(null); }
@@ -380,7 +397,51 @@ function gatewayIsCurrent(summary) {
   return !!(summary && summary.catalog && summary.catalog.priced);
 }
 
-async function computeSavings(opts) {
+// Append THIS session's per-call events, as a bounded DELTA.
+//
+// Claude Code fires Stop on every assistant turn and this path re-scans the whole
+// session each time, so appending the session would write ~8,000 lines to represent 40
+// events on a 200-turn chat — and compaction's dedupe input would grow quadratically in
+// chat length. The cursor makes each append exact: only what is new, nothing at all
+// when nothing is new, and a full rev+1 restatement when the session ceiling moves.
+//
+// Entirely best-effort. An audit write must never be able to break a chat's closing line.
+function emitEvents(records, opts) {
+  try {
+    const { eventsFromRecords, assertPrivacySafe } = require('./emit');
+    const def = harnessDef(opts.only || 'claude-code');
+    const harness = def ? def.key : 'claude-code';
+    const sessionId = def ? sessionIdFor(def, opts) : null;
+    if (!sessionId) return null;
+    const all = eventsFromRecords(records, { harness, sessionId, prov: 'transcript', writer: 'cli' });
+    if (!all.length) return null;
+    const bad = assertPrivacySafe(all);
+    if (bad) {
+      // Refuse the write rather than persist a path or a prompt into an append-only log
+      // that cannot be un-written. Loud on stderr, silent in the hook.
+      if (!process.env.CHEAPER_QUIET) console.error('cheaper: refusing to write events — ' + bad);
+      return null;
+    }
+    const d = events.deltaFor(harness, sessionId, all);
+    if (!d.emit.length) return { written: 0, reason: d.reason };
+    const res = events.append(d.emit, 'cli');
+    // The cursor advances ONLY after a durable append. Advancing first would silently
+    // skip events whenever a write failed — the one failure mode an append-only audit
+    // log must not have.
+    if (res.written > 0 && d.cursor) events.writeCursor(harness, sessionId, d.cursor);
+    // First write for a session also claims coverage for its span, so a period before
+    // the store existed reports `not_covered` rather than $0.00.
+    try {
+      const store = require('./store');
+      const lo = Math.min(...all.map((e) => e.ts));
+      const hi = Math.max(...all.map((e) => e.ts));
+      if (Number.isFinite(lo) && Number.isFinite(hi)) store.addCoverage('observed', lo, hi + 1, harness);
+    } catch { /* coverage is a label, never a blocker */ }
+    return Object.assign({ reason: d.reason }, res);
+  } catch { return null; }
+}
+
+async function computeSavings(opts, preRecords) {
   const sid = opts.session || (opts.transcript ? sessionStem(opts.transcript) : null);
   if (sid) {
     const summary = await fetchGatewaySession(sid);
@@ -396,7 +457,7 @@ async function computeSavings(opts) {
       if (g && g.dollarsSaved >= SHOW_MIN_USD) return g; // exact, real — no "about " qualifier
     }
   }
-  const { records } = collectSessionRecords(opts);
+  const records = preRecords || collectSessionRecords(opts).records;
   return realizedFromRecords(records); // may be null
 }
 
@@ -419,7 +480,12 @@ function lifetimeSentence(tot, format) {
 
 async function run(opts = {}) {
   const o = Array.isArray(opts) ? { current: true } : (opts || {});
-  const result = await computeSavings(o);
+  // Collect ONCE and reuse. The transcript walk is the expensive part of the Stop hook
+  // (the storage append is 4.4 ms; the scan is not), so scanning twice — once to price
+  // and once to emit — would double the hook's cost against a 15 s SIGTERM budget.
+  const { records } = collectSessionRecords(o);
+  const result = await computeSavings(o, records);
+  const emitted = emitEvents(records, o);
   const line = buildTagline(result, brandFor(o.format), o.format);
   // Record THIS chat's realized saving in the lifetime ledger, keyed by session id so
   // repeated runs for the same chat overwrite (never double-count), then read back the
@@ -428,8 +494,19 @@ async function run(opts = {}) {
   try {
     const def = harnessDef(o.only || 'claude-code');
     const key = def ? sessionIdFor(def, o) : null;
+    // The chat's REAL timespan, so a legacy row buckets on when the work happened
+    // rather than on when this line printed.
+    let firstTs = Infinity; let lastTs = -Infinity;
+    for (const r of records || []) {
+      const t = Number(r.ts);
+      if (!Number.isFinite(t) || !t) continue;
+      if (t < firstTs) firstTs = t;
+      if (t > lastTs) lastTs = t;
+    }
+    const span = Number.isFinite(firstTs) && Number.isFinite(lastTs) && lastTs >= firstTs
+      ? { firstTs, lastTs } : null;
     tot = ledger.record(key, (result && result.dollarsSaved) || 0,
-      (result && result.tokensCredited) || 0, !!(result && result.exact));
+      (result && result.tokensCredited) || 0, !!(result && result.exact), span);
   } catch { tot = null; }
   const lifetime = lifetimeSentence(tot, o.format);
   let out = line ? line + lifetime : lifetime.trimStart();
@@ -445,6 +522,9 @@ async function run(opts = {}) {
       full: out,            // per-chat line + lifetime sentence — what actually prints
       lifetime: tot || null,
       source: result ? (result.exact ? 'gateway' : 'estimate') : 'none',
+      // What the per-call store actually wrote this run. `written: 0` with
+      // `reason: 'no-op'` is the healthy steady state on a long chat, not a failure.
+      events: emitted || null,
       result: result || null,
     }, null, 2));
     return;

@@ -23,12 +23,31 @@ function ledgerPath() {
 
 const MAX_CHATS = 20000; // soft cap so the file can't grow without bound
 
+// The shape THIS build understands. A file written by a NEWER Cheaper is refused
+// visibly rather than read as empty.
+const LEDGER_VERSION = 2;
+
+// Load the chat-grain ledger.
+//
+// Three outcomes, deliberately distinguished — the old code collapsed all of them into
+// `{version:1, chats:{}}`:
+//
+//   missing / unparseable -> start fresh. Correct: there is genuinely nothing here.
+//   NEWER than this build -> `tooNew: true`. A forward-incompatible ledger used to read
+//                            as ZERO SAVINGS, which is not "I don't know" — it is a
+//                            confident, wrong, downward restatement of the user's money.
+//   understood            -> the data.
 function load() {
   try {
     const j = JSON.parse(fs.readFileSync(ledgerPath(), 'utf8'));
-    if (j && typeof j === 'object' && j.chats && typeof j.chats === 'object') return j;
+    if (j && typeof j === 'object' && j.chats && typeof j.chats === 'object') {
+      if (Number(j.version) > LEDGER_VERSION) {
+        return { version: j.version, chats: {}, tooNew: true };
+      }
+      return j;
+    }
   } catch { /* missing or malformed → start fresh */ }
-  return { version: 1, chats: {} };
+  return { version: LEDGER_VERSION, chats: {} };
 }
 
 // Atomic write: temp file in the same dir + rename. rename(2) is atomic on POSIX and
@@ -52,11 +71,17 @@ function isoNow() {
   try { return new Date().toISOString(); } catch { return ''; }
 }
 
-// Drop the oldest entries (by `at`) if we're over the soft cap.
+// The field every consumer must bucket and sort on: when the chat's work actually
+// ENDED, falling back to the tagline-run time only for pre-0.3.0 rows that have no span.
+function bucketField(e) { return (e && (e.endedAt || e.at)) || ''; }
+
+// Drop the oldest entries if we're over the soft cap. Sorted on the SAME field the
+// buckets read — sorting on `at` while bucketing on `endedAt` would evict the wrong
+// rows, which on an append-only money record is not a cosmetic mistake.
 function prune(chats) {
   const keys = Object.keys(chats);
   if (keys.length <= MAX_CHATS) return chats;
-  keys.sort((a, b) => String(chats[a].at || '').localeCompare(String(chats[b].at || '')));
+  keys.sort((a, b) => String(bucketField(chats[a])).localeCompare(String(bucketField(chats[b]))));
   for (const k of keys.slice(0, keys.length - MAX_CHATS)) delete chats[k];
   return chats;
 }
@@ -75,10 +100,25 @@ function prune(chats) {
 // skipped whenever the new value was not positive. That turned the lifetime total into
 // a high-water mark of every optimistic estimate ever computed. Any chat with a real
 // key and real tokens is now written, whatever its sign.
-function record(key, usd, tokens, exact) {
+// `span` (optional) is { firstTs, lastTs } — the real timespan of the chat's calls.
+//
+// `at` is when the TAGLINE RAN, which is not when the work happened: re-running an old
+// chat's tagline used to move its entire savings into "today", and every one of the six
+// live entries carried an `at` inside a single four-hour band for work spanning weeks.
+// The per-call event store is the real fix; recording the true span here at least stops
+// a legacy row from lying about its own date, and `endedAt` is what any bucketing must
+// read.
+function record(key, usd, tokens, exact, span) {
   if (key && tokens > 0 && Number.isFinite(usd)) {
     const data = load();
-    data.chats[key] = { usd, tokens, exact: !!exact, at: isoNow() };
+    // A ledger from a newer build is never overwritten — that would destroy data this
+    // build cannot even read.
+    if (data.tooNew) return totals(data);
+    const e = { usd, tokens, exact: !!exact, at: isoNow() };
+    if (span && Number.isFinite(span.firstTs)) e.startedAt = new Date(span.firstTs).toISOString();
+    if (span && Number.isFinite(span.lastTs)) e.endedAt = new Date(span.lastTs).toISOString();
+    data.chats[key] = e;
+    data.version = LEDGER_VERSION;
     prune(data.chats);
     save(data);
     return totals(data);
@@ -105,4 +145,4 @@ function totals(data) {
   return { usd, tokens, chats, exact };
 }
 
-module.exports = { record, totals, load, ledgerPath };
+module.exports = { record, totals, load, ledgerPath, bucketField, LEDGER_VERSION };

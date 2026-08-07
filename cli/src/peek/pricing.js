@@ -79,8 +79,14 @@ function detectFamily(modelId) {
 
 // True when we hold published rates for this exact model. Callers use this to skip a
 // record entirely rather than price it at some neighbour's rate.
-function isPriceable(modelId) {
-  return resolveModel(modelId) != null;
+//
+// `opts.at` MUST be the row's own day, exactly like costOfModel. They used to run in
+// different time frames — priceability resolved at TODAY while the price resolved at
+// the row's date — so a provider shipping a new model, or a user not refreshing the
+// catalog for six weeks, could flip an already-read historical period from "$16.15
+// saved" to blank with no code change and no data change. Same question, same date.
+function isPriceable(modelId, opts) {
+  return resolveModel(modelId, opts) != null;
 }
 
 // The catalog entry a family+tier bucket prices as, or null if that family has no

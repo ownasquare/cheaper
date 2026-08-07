@@ -7,6 +7,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 
 // Where '~' resolves. Overridable so tests point at fixtures and power users can
 // scan an alternate profile — without ever hard-coding the real home in logic.
@@ -61,12 +62,34 @@ function findFiles(dir, exts, opts = {}) {
 // Stream a JSONL file line-by-line, invoking onObj(parsedObject) for each valid
 // JSON line. Bad lines are skipped. Reading is capped at maxBytes so a runaway
 // multi-GB transcript can't stall the scan.
+// PRIVACY: a stable, path-free identifier for a source file.
+//
+// The event store must be able to say "this row came from that transcript, and the
+// transcript still matches" WITHOUT storing a filesystem path. A path is
+// `/Users/<name>/Documents/Github/<client>/…` — it names the person and often their
+// customer, and it is exactly the field a future per-project breakdown would reach for.
+// The hash answers the identity question; the basename (a uuid for every harness we
+// read) is safe on its own.
+function fileIdentity(file) {
+  const abs = String(file || '');
+  return {
+    sfile: crypto.createHash('sha256').update(abs).digest('hex').slice(0, 12),
+    sbase: path.basename(abs),
+  };
+}
+
+// Stream a JSONL file line-by-line, invoking onObj(parsedObject) for each valid JSON
+// line. `opts.onMeta({ sha, bytes, truncated })` receives a content digest of the bytes
+// actually read — the store records it so an export can state whether the source is
+// still verifiable, and distinguish "the file rotated" from "the row was lost".
 function readJsonl(file, onObj, opts = {}) {
   const maxBytes = opts.maxBytes || 32 * 1024 * 1024;
   let raw;
+  let truncated = false;
   try {
     const st = fs.statSync(file);
     if (st.size > maxBytes) {
+      truncated = true;
       // Read only the tail (most recent turns) of an oversized transcript.
       const fd = fs.openSync(file, 'r');
       const buf = Buffer.alloc(maxBytes);
@@ -79,6 +102,15 @@ function readJsonl(file, onObj, opts = {}) {
       raw = fs.readFileSync(file, 'utf8');
     }
   } catch { return; }
+  if (opts.onMeta) {
+    try {
+      opts.onMeta({
+        sha: crypto.createHash('sha256').update(raw).digest('hex').slice(0, 10),
+        bytes: Buffer.byteLength(raw),
+        truncated,
+      });
+    } catch { /* metadata is best-effort; never block the scan */ }
+  }
   for (const line of raw.split('\n')) {
     const s = line.trim();
     if (!s || s[0] !== '{') continue;
@@ -97,4 +129,4 @@ function readJson(file, maxBytes = 32 * 1024 * 1024) {
   } catch { return null; }
 }
 
-module.exports = { HOME, expand, exists, findFiles, readJsonl, readJson };
+module.exports = { HOME, expand, exists, findFiles, readJsonl, readJson, fileIdentity };

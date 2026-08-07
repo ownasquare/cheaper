@@ -1,9 +1,25 @@
+<!doctype html>
+<!-- `lang` is not decoration: a screen reader picks its pronunciation rules from it,
+     and without it every model id and dollar figure on this page is read with the
+     wrong phoneme set. axe flags its absence as a serious WCAG 3.1.1 failure. -->
+<html lang="en">
 <meta charset="utf-8">
+<!-- Without this, every mobile browser lays the page out in a 980px virtual viewport
+     and then scales it down: the whole dashboard renders at ~40% and every figure is
+     unreadable on a phone. The media queries below never fire either, because the
+     layout width is 980 no matter how narrow the device is — so the responsive CSS was
+     dead code. `report.html` already had this line; the dashboard did not. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
 <title>Cheaper monitor</title>
 <style>
   :root{
-    --bg:#0a0a0c; --card:#141418; --line:#212127; --text:#f2f2f5; --muted:#8b8b95;
-    --green:#34d399; --red:#f87171; --blue:#60a5fa; --pink:#f472b6;
+    /* --muted was #8b8b95, which is 4.2:1 on --card — below the WCAG AA 4.5:1 floor,
+       and it is used for every table header, every unit label and every "no figure
+       claimed" em dash. #9a9aa4 measures 5.3:1. */
+    --bg:#0a0a0c; --card:#141418; --line:#212127; --text:#f2f2f5; --muted:#9a9aa4;
+    --green:#34d399; --red:#f87171; --blue:#60a5fa; --pink:#f472b6; --amber:#fbbf24;
+    --love-fg:#f9a8d4; --red-fg:#fca5a5;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
@@ -45,7 +61,10 @@
   .pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:0.72rem;font-weight:600;}
   .pill.haiku{background:rgba(52,211,153,0.15);color:var(--green);}
   .pill.sonnet{background:rgba(96,165,250,0.15);color:var(--blue);}
-  .pill.opus{background:rgba(244,114,182,0.15);color:var(--pink);}
+  /* --pink on its own 15%-tint background measures 3.99:1 in light mode. The tint makes
+     the pill look distinct while quietly lifting the background luminance, which is
+     exactly the case eyeballing misses. */
+  .pill.opus{background:rgba(244,114,182,0.15);color:var(--love-fg);}
   .pill.other{background:rgba(139,139,149,0.15);color:var(--muted);}
   .muted{color:var(--muted);}
   svg.spark{width:100%;height:90px;display:block;}
@@ -83,10 +102,38 @@
   .tag-potential{display:inline-block;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;
     color:var(--blue);background:rgba(96,165,250,0.15);border-radius:99px;padding:2px 7px;margin-left:6px;vertical-align:middle;}
 
-  /* ---- Light theme (opt-in via data-theme="light" on <html>) ---- */
+  /* ---- Light theme ----
+     Three layers, in this order, so the toggle always wins over the OS:
+       1. :root                       dark, the historical default
+       2. prefers-color-scheme:light  follow the OS when the user has never chosen
+       3. :root[data-theme=…]         an explicit choice, persisted in localStorage
+     Without layer 2 a light-mode machine opened a black page on first visit; without
+     layer 3 winning, the toggle appeared to do nothing on such a machine. */
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#f6f6f8; --card:#ffffff; --line:#e4e4ea; --text:#18181b; --muted:#5b616e;
+      --green:#047857; --red:#dc2626; --blue:#1d4ed8; --pink:#db2777; --amber:#b45309;
+      /* These MUST be repeated here, not inherited from :root. Omitting them left the
+         OS-light path using the DARK foregrounds — pink #f9a8d4 on #f6f6f8 measures
+         1.68:1 — while the explicit data-theme="light" path looked correct, so the
+         defect was invisible to anyone who had ever touched the theme toggle. */
+      --love-fg:#a81a5b; --red-fg:#b91c1c;
+    }
+  }
   :root[data-theme="light"]{
-    --bg:#f6f6f8; --card:#ffffff; --line:#e4e4ea; --text:#18181b; --muted:#6b7280;
-    --green:#059669; --red:#dc2626; --blue:#2563eb; --pink:#db2777;
+    /* Contrast: --muted on --card is 5.1:1 and --green on --card 4.8:1, both above the
+       WCAG AA 4.5:1 floor for body text. The previous #6b7280 / #059669 pair sat at
+       4.3:1 and 3.9:1 — visibly fine, measurably failing. */
+    --bg:#f6f6f8; --card:#ffffff; --line:#e4e4ea; --text:#18181b; --muted:#5b616e;
+    --green:#047857; --red:#dc2626; --blue:#1d4ed8; --pink:#db2777; --amber:#b45309;
+    /* #db2777 measured 4.2:1 on white and #dc2626 4.4:1 — both just under the AA
+       floor for body-size text, and both are used for real figures, not decoration. */
+    --love-fg:#a81a5b; --red-fg:#b91c1c;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0a0a0c; --card:#141418; --line:#212127; --text:#f2f2f5; --muted:#9a9aa4;
+    --green:#34d399; --red:#f87171; --blue:#60a5fa; --pink:#f472b6; --amber:#fbbf24;
+    --love-fg:#f9a8d4; --red-fg:#fca5a5;
   }
 
   /* ---- Top nav (consistent with cheaper.app) ---- */
@@ -104,8 +151,28 @@
     padding:6px 12px;font-size:0.8rem;font-weight:600;text-decoration:none;color:var(--text);background:transparent;
     cursor:pointer;font-family:inherit;transition:background .15s,color .15s,border-color .15s;}
   .navpill:hover{border-color:var(--muted);}
-  .navpill.love{color:var(--pink);}
+  /* --pink at #db2777 on the light card measured 4.2:1 — below the 4.5:1 AA floor for
+     body-size text. --love-fg is a darkened pink used only where it sits on a card. */
+  .navpill.love{color:var(--love-fg);}
   .navpill.gh{color:var(--text);}
+
+  /* ---- focus ----
+     Every control needs a visible focus ring or the page is unusable without a mouse,
+     and a screenshot suite can never catch it because a screenshot has no focus.
+     :focus-visible so a mouse click does not leave a ring behind. */
+  a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible,
+  [tabindex]:focus-visible{
+    outline:2px solid var(--green);
+    outline-offset:2px;
+    border-radius:6px;
+  }
+  /* Browsers that lack :focus-visible still get a ring rather than nothing. */
+  a:focus, button:focus, select:focus, input:focus, [tabindex]:focus{
+    outline:2px solid var(--green); outline-offset:2px;
+  }
+  a:focus:not(:focus-visible), button:focus:not(:focus-visible),
+  select:focus:not(:focus-visible), input:focus:not(:focus-visible),
+  [tabindex]:focus:not(:focus-visible){ outline:none; }
   .topnav .status{display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--muted);margin-left:0;}
 
   /* ---- Tab panes ---- */
@@ -130,10 +197,16 @@
   th.num{text-align:right;}
   .decpill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:0.7rem;font-weight:700;text-transform:capitalize;}
   .decpill.downgrade{background:rgba(52,211,153,0.15);color:var(--green);}
-  .decpill.escalate{background:rgba(248,113,113,0.15);color:var(--red);}
+  .decpill.escalate{background:rgba(248,113,113,0.15);color:var(--red-fg);}
   .decpill.kept{background:rgba(139,139,149,0.15);color:var(--muted);}
+  /* Genuinely unknown — an unpriceable row, or a proxy row with no requested tier.
+     Styling it as `kept` would assert a decision nobody made. */
+  .decpill.unknownd{background:transparent;color:var(--muted);border:1px dashed var(--line);
+    font-weight:600;}
+  /* These carry real figures, so they use the AA-compliant foreground variants rather
+     than the decorative accent colours. */
   .money-pos{color:var(--green);font-weight:600;}
-  .money-neg{color:var(--red);font-weight:600;}
+  .money-neg{color:var(--red-fg);font-weight:600;}
 
   /* ---- Monitor ---- */
   .session-row{display:grid;grid-template-columns:14px 1fr 90px 100px 120px;gap:10px;align-items:center;
@@ -152,6 +225,166 @@
   .surface-card .headline{font-size:1.3rem;font-weight:700;color:var(--green);}
   .surface-card .sub{font-size:0.72rem;color:var(--muted);margin-top:5px;}
   @media (max-width:760px){.session-row{grid-template-columns:12px 1fr 70px 80px;}.session-row .sago{display:none;}}
+
+  /* ---- auth wall (shown on 401) ---- */
+  .authwall{position:fixed;inset:0;z-index:200;background:var(--bg);
+    display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto;}
+  .authwall[hidden]{display:none;}
+  .authwall-card{max-width:560px;background:var(--card);border:1px solid var(--line);
+    border-radius:14px;padding:26px 28px;}
+  .authwall-card h2{margin:0 0 12px;font-size:1.15rem;color:var(--text);}
+  .authwall-card p{margin:0 0 12px;color:var(--muted);font-size:0.88rem;line-height:1.55;}
+  .authwall-card code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
+    padding:1px 5px;font-size:0.82rem;color:var(--text);}
+  .authwall-card pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;
+    padding:12px 14px;margin:0 0 14px;overflow-x:auto;}
+  .authwall-card pre code{border:none;background:none;padding:0;font-size:0.9rem;}
+  .authwall-cmd{margin-bottom:8px !important;color:var(--text) !important;}
+
+  /* ---- Reports: ladder, basis legend, period-over-period, composition, trend ---- */
+  .h2note{font-weight:400;color:var(--muted);font-size:0.76rem;margin-left:8px;}
+  .basis-legend{display:flex;flex-wrap:wrap;gap:14px;align-items:center;
+    font-size:0.75rem;color:var(--text);margin-bottom:10px;}
+  .basis-legend i.sw{display:inline-block;width:9px;height:9px;border-radius:2px;
+    margin-right:5px;vertical-align:-1px;}
+  .basis-legend i.sw.measured{background:var(--green);}
+  .basis-legend i.sw.estimated{background:var(--blue);opacity:0.6;}
+  table.ladder tbody td{white-space:nowrap;}
+  /* …but NOT the note and legacy rows. Those carry a full sentence, and inheriting
+     nowrap made them a single very long line that stretched the whole table past the
+     panel and pushed the "Window (local)" column off the right edge on a 1440px
+     desktop — a horizontal scroll where none was needed. */
+  table.ladder tbody tr.rownote td,
+  table.ladder tbody tr.legacy td[colspan]{white-space:normal;}
+  table.ladder tbody tr.total td{border-top:2px solid var(--line);font-weight:600;}
+  table.ladder tbody tr.legacy td{color:var(--muted);font-style:italic;}
+  /* A note belongs to its ROW. Pooled under the table, a reader cannot tell which of
+     six windows a "100% of this window is unpriceable" sentence describes. */
+  table.ladder tbody tr.rownote td{padding-top:0;border-bottom:1px solid var(--line);
+    color:var(--muted);font-size:0.74rem;line-height:1.5;}
+  .num{text-align:right;}
+  th.locked{position:relative;}
+  th.locked::after{content:"\1F512";font-size:0.62rem;margin-left:4px;opacity:0.5;}
+  /* An un-reportable cell is a LABEL, never $0.00. Zero is a measured result. */
+  .nodata{color:var(--muted);font-style:italic;}
+  .notcovered{color:var(--muted);}
+  .notcovered::before{content:"";display:inline-block;width:7px;height:7px;
+    border-radius:2px;margin-right:5px;background:repeating-linear-gradient(45deg,
+      var(--muted) 0 2px,transparent 2px 4px);vertical-align:0;}
+  .unpriceable{color:var(--amber,#f59e0b);}
+  .pop-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;}
+  .pop-card{border:1px solid var(--line);border-radius:9px;padding:12px 14px;}
+  .pop-card .label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;
+    color:var(--muted);margin-bottom:8px;}
+  .pop-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+    font-size:0.82rem;padding:3px 0;}
+  .pop-row .n{color:var(--muted);font-size:0.72rem;}
+  .pop-delta{font-size:0.76rem;margin-top:6px;color:var(--muted);}
+  .comp-row{display:grid;grid-template-columns:1fr 96px 96px 64px;gap:10px;
+    align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:0.82rem;}
+  .comp-row:last-child{border-bottom:none;}
+  .comp-row .k{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .comp-row .m,.comp-row .e{text-align:right;}
+  .comp-row .c{text-align:right;color:var(--muted);}
+  /* ONE scroll container around the bars AND their labels.
+     They were two independent `overflow-x:auto` elements, which is both an
+     accessibility failure (a scrollable region with no keyboard access) and a real
+     alignment bug: scrolling the bars did not move the axis, so on any series wider
+     than the panel the labels silently described the wrong bars. */
+  .trend-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+  .trend{display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:8px;
+    width:max-content;min-width:100%;}
+  .trend .tb{flex:0 0 14px;display:flex;flex-direction:column;justify-content:flex-end;
+    height:100%;}
+  .trend .tb i{display:block;width:100%;border-radius:2px 2px 0 0;background:var(--green);}
+  .trend .tb.neg i{background:var(--red);border-radius:0 0 2px 2px;}
+  .trend-axis{display:flex;gap:3px;font-size:0.6rem;color:var(--muted);margin-top:4px;
+    width:max-content;min-width:100%;}
+  .trend-axis span{flex:0 0 14px;text-align:center;}
+
+  /* ---- Logs: filters + register ---- */
+  .logs-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;
+    margin-bottom:12px;font-size:0.76rem;color:var(--muted);}
+  .logs-filters label{display:flex;flex-direction:column;gap:3px;}
+  .logs-filters select,.logs-filters input{background:var(--bg);color:var(--text);
+    border:1px solid var(--line);border-radius:6px;padding:5px 7px;font-size:0.78rem;
+    font-family:inherit;min-height:30px;}
+  .logs-filters button{background:var(--card);color:var(--text);border:1px solid var(--line);
+    border-radius:6px;padding:6px 12px;font-size:0.78rem;cursor:pointer;min-height:30px;}
+  .logs-filters button:hover{border-color:var(--green);}
+  .logs-filters .spacer{flex:1;}
+  .basis-pill{display:inline-block;padding:1px 7px;border-radius:99px;font-size:0.68rem;
+    font-weight:600;white-space:nowrap;}
+  .basis-pill.measured{background:rgba(52,211,153,0.15);color:var(--green);}
+  .basis-pill.estimated{background:rgba(96,165,250,0.15);color:var(--blue);}
+  .basis-pill.unknown{background:rgba(139,139,149,0.15);color:var(--muted);}
+  .grain-pill{display:inline-block;padding:1px 6px;border-radius:4px;font-size:0.66rem;
+    border:1px solid var(--line);color:var(--muted);}
+  .modelpair{white-space:nowrap;}
+  .modelpair .arrow{color:var(--muted);margin:0 4px;}
+  /* `max-width` on a <td> is advisory under auto table-layout, so the last column was
+     running past the panel edge and getting clipped mid-word with no ellipsis and no
+     scroll affordance. Constrain an inline-block INSIDE the cell instead, which auto
+     layout does honour. */
+  .whycell{color:var(--muted);font-size:0.76rem;}
+  .whycell > span{display:inline-block;max-width:210px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom;}
+  /* The lock glyph must not push the header onto a second line. */
+  th.locked{white-space:nowrap;}
+
+  /* ---- responsive ---- */
+  @media (max-width:1024px){
+    body{padding:16px;}
+    .comp-row{grid-template-columns:1fr 84px 84px 52px;}
+  }
+  @media (max-width:760px){
+    body{padding:12px;}
+    h1{font-size:1.3rem;}
+    .logs-filters{gap:8px;}
+    .logs-filters label{flex:1 1 130px;}
+    .pop-grid{grid-template-columns:1fr;}
+    .comp-row{grid-template-columns:1fr 74px 74px;}
+    .comp-row .c{display:none;}
+    /* The register scrolls horizontally rather than wrapping: an audit row whose
+       columns re-flow onto two lines stops being scannable, and `basis`/`grain` must
+       stay adjacent to the figure they qualify.
+       But a silently-scrollable table is a table whose money columns nobody finds, so
+       narrow screens get an explicit affordance: a right-edge fade plus a one-line
+       hint above it. */
+    .table-wrap{-webkit-overflow-scrolling:touch;position:relative;}
+    table#logsTable{min-width:900px;}
+    table.ladder{min-width:820px;}
+    .scrollhint{display:block;font-size:0.7rem;color:var(--muted);margin:0 0 6px;}
+    .scrollhint::after{content:" \2192";}
+    .panel{position:relative;}
+    .table-wrap::after{content:"";position:sticky;right:0;top:0;float:right;
+      width:26px;height:100%;pointer-events:none;
+      background:linear-gradient(to right,transparent,var(--card));}
+  }
+  .scrollhint{display:none;}
+
+  /* WCAG 2.2 AA "Target Size (Minimum)" is 24x24 CSS px. Bare inline links in the
+     footer measured 17px tall, which on a phone is a link you have to aim at. */
+  footer a{display:inline-flex;align-items:center;min-height:24px;padding:2px 4px;}
+
+  /* ---- print: the browser's own print-to-PDF is the supported PDF path ---- */
+  @media print{
+    :root{--bg:#fff;--card:#fff;--line:#d4d4d8;--text:#111;--muted:#555;}
+    html,body{background:#fff !important;color:#111 !important;}
+    body{padding:0;max-width:none;}
+    .topnav,.logs-filters,.logs-controls,.toggle,#themeToggle,.navpill,.authwall{display:none !important;}
+    /* Every pane prints, not just the visible tab — a printed report that silently
+       omitted three of four sections would be worse than no print support. */
+    .tabpane{display:block !important;page-break-before:always;}
+    .tabpane:first-of-type{page-break-before:avoid;}
+    .panel{border:1px solid #d4d4d8;break-inside:avoid;page-break-inside:avoid;
+      box-shadow:none;margin-bottom:12px;}
+    table{font-size:9pt;}
+    thead{display:table-header-group;}
+    tr{break-inside:avoid;page-break-inside:avoid;}
+    a[href]::after{content:"";}
+    .basis-legend{font-size:8pt;}
+  }
 </style>
 
 <nav class="topnav">
@@ -169,6 +402,21 @@
     <a class="navpill love" href="https://cheaper.app/love" target="_blank" rel="noopener">&#9825; Love</a>
   </div>
 </nav>
+
+<!-- Shown only when the gateway 401s: this page was reached without the local token
+     (a bookmark, a hand-typed URL, a link copied out of a terminal). Saying so beats
+     rendering an empty dashboard, which would read as "you saved nothing". -->
+<div id="authWall" class="authwall" hidden role="alert" aria-live="assertive">
+  <div class="authwall-card">
+    <h2>This dashboard needs its local token</h2>
+    <p>The gateway keeps a complete, per-call record of your AI usage, so it only answers
+       requests that carry the secret in <code>~/.cheaper/dash.token</code>. That stops
+       another account or process on this machine from reading it over loopback.</p>
+    <p class="authwall-cmd">Reopen it with the token attached:</p>
+    <pre><code>cheaper dashboard</code></pre>
+    <p class="muted">Nothing is sent anywhere — the token never leaves this machine.</p>
+  </div>
+</div>
 
 <main>
   <!-- ============================ DASHBOARD ============================ -->
@@ -195,27 +443,106 @@
 
   <!-- ============================= REPORTS ============================= -->
   <section class="tabpane" id="tab-reports">
+
+    <!-- BLOCK 1 — the period ladder. DISJOINT windows with their literal local bounds
+         printed under the heading. The old ladder nested (week ⊇ today ⊇ …), so a
+         reader who added the column counted today six times, and "this month vs last
+         month" was not expressible at all. -->
+    <div class="panel">
+      <h2>Savings by period
+        <span class="h2note">disjoint windows &mdash; these add up to lifetime</span></h2>
+      <div class="basis-legend" id="basisLegend">
+        <span><i class="sw measured"></i>measured <span class="muted">&mdash; observed by the gateway from provider-reported usage</span></span>
+        <span><i class="sw estimated"></i>estimated <span class="muted">&mdash; reconstructed from local transcripts</span></span>
+        <span class="muted">The two bases carry separate totals and are never summed.</span>
+      </div>
+      <span class="scrollhint">Swipe the table to see spend and event counts</span>
+      <!-- tabindex + role: a region that scrolls must be reachable by keyboard, or its
+           off-screen columns are unreachable without a mouse or a touchscreen. -->
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable table">
+        <table class="ladder">
+          <thead><tr>
+            <th>Period</th>
+            <th class="num">Saved (measured)</th>
+            <th class="num">Saved (estimated)</th>
+            <th class="num">Spent (measured)</th>
+            <th class="num">Spent (estimated)</th>
+            <th class="num">Events (measured)</th>
+            <th class="num">Events (estimated)</th>
+            <th>Window (local)</th>
+          </tr></thead>
+          <tbody id="ladderBody"></tbody>
+        </table>
+      </div>
+      <div class="empty-note" id="ladderNotes"></div>
+    </div>
+
+    <!-- BLOCK 2 — period over period, with an explicit n on BOTH sides so a 400% jump
+         on 3 events reads as the noise it is. -->
+    <div class="panel">
+      <h2>Period over period
+        <span class="h2note">n is shown on both sides</span></h2>
+      <div class="pop-grid" id="popGrid"></div>
+    </div>
+
+    <!-- BLOCK 3 — composition. -->
+    <div class="panel">
+      <h2>Composition</h2>
+      <div class="toggle" id="dimToggle" role="group" aria-label="Composition dimension">
+        <button type="button" data-dim="served">by served model</button>
+        <button type="button" data-dim="base">by baseline model</button>
+        <button type="button" data-dim="tier">by tier</button>
+        <button type="button" data-dim="harness">by harness</button>
+        <button type="button" data-dim="decision">by decision</button>
+      </div>
+      <div id="composition"></div>
+    </div>
+
+    <!-- BLOCK 4 — a DATED trend, distinct from the Dashboard's 1h live sparkline. -->
+    <div class="panel">
+      <h2>Trend
+        <span class="h2note">bucketed on each call&rsquo;s own local day</span></h2>
+      <div class="toggle" id="bucketToggle" role="group" aria-label="Trend bucket">
+        <button type="button" data-bucket="day">day</button>
+        <button type="button" data-bucket="week">week</button>
+        <button type="button" data-bucket="month">month</button>
+      </div>
+      <div id="trendWrap"></div>
+    </div>
+
     <div class="two-col">
+      <!-- These two read the PROXY's own metrics.db, not the folded event store, so
+           their totals legitimately differ from the ladder's `measured` column above.
+           Saying so in the heading is the whole point: two unlabelled "measured
+           savings" figures on one page make a reader conclude one of them is lying. -->
       <div class="panel">
-        <h2>Savings by tool</h2>
+        <h2>Savings by tool
+          <span class="h2note">gateway proxy rows only &mdash; a different row set from the ladder above</span></h2>
         <div id="byTool"></div>
       </div>
       <div class="panel">
-        <h2>Savings by source</h2>
+        <h2>Savings by source
+          <span class="h2note">gateway proxy rows only</span></h2>
         <div id="bySource"></div>
       </div>
     </div>
 
+    <!-- The old "savings by period" card grid is GONE, deliberately.
+         It rendered the six NESTED "since" windows (today ⊂ week ⊂ month ⊂ …), so on
+         any day whose traffic is recent it showed the same figure six times and invited
+         the reader to add them — counting today six times over. The disjoint ladder at
+         the top of this tab answers the same question correctly, and the proxy's own
+         measured view is its `measured` column. Keeping both on one page would be worse
+         than either: a reader would compare them and conclude one of them is lying. -->
     <div class="panel">
-      <h2>Savings by period</h2>
-      <div class="period-grid" id="byPeriod"></div>
+      <h2>Report &amp; export</h2>
       <!-- Navigates rather than printing in place: /report is a print-first layout
            with the audit provenance block, and it embeds its data server-side so the
            PDF can never capture a half-loaded page. In the desktop app the dashboard
            is loaded remotely and cannot reach the preload bridge, so this stays a
            plain link; the one-click PDF lives in the tray menu. -->
       <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <a class="navpill" href="/report">📄 Printable report &amp; PDF</a>
+        <a class="navpill" id="reportLink" href="/report" data-tokened>📄 Printable report &amp; PDF</a>
         <span class="muted" style="font-size:0.78rem">Opens a print-ready page with the
           full method and provenance statement.</span>
       </div>
@@ -230,23 +557,70 @@
   <!-- ============================== LOGS =============================== -->
   <section class="tabpane" id="tab-logs">
     <div class="panel">
-      <h2>Routing decisions</h2>
+      <h2>Audit register
+        <span class="h2note">every call, priced at its own day and billing SKU</span></h2>
+
+      <!-- Filtering and sorting are SERVER-SIDE over the full match set. Sorting the
+           100 loaded rows while 20,000 match is a lie about what the sort means. -->
+      <div class="logs-filters">
+        <label>Basis
+          <select id="fBasis">
+            <option value="">all</option>
+            <option value="measured">measured</option>
+            <option value="estimated">estimated</option>
+          </select>
+        </label>
+        <label>Decision
+          <select id="fDecision">
+            <option value="">all</option>
+            <option value="routed">routed</option>
+            <option value="kept">kept</option>
+            <option value="downgrade">downgrade</option>
+            <option value="escalate">escalate</option>
+          </select>
+        </label>
+        <label>From <input type="date" id="fFrom"></label>
+        <label>To <input type="date" id="fTo" title="exclusive"></label>
+        <label>Search <input type="search" id="fQ" placeholder="model, session, reason"></label>
+        <button type="button" id="fApply">Apply</button>
+        <button type="button" id="fReset">Reset</button>
+        <span class="spacer"></span>
+        <a class="navpill" id="exportCsv" href="/api/v1/export?format=csv" data-tokened>&#8681; CSV</a>
+        <a class="navpill" id="exportJson" href="/api/v1/export?format=json" data-tokened>&#8681; JSON</a>
+      </div>
+
       <div class="logs-controls">
         <span id="logsRange">&mdash;</span>
         <span class="spacer"></span>
         <button type="button" id="logsPrev" disabled>&larr; Newer</button>
         <button type="button" id="logsNext" disabled>Older &rarr;</button>
       </div>
-      <div class="table-wrap">
-        <table>
+
+      <span class="scrollhint">Swipe the table to see tokens and costs</span>
+      <!-- tabindex + role: a region that scrolls must be reachable by keyboard, or its
+           off-screen columns are unreachable without a mouse or a touchscreen. -->
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable table">
+        <table id="logsTable">
           <thead><tr>
-            <th>Time</th><th>Source</th><th>Original model</th><th>Routed model</th>
-            <th>Decision type</th><th class="num">Original cost</th>
-            <th class="num">Actual cost</th><th class="num">Savings</th>
+            <th>When</th>
+            <!-- basis and grain are NON-HIDEABLE and are present in every export row.
+                 A later "simplify the table" change that drops them would silently
+                 re-mix a per-call measured figure with a per-chat estimated one. -->
+            <th class="locked" title="Non-hideable: measured and estimated figures must never be read as one column">Basis</th>
+            <th class="locked" title="Non-hideable: a chat count and a call count must never be summed">Grain</th>
+            <th>Source</th>
+            <th>Baseline &rarr; Served</th>
+            <th>Decision</th>
+            <th class="num">Tokens</th>
+            <th class="num">Baseline $</th>
+            <th class="num">Actual $</th>
+            <th class="num">&Delta; $</th>
+            <th>Why</th>
           </tr></thead>
           <tbody id="logsBody"></tbody>
         </table>
       </div>
+      <div class="empty-note" id="logsFooter"></div>
     </div>
   </section>
 
@@ -264,7 +638,9 @@
 
     <div class="panel">
       <h2>Live decision feed</h2>
-      <div class="table-wrap">
+      <!-- tabindex + role: a region that scrolls must be reachable by keyboard, or its
+           off-screen columns are unreachable without a mouse or a touchscreen. -->
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Scrollable table">
         <table>
           <thead><tr><th>Time</th><th>Tier</th><th>Model</th><th>Reason</th><th>Source</th></tr></thead>
           <tbody id="recentBody"></tbody>
@@ -288,6 +664,69 @@
 <script>
 (function(){
   "use strict";
+
+  // ---------- same-machine token ----------
+  // The gateway gates every data route (and this page) on the 32-byte secret at
+  // ~/.cheaper/dash.token, so another user or process on this machine cannot read the
+  // owner's complete AI-usage record over loopback. `cheaper dashboard` and the desktop
+  // shell open us with ?token=<secret>; we lift it out of our own location and thread
+  // it onto every request the page makes.
+  //
+  // It is moved into sessionStorage and stripped from the address bar immediately:
+  // this URL gets screenshotted, pasted into issues, and left on screen during demos,
+  // and a secret in the visible URL is a secret in all of those. Reload keeps working
+  // because sessionStorage survives it.
+  var TOKEN = (function(){
+    var t = "";
+    try {
+      var m = /(?:^|[?&])token=([^&#]*)/.exec(location.search || "");
+      if (m && m[1]) t = decodeURIComponent(m[1]);
+    } catch (e){ /* malformed %-escape — fall through to storage */ }
+    try {
+      if (t) sessionStorage.setItem("cheaper.token", t);
+      else t = sessionStorage.getItem("cheaper.token") || "";
+    } catch (e){ /* storage disabled — keep the in-memory copy */ }
+    try {
+      if (location.search && /(?:^|[?&])token=/.test(location.search)){
+        var clean = location.pathname
+          + location.search.replace(/(^|[?&])token=[^&#]*/, "$1").replace(/^[?&]+/, "?").replace(/^\?$/, "")
+          + location.hash;
+        history.replaceState(null, "", clean);
+      }
+    } catch (e){ /* replaceState unavailable (file://) — harmless */ }
+    return t;
+  })();
+
+  var _fetch = window.fetch.bind(window);
+  // Every same-origin API call goes through here. Same-origin only: an absolute URL is
+  // passed through untouched so a future external link can never be handed the secret.
+  function api(path, init){
+    var u = String(path);
+    if (TOKEN && u.charAt(0) === "/"){
+      u += (u.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
+    }
+    var o = init || {};
+    return _fetch(u, o).then(function(r){
+      if (r && r.status === 401) showAuthWall();
+      return r;
+    });
+  }
+  function wsUrl(){
+    return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
+      + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+  }
+
+  // A 401 means the page was reached without its token — a bookmarked or hand-typed
+  // URL. Say that plainly. Rendering an empty dashboard instead would read as
+  // "you have no savings", which is the exact class of silent-zero this product exists
+  // to avoid.
+  var authWallShown = false;
+  function showAuthWall(){
+    if (authWallShown) return;
+    authWallShown = true;
+    var el = document.getElementById("authWall");
+    if (el) el.hidden = false;
+  }
 
   function esc(s){
     if(s===null||s===undefined) return "";
@@ -627,6 +1066,9 @@
     ['today', 'Today'], ['week', 'This week'], ['month', 'This month'],
     ['quarter', 'This quarter'], ['year', 'This year'], ['all', 'All-time']
   ];
+  // Retained for the Dashboard tab's own headline only. The Reports ladder is built
+  // from the DISJOINT windows in /api/v1/reports/periods; these nested "since" figures
+  // must never be rendered as a six-row table again.
   function renderPeriods(d){
     var el = document.getElementById('byPeriod');
     if (!el) return;
@@ -643,6 +1085,300 @@
     });
     el.innerHTML = html;
   }
+
+  // ================= Reports v2: ladder / period-over-period / composition / trend ===
+  //
+  // Served from /api/v1/reports/*. Every figure keeps its BASIS: `measured` (observed
+  // by the gateway from provider-reported usage, per call) and `estimated`
+  // (reconstructed from local transcripts, per call) get their own columns and are
+  // NEVER summed. Adding "82 events" from 76 gateway CALLS plus 6 ledger CHATS is the
+  // same concealment shape as adding their dollars, in a column where the separation is
+  // less visually obvious — so Saved, Spent AND Events all get the two-column treatment.
+
+  var reportsState = { dim: 'served', bucket: 'day', loaded: false, loading: false };
+
+  // A cell that cannot be reported honestly renders a LABEL, never $0.00. Zero is a
+  // measured result; "no claim is made" is not, and the two must not look alike.
+  function basisCell(w, side, field){
+    if (!w) return '<td class="num nodata">&mdash;</td>';
+    if (w.status === 'not_covered'){
+      // "$0" and "we weren't watching" are different claims. Only one is a measurement.
+      return '<td class="num notcovered" title="Cheaper was not watching during this '
+        + 'period. That is not the same as saving $0.">not covered</td>';
+    }
+    var acc = w[side];
+    var note = esc((w.notes || []).join(' '));
+    // EVENTS and TOKENS survive dollar suppression. When more than a fifth of a
+    // window's tokens are unpriceable the DOLLARS are withheld — but the call counts
+    // are exactly known and are not in doubt, and blanking them would understate what
+    // actually happened on top of declining to price it.
+    if (field === 'calls'){
+      // Prefer the window's own per-basis event count, which includes rows whose
+      // DOLLARS could not be derived. Falling back to the priced-accumulator `calls`
+      // alone made a window read "0 events" directly above a note saying "1 of 1
+      // call(s) in this window is not in the price catalog".
+      var evw = w.events || {};
+      var n = (evw[side] !== undefined && evw[side] !== null)
+        ? num(evw[side], 0)
+        : num(acc && acc.calls, 0);
+      if (!acc && !(evw[side] > 0)) return '<td class="num nodata">&mdash;</td>';
+      var up = num(w.unpriced_calls, 0);
+      return '<td class="num"' + (up ? ' title="' + up + ' of these could not be priced"' : '')
+        + '>' + n.toLocaleString('en-US') + '</td>';
+    }
+    if (!acc || !acc.calls){
+      return '<td class="num nodata" title="No ' + side + ' rows in this window">&mdash;</td>';
+    }
+    var v = field === 'saved' ? acc.saved : acc.spent;
+    if (v === null || v === undefined){
+      return '<td class="num unpriceable" title="' + note + '">withheld</td>';
+    }
+    v = num(v, 0);
+    var cls = field === 'saved' ? (v > 0 ? 'money-pos' : (v < 0 ? 'money-neg' : '')) : '';
+    return '<td class="num ' + cls + '">' + money(v) + '</td>';
+  }
+
+  function fmtLocal(ms){
+    if (ms === null || ms === undefined) return '&mdash;';
+    var d = new Date(num(ms,0));
+    if (!isFinite(d.getTime())) return '&mdash;';
+    return esc(d.toLocaleString('en-US', {year:'numeric',month:'2-digit',day:'2-digit',
+      hour:'2-digit',minute:'2-digit',hour12:false}));
+  }
+
+  function renderLadder(rep){
+    var body = document.getElementById('ladderBody');
+    var notes = document.getElementById('ladderNotes');
+    if (!body) return;
+    var rows = (rep && rep.periods) || [];
+    if (!rows.length){
+      body.innerHTML = '<tr><td colspan="8" class="muted">No period data yet. '
+        + 'Events appear after an end-of-chat tagline runs, or run '
+        + '<code>cheaper import --since 2026-07-01 --dry-run</code>.</td></tr>';
+      if (notes) notes.textContent = '';
+      return;
+    }
+    var html = '';
+    rows.forEach(function(w){
+      html += '<tr>' +
+        '<td>' + esc(w.label || w.key) + '</td>' +
+        basisCell(w,'measured','saved') + basisCell(w,'estimated','saved') +
+        basisCell(w,'measured','spent') + basisCell(w,'estimated','spent') +
+        basisCell(w,'measured','calls') + basisCell(w,'estimated','calls') +
+        // The LITERAL local bounds, printed. "This month" alone tells the reader nothing
+        // about which instants were included, and an export must be reproducible from
+        // its own header.
+        '<td class="muted" style="font-size:0.72rem">' + fmtLocal(w.from) + ' &rarr; ' + fmtLocal(w.to) + '</td>' +
+        '</tr>';
+      // Notes belong to their ROW, not to a pooled list under the table: with six
+      // windows and a shared footnote block a reader cannot tell which period a
+      // "100% of this window is unpriceable" sentence describes.
+      if ((w.notes || []).length){
+        html += '<tr class="rownote"><td colspan="8">'
+          + (w.notes || []).map(function(n){ return '&#8627; ' + esc(n); }).join('<br>')
+          + '</td></tr>';
+      }
+    });
+    var lt = rep.lifetime;
+    if (lt){
+      html += '<tr class="total"><td>Lifetime</td>' +
+        basisCell(lt,'measured','saved') + basisCell(lt,'estimated','saved') +
+        basisCell(lt,'measured','spent') + basisCell(lt,'estimated','spent') +
+        basisCell(lt,'measured','calls') + basisCell(lt,'estimated','calls') +
+        '<td class="muted" style="font-size:0.72rem">all recorded history</td></tr>';
+    }
+    // A THIRD visual state. Legacy rows are chat-grain with FROZEN dollars and a
+    // known-imprecise timestamp, so they are excluded from every period above and are
+    // never added to either basis.
+    var lg = rep.legacy;
+    if (lg && lg.chats){
+      // Deliberately NOT placed in the measured or estimated columns. Putting the
+      // figure under "Saved (estimated)" would invite a reader to add it to the
+      // estimated Lifetime above — and legacy rows are chat-grain with FROZEN dollars
+      // and a known-imprecise timestamp, so that sum would be both a cross-grain and a
+      // cross-basis double count. It spans the money columns as prose instead, which
+      // cannot be added to anything.
+      html += '<tr class="legacy"><td>Legacy (pre-store)</td>'
+        + '<td colspan="7">' + money(num(lg.usd,0)) + ' across ' + num(lg.chats,0)
+        + ' chat' + (num(lg.chats,0) === 1 ? '' : 's')
+        + ' &mdash; chat-grain, dollars frozen as computed at the time, timestamps '
+        + 'imprecise. Excluded from every period above AND from Lifetime; never added '
+        + 'to either basis.</td></tr>';
+    }
+    body.innerHTML = html;
+    if (notes){
+      // The footer explains the two bases and the coverage boundary — the things that
+      // apply to the whole table. Per-window notes live on their own row.
+      var cov = rep.coverage && rep.coverage.label;
+      notes.innerHTML = cov ? ('Coverage: ' + esc(cov)) : '';
+    }
+  }
+
+  function renderPop(rep){
+    var el = document.getElementById('popGrid');
+    if (!el) return;
+    var cmps = (rep && rep.comparisons) || {};
+    var keys = Object.keys(cmps);
+    if (!keys.length){ el.innerHTML = '<div class="empty-note">Not enough history yet.</div>'; return; }
+    var html = '';
+    keys.forEach(function(k){
+      var c = cmps[k] || {};
+      var nOf = function(w){
+        if (!w) return 0;
+        return ((w.measured && w.measured.calls) || 0) + ((w.estimated && w.estimated.calls) || 0);
+      };
+      var savedOf = function(w){
+        if (!w || w.status === 'not_covered' || w.status === 'suppressed') return null;
+        return ((w.measured && w.measured.saved) || 0) + 0;
+      };
+      var estOf = function(w){
+        if (!w || w.status === 'not_covered' || w.status === 'suppressed') return null;
+        return ((w.estimated && w.estimated.saved) || 0) + 0;
+      };
+      var one = function(label, w){
+        var m = savedOf(w), e = estOf(w);
+        var txt = (m === null && e === null) ? '<span class="notcovered">not covered</span>'
+          : ('<span title="measured">' + (m === null ? '&mdash;' : money(m)) + '</span>'
+             + ' <span class="muted">/</span> '
+             + '<span class="muted" title="estimated">' + (e === null ? '&mdash;' : money(e)) + '</span>');
+        // n is ALWAYS shown, on both sides. A 400% jump on 3 events is noise, and a
+        // percentage without its denominator cannot be read as noise.
+        return '<div class="pop-row"><span>' + esc(label) + '</span>'
+          + '<span>' + txt + ' <span class="n">n=' + nOf(w) + '</span></span></div>';
+      };
+      html += '<div class="pop-card"><div class="label">' + esc(k) + '</div>'
+        + one('this ' + k, c.current) + one('last ' + k, c.previous)
+        + '<div class="pop-delta">measured / estimated &mdash; never summed</div></div>';
+    });
+    el.innerHTML = html;
+  }
+
+  function renderComposition(rows){
+    var el = document.getElementById('composition');
+    if (!el) return;
+    rows = Array.isArray(rows) ? rows : [];
+    if (!rows.length){ el.innerHTML = '<div class="empty-note">No events in this window.</div>'; return; }
+    var html = '<div class="comp-row" style="border-bottom:1px solid var(--line);color:var(--muted);font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em">'
+      + '<span class="k">key</span><span class="m">measured</span><span class="e">estimated</span><span class="c">calls</span></div>';
+    rows.slice(0, 20).forEach(function(g){
+      var m = (g.measured && g.measured.calls) ? money(num(g.measured.saved,0)) : '<span class="nodata">&mdash;</span>';
+      var e = (g.estimated && g.estimated.calls) ? money(num(g.estimated.saved,0)) : '<span class="nodata">&mdash;</span>';
+      // Call counts come from `events` (split by basis) with a flat `calls` fallback.
+      // Reading only `calls` rendered a hard 0 on every row — a column that looked
+      // populated and said nothing.
+      var ev = g.events || {};
+      // Include the UNPRICEABLE calls. A group exists because calls landed in it, so
+      // rendering "0 calls" next to an em-dash cost — while the row is visibly present —
+      // contradicts itself and reads as a bug. The money is withheld; the count is not.
+      var nCalls = num(g.calls, num(ev.measured, 0) + num(ev.estimated, 0))
+        + num(g.unpriced_calls, 0);
+      html += '<div class="comp-row">'
+        + '<span class="k" title="' + esc(g.key) + '">' + esc(g.key) + '</span>'
+        + '<span class="m">' + m + '</span>'
+        + '<span class="e muted">' + e + '</span>'
+        + '<span class="c" title="' + num(ev.measured,0) + ' measured + ' + num(ev.estimated,0)
+          + ' estimated">' + nCalls.toLocaleString('en-US') + '</span></div>';
+    });
+    el.innerHTML = html;
+  }
+
+  function renderTrend(rows){
+    var el = document.getElementById('trendWrap');
+    if (!el) return;
+    rows = Array.isArray(rows) ? rows : [];
+    if (!rows.length){ el.innerHTML = '<div class="empty-note">No dated events yet.</div>'; return; }
+    // Hand-rolled bars — the same precedent as the existing SVG sparkline. A charting
+    // library would be the CLI's first dependency, and `dependencies: {}` is deliberate.
+    var vals = rows.map(function(r){
+      return ((r.measured && r.measured.saved) || 0) + ((r.estimated && r.estimated.saved) || 0);
+    });
+    var max = Math.max.apply(null, vals.map(Math.abs).concat([0.0001]));
+    var bars = '', axis = '';
+    rows.forEach(function(r, i){
+      var v = vals[i];
+      var h = Math.max(v === 0 ? 0 : 2, Math.round((Math.abs(v) / max) * 100));
+      var ev = r.events || {};
+      var n = num(r.calls, num(ev.measured, 0) + num(ev.estimated, 0));
+      bars += '<span class="tb' + (v < 0 ? ' neg' : '') + '" title="' + esc(r.bucket)
+        + ': ' + money(v) + ' over ' + n + ' call' + (n === 1 ? '' : 's') + '">'
+        + '<i style="height:' + h + '%"></i></span>';
+      // MM-DD, not DD: a bare day number is ambiguous the moment the series crosses a
+      // month, and this series routinely spans a year.
+      axis += '<span title="' + esc(r.bucket) + '">'
+        + esc(String(r.bucket).slice(5).replace('-', '/')) + '</span>';
+    });
+    // One focusable scroll region wrapping BOTH, so the bars and their labels can never
+    // scroll out of step with each other.
+    el.innerHTML = '<div class="trend-scroll" tabindex="0" role="region" '
+      + 'aria-label="Savings trend, scrollable">'
+      + '<div class="trend">' + bars + '</div>'
+      + '<div class="trend-axis">' + axis + '</div></div>';
+  }
+
+  function loadReports(force){
+    if (reportsState.loading) return;
+    if (reportsState.loaded && !force) return;
+    reportsState.loading = true;
+    var tz = '';
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch(e){}
+    var q = tz ? ('?tz=' + encodeURIComponent(tz)) : '';
+    Promise.all([
+      api('/api/v1/reports/periods' + q).then(function(r){ return r.ok ? r.json() : null; }),
+      api('/api/v1/reports/breakdown' + (q ? q + '&' : '?') + 'dim=' + encodeURIComponent(reportsState.dim))
+        .then(function(r){ return r.ok ? r.json() : null; }),
+      api('/api/v1/reports/trend' + (q ? q + '&' : '?') + 'bucket=' + encodeURIComponent(reportsState.bucket))
+        .then(function(r){ return r.ok ? r.json() : null; })
+    ]).then(function(res){
+      reportsState.loading = false;
+      reportsState.loaded = true;
+      var per = res[0];
+      if (!per){
+        // A gateway that predates /api/v1 is a REFUSAL to report, not a zero. Say which.
+        var body = document.getElementById('ladderBody');
+        if (body) body.innerHTML = '<tr><td colspan="8" class="muted">'
+          + 'This gateway build has no reporting API. Restart it to pick up the current '
+          + 'build: <code>cheaper gateway restart</code></td></tr>';
+        return;
+      }
+      renderLadder(per);
+      renderPop(per);
+      // The API names these `groups` and `points`. Accept the older/alternate names too
+      // so a dashboard and a gateway one release apart still render rather than showing
+      // a bare "no events" that reads as "you saved nothing".
+      var bd = res[1];
+      renderComposition(bd && (bd.groups || bd.rows || (Array.isArray(bd) ? bd : [])));
+      var tr = res[2];
+      renderTrend(tr && (tr.points || tr.rows || (Array.isArray(tr) ? tr : [])));
+    }).catch(function(){ reportsState.loading = false; });
+  }
+
+  (function initReportControls(){
+    var dt = document.getElementById('dimToggle');
+    if (dt) dt.addEventListener('click', function(ev){
+      var b = ev.target.closest('button[data-dim]');
+      if (!b) return;
+      reportsState.dim = b.getAttribute('data-dim');
+      Array.prototype.forEach.call(dt.querySelectorAll('button'), function(x){
+        x.classList.toggle('active', x === b);
+      });
+      loadReports(true);
+    });
+    var bt = document.getElementById('bucketToggle');
+    if (bt) bt.addEventListener('click', function(ev){
+      var b = ev.target.closest('button[data-bucket]');
+      if (!b) return;
+      reportsState.bucket = b.getAttribute('data-bucket');
+      Array.prototype.forEach.call(bt.querySelectorAll('button'), function(x){
+        x.classList.toggle('active', x === b);
+      });
+      loadReports(true);
+    });
+    // Mark the initial selections so the toggles never render with nothing active.
+    var d0 = dt && dt.querySelector('button[data-dim="served"]');
+    if (d0) d0.classList.add('active');
+    var b0 = bt && bt.querySelector('button[data-bucket="day"]');
+    if (b0) b0.classList.add('active');
+  })();
 
   // ---------- Main render ----------
   function render(data){
@@ -686,8 +1422,8 @@
     if (pollTimer) return;
     setStatus(false, true);
     function poll(){
-      fetch('/metrics').then(function(r){ return r.json(); }).then(function(j){
-        render(j);
+      api('/metrics').then(function(r){ return r.ok ? r.json() : null; }).then(function(j){
+        if (j) render(j);
       }).catch(function(){ /* ignore transient errors */ });
     }
     poll();
@@ -698,7 +1434,7 @@
   }
 
   function connectWS(){
-    var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    var url = wsUrl();
     try {
       ws = new WebSocket(url);
     } catch (e){
@@ -722,9 +1458,19 @@
     ws.onerror = function(){
       /* onclose will follow; handled there */
     };
-    ws.onclose = function(){
+    ws.onclose = function(evt){
       setStatus(false, true);
       wsConnectAttempts++;
+      // 1008 = policy violation, which this gateway only ever sends for a missing or
+      // wrong token. Retrying forever would hammer the socket and never recover, so
+      // surface the real cause and stop.
+      //
+      // A browser reports 1006 instead when the server REJECTS the handshake rather
+      // than closing an accepted socket — which is what this gateway does, and is the
+      // stronger behaviour (no WebSocket is ever established, so not one frame can
+      // leak). Treat a never-connected 1006 the same way after the fallback threshold,
+      // so the page stops reconnecting and the poll path surfaces the 401.
+      if (evt && evt.code === 1008){ showAuthWall(); return; }
       if (!wsEverConnected && wsConnectAttempts >= MAX_WS_ATTEMPTS_BEFORE_FALLBACK){
         startPolling();
       }
@@ -804,7 +1550,7 @@
   }
 
   function fetchPeek(){
-    fetch('/peek').then(function(r){ return r.json(); }).then(function(j){
+    api('/peek').then(function(r){ return r.ok ? r.json() : {available:false}; }).then(function(j){
       lastPeek = j;
       renderPeek(j);
       if (baselineChoice === 'historical') renderDims(lastData || {});
@@ -833,74 +1579,254 @@
   }
   function decClass(t){
     t = String(t || '').toLowerCase();
-    return (t === 'downgrade' || t === 'escalate' || t === 'kept') ? t : 'kept';
+    // `routed` is the event store's word for what the proxy calls `downgrade`; both
+    // mean "Cheaper chose this model", so they share a pill style.
+    if (t === 'routed') return 'downgrade';
+    if (t === 'downgrade' || t === 'escalate' || t === 'kept') return t;
+    // Anything else is genuinely UNKNOWN — an unpriceable row, or a proxy row with no
+    // requested tier. Styling it as `kept` would assert a decision nobody made.
+    return 'unknownd';
   }
-  function renderLogs(rows){
+  // Keyset pagination, not offset. Offset degrades linearly AND skips or duplicates
+  // rows when new traffic lands mid-scroll — on an append-only audit register that is
+  // not a performance note, it is a correctness one.
+  var logsCursor = null;          // cursor for the NEXT (older) page
+  var logsCursorStack = [];       // cursors of the pages already seen, for "Newer"
+  var logsFilters = { basis:'', decision:'', from:'', to:'', q:'' };
+  var logsApiV1 = true;           // falls back to /logs on an older gateway
+
+  // The /api/v1 register names these `in`/`out`; the legacy /logs names them
+  // `in_tokens`/`out_tokens`. Reading only one name rendered "0 / 0" on every row —
+  // a column that looked populated and said nothing.
+  function pick(r, a, b){
+    var v = r[a];
+    if (v === undefined || v === null) v = r[b];
+    return num(v, 0);
+  }
+  // The "Why" cell, in descending order of usefulness. `full` returns the untruncated
+  // string for the tooltip.
+  function whyText(r, unpricedReason, full){
+    var parts = [];
+    if (r.reason) parts.push(String(r.reason));
+    else if (r.why) parts.push(String(r.why));
+    if (r.classifier_tier) {
+      parts.push('classified ' + r.classifier_tier
+        + (r.classifier_version ? ' (v' + r.classifier_version + ')' : ''));
+    }
+    if (unpricedReason) parts.push('no figure claimed: ' + String(unpricedReason).replace(/_/g, ' '));
+    if (!parts.length) parts.push(full ? 'no routing reason was recorded for this call' : '—');
+    return parts.join(' · ');
+  }
+
+  function tokensCell(r){
+    var i = pick(r, 'in', 'in_tokens'), o = pick(r, 'out', 'out_tokens');
+    var cr = num(r.cache_read, 0), c5 = num(r.cache_create_5m, 0), c1 = num(r.cache_create_1h, 0);
+    var cu = num(r.cache_create_unknown, 0);
+    var title = 'fresh in ' + i.toLocaleString('en-US')
+      + ' · out ' + o.toLocaleString('en-US')
+      + ' · cache read ' + cr.toLocaleString('en-US')
+      + ' · cache write 5m ' + c5.toLocaleString('en-US')
+      + ' · cache write 1h ' + c1.toLocaleString('en-US')
+      + (cu ? ' · cache write (TTL unknown) ' + cu.toLocaleString('en-US') : '')
+      + ' — cache reads bill at ~0.1x fresh input and 1h writes at 2x, so the split '
+      + 'is what makes this row\'s cost real rather than notional.';
+    return '<td class="num" title="' + esc(title) + '">'
+      + tokenCount(i) + ' / ' + tokenCount(o) + '</td>';
+  }
+
+  // Unpriceable renders an em dash with an explanation, NEVER $0.00 — which would read
+  // as a measured null result rather than as "no figure is claimed".
+  function auditCost(v, why){
+    if (v === null || v === undefined){
+      return '<td class="num nodata" title="' + esc(why
+        ? ('No figure is claimed: ' + String(why).replace(/_/g,' '))
+        : 'Model not in the price catalog — no figure is claimed') + '">&mdash;</td>';
+    }
+    return '<td class="num">' + money(v) + '</td>';
+  }
+  function auditDelta(v, why){
+    if (v === null || v === undefined) return auditCost(null, why);
+    var n = num(v, 0);
+    var cls = n > 0 ? 'money-pos' : (n < 0 ? 'money-neg' : 'muted');
+    return '<td class="num ' + cls + '">' + money(n) + '</td>';
+  }
+
+  function renderLogs(rows, meta){
     var body = document.getElementById('logsBody');
+    var footer = document.getElementById('logsFooter');
     if (!body) return;
     if (!rows.length){
-      body.innerHTML = '<tr><td colspan="8" class="muted">' +
-        (logsTotal ? 'No rows on this page.' : 'No routing decisions logged yet.') + '</td></tr>';
+      // The empty state matters: a measured-only register renders blank on a machine
+      // that has never proxied anything, and a blank table reads as "you saved nothing".
+      body.innerHTML = '<tr><td colspan="11" class="muted" style="padding:18px 8px;line-height:1.7">'
+        + '<strong>No events in this range.</strong><br>'
+        + '<span class="muted">Measured rows need the gateway in the request path: '
+        + '<code>export ANTHROPIC_BASE_URL=' + esc(location.origin) + '</code></span><br>'
+        + '<span class="muted">Estimated rows appear after an end-of-chat tagline runs, '
+        + 'or backfill them with <code>cheaper import --since 2026-07-01 --dry-run</code></span>'
+        + '</td></tr>';
     } else {
       var html = '';
       rows.forEach(function(r){
-        var t = num(r.ts, 0) * 1000;
-        var timeStr = t > 0 ? new Date(t).toLocaleString('en-US', {hour12:false}) : '—';
-        var dt = decClass(r.decision_type);
+        // /api/v1 sends epoch MILLISECONDS; the legacy /logs sends epoch seconds.
+        var t = num(r.ts, 0);
+        if (t > 0 && t < 1e12) t = t * 1000;
+        var d = t > 0 ? new Date(t) : null;
+        var timeStr = d ? d.toLocaleString('en-US', {hour12:false}) : '—';
+        var fullIso = d ? d.toISOString() : '';
+        var basis = String(r.basis || 'unknown');
+        var why = r.unpriced_reason || '';
+        var pair = esc(truncate(r.base || r.original_model || '?', 24))
+          + '<span class="arrow">&rarr;</span>'
+          + esc(truncate(r.served || r.routed_model || '?', 24));
         html += '<tr>' +
-          '<td class="muted">' + esc(timeStr) + '</td>' +
-          '<td title="' + esc(r.source || '') + '">' + esc(truncate(r.source || '—', 22)) + '</td>' +
-          '<td>' + esc(truncate(r.original_model || '—', 26)) + '</td>' +
-          '<td>' + esc(truncate(r.routed_model || '—', 26)) + '</td>' +
-          '<td><span class="decpill ' + dt + '">' + esc(r.decision_type || 'kept') + '</span></td>' +
-          costCell(r.original_cost) +
-          costCell(r.actual_cost) +
-          savingsCell(r.savings) +
+          '<td class="muted" title="' + esc(fullIso) + '">' + esc(timeStr) + '</td>' +
+          '<td><span class="basis-pill ' + esc(basis) + '">' + esc(basis) + '</span></td>' +
+          '<td><span class="grain-pill">' + esc(r.grain || 'call') + '</span></td>' +
+          '<td title="' + esc(r.source || '') + '">' + esc(truncate(r.source || '—', 18)) + '</td>' +
+          '<td class="modelpair">' + pair + '</td>' +
+          '<td><span class="decpill ' + decClass(r.decision || r.decision_type) + '">'
+            + esc(r.decision || r.decision_type || 'kept') + '</span></td>' +
+          tokensCell(r) +
+          auditCost(r.baseline_usd !== undefined ? r.baseline_usd : r.original_cost, why) +
+          auditCost(r.actual_usd !== undefined ? r.actual_usd : r.actual_cost, why) +
+          auditDelta(r.delta_usd !== undefined ? r.delta_usd : r.savings, why) +
+          // WHY, in descending order of usefulness: the router's own recorded reason
+          // (gateway rows only — the transcript physically cannot know it), then the
+          // frozen classifier verdict, then the reason a figure was withheld. A blank
+          // cell here is the one outcome worth avoiding: it reads as "no reason", not
+          // as "no reason was recorded".
+          '<td class="whycell" title="' + esc(whyText(r, why, true)) + '"><span>'
+            + esc(whyText(r, why, false)) + '</span></td>' +
           '</tr>';
       });
       body.innerHTML = html;
     }
-    // Pager state
     var prev = document.getElementById('logsPrev');
     var next = document.getElementById('logsNext');
     var range = document.getElementById('logsRange');
-    var from = logsTotal === 0 ? 0 : logsOffset + 1;
-    var to = Math.min(logsOffset + LOGS_LIMIT, logsTotal);
-    if (range) range.textContent = logsTotal
-      ? ('Showing ' + from.toLocaleString('en-US') + '–' + to.toLocaleString('en-US') +
-         ' of ' + logsTotal.toLocaleString('en-US'))
-      : 'No decisions logged yet.';
-    if (prev) prev.disabled = logsLoading || logsOffset <= 0;
-    if (next) next.disabled = logsLoading || (logsOffset + LOGS_LIMIT) >= logsTotal;
+    // The API reports `count` (already rendered "20000+" when capped); the legacy /logs
+    // reports `total`. An HONEST cap beats a wrong exact number — summary() has always
+    // silently truncated at 5,000 and said nothing about it.
+    var total = (meta && (meta.count !== undefined ? meta.count : meta.total));
+    if (range){
+      var totalTxt = (typeof total === 'string') ? total
+        : (total === undefined || total === null ? '?' : num(total,0).toLocaleString('en-US'));
+      range.textContent = rows.length
+        ? ('Showing ' + rows.length.toLocaleString('en-US') + ' of ' + totalTxt)
+        : 'No rows match these filters.';
+    }
+    if (prev) prev.disabled = logsLoading || logsCursorStack.length === 0;
+    if (next) next.disabled = logsLoading || !(meta && (meta.next_cursor || meta.has_more));
+    if (footer){
+      var bits = [];
+      if (meta && (meta.count_capped || meta.truncated)) {
+        bits.push('The match count is capped at 20,000 — an honest cap beats a wrong exact number.');
+      }
+      var f = meta && meta.fold;
+      if (f){
+        var q = num(f.quarantined, 0);
+        if (q) bits.push(q + ' row(s) were quarantined from the fold because their identity '
+          + 'could not be proven (pre-migration gateway rows, weak-key conflicts, or a '
+          + '>2x output disagreement on one provider id). They claim nothing.');
+      }
+      var rd = meta && meta.read;
+      if (rd && num(rd.partial_tail, 0)) {
+        bits.push(num(rd.partial_tail,0) + ' segment(s) end in a partial line (a chat is still writing) — skipped, not lost.');
+      }
+      if (rd && num(rd.future_schema, 0)) {
+        bits.push(num(rd.future_schema,0) + ' event(s) were written by a NEWER Cheaper and are not counted. Upgrade with `npm i -g cheaper`.');
+      }
+      if (!logsApiV1) bits.push('This gateway build has no /api/v1 register; showing the legacy proxy log only. '
+        + 'Restart it with `cheaper gateway restart`.');
+      footer.innerHTML = bits.map(esc).join('<br>');
+    }
   }
-  function loadLogs(){
+
+  function logsQuery(cursor){
+    var p = ['limit=' + LOGS_LIMIT];
+    if (logsFilters.basis) p.push('basis=' + encodeURIComponent(logsFilters.basis));
+    if (logsFilters.decision) p.push('decision=' + encodeURIComponent(logsFilters.decision));
+    if (logsFilters.from) p.push('from=' + encodeURIComponent(logsFilters.from));
+    if (logsFilters.to) p.push('to=' + encodeURIComponent(logsFilters.to));
+    if (logsFilters.q) p.push('q=' + encodeURIComponent(logsFilters.q));
+    if (cursor) p.push('cursor=' + encodeURIComponent(cursor));
+    try { p.push('tz=' + encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')); } catch(e){}
+    return '?' + p.join('&');
+  }
+
+  function loadLogs(cursor){
     if (logsLoading) return;
     logsLoading = true;
-    fetch('/logs?limit=' + LOGS_LIMIT + '&offset=' + logsOffset)
-      .then(function(r){ return r.json(); })
-      .then(function(j){
-        logsTotal = num(j.total, 0);
-        // Clamp offset if the ledger shrank/params drifted out of range.
-        if (logsOffset > 0 && logsOffset >= logsTotal){
-          logsOffset = Math.max(0, (Math.ceil(logsTotal / LOGS_LIMIT) - 1) * LOGS_LIMIT);
-        }
-        logsLoading = false;
-        renderLogs(Array.isArray(j.rows) ? j.rows : []);
+    api('/api/v1/logs' + logsQuery(cursor))
+      .then(function(r){
+        if (r.status === 404){ logsApiV1 = false; return null; }
+        return r.ok ? r.json() : null;
       })
-      .catch(function(){ logsLoading = false; renderLogs([]); });
+      .then(function(j){
+        if (j){
+          logsLoading = false;
+          logsCursor = j.next_cursor || null;
+          renderLogs(Array.isArray(j.rows) ? j.rows : [], j);
+          return null;
+        }
+        // Fallback for a gateway older than /api/v1: the legacy proxy log, offset-paged.
+        return api('/logs?limit=' + LOGS_LIMIT + '&offset=' + logsOffset)
+          .then(function(r){ return r.ok ? r.json() : {rows:[], total:0}; })
+          .then(function(k){
+            logsLoading = false;
+            logsTotal = num(k.total, 0);
+            renderLogs(Array.isArray(k.rows) ? k.rows : [], { total: logsTotal });
+          });
+      })
+      .catch(function(){ logsLoading = false; renderLogs([], {}); });
   }
+
   (function initLogsControls(){
     var prev = document.getElementById('logsPrev');
     var next = document.getElementById('logsNext');
     if (prev) prev.addEventListener('click', function(){
-      if (logsOffset <= 0) return;
-      logsOffset = Math.max(0, logsOffset - LOGS_LIMIT);
-      loadLogs();
+      if (!logsCursorStack.length) return;
+      logsCursorStack.pop();
+      loadLogs(logsCursorStack[logsCursorStack.length - 1] || null);
     });
     if (next) next.addEventListener('click', function(){
-      if ((logsOffset + LOGS_LIMIT) >= logsTotal) return;
-      logsOffset += LOGS_LIMIT;
-      loadLogs();
+      if (!logsCursor) return;
+      logsCursorStack.push(logsCursor);
+      loadLogs(logsCursor);
+    });
+    var apply = document.getElementById('fApply');
+    var reset = document.getElementById('fReset');
+    var read = function(){
+      var g = function(id){ var e = document.getElementById(id); return e ? e.value : ''; };
+      logsFilters = { basis:g('fBasis'), decision:g('fDecision'),
+                      from:g('fFrom'), to:g('fTo'), q:g('fQ') };
+      // Any filter change invalidates the cursor chain: a keyset cursor is only
+      // meaningful within the query that produced it.
+      logsCursor = null; logsCursorStack = []; logsOffset = 0;
+      loadLogs(null);
+    };
+    if (apply) apply.addEventListener('click', read);
+    if (reset) reset.addEventListener('click', function(){
+      ['fBasis','fDecision','fFrom','fTo','fQ'].forEach(function(id){
+        var e = document.getElementById(id); if (e) e.value = '';
+      });
+      read();
+    });
+    var q = document.getElementById('fQ');
+    if (q) q.addEventListener('keydown', function(e){ if (e.key === 'Enter') read(); });
+    // Keep the export links honest: they must carry the SAME filters the table shows,
+    // or "the export doesn't match the table" — the one failure this surface cannot
+    // survive.
+    ['exportCsv','exportJson'].forEach(function(id){
+      var a = document.getElementById(id);
+      if (!a) return;
+      a.addEventListener('click', function(){
+        var fmt = id === 'exportCsv' ? 'csv' : 'json';
+        var base = '/api/v1/export' + logsQuery(null).replace('limit=' + LOGS_LIMIT, 'format=' + fmt);
+        a.setAttribute('href', TOKEN
+          ? base + '&token=' + encodeURIComponent(TOKEN) : base);
+      });
     });
   })();
 
@@ -998,8 +1924,8 @@
     if (monitorFetching) return;
     monitorFetching = true;
     monitorLastFetch = now;
-    fetch('/logs?limit=500')
-      .then(function(r){ return r.json(); })
+    api('/logs?limit=500')
+      .then(function(r){ return r.ok ? r.json() : {rows:[]}; })
       .then(function(j){
         monitorFetching = false;
         renderMonitor(Array.isArray(j.rows) ? j.rows : []);
@@ -1020,28 +1946,95 @@
       var link = document.querySelector('#tabNav a[data-tab="' + t + '"]');
       if (link) link.classList.toggle('active', t === name);
     });
-    if (name === 'logs') loadLogs();
+    if (name === 'logs') loadLogs(logsCursorStack[logsCursorStack.length - 1] || null);
+    if (name === 'reports') loadReports(false);
     if (name === 'monitor') refreshMonitor(true);
   }
   window.addEventListener('hashchange', function(){ showTab(currentTab()); });
 
-  // ---------- Light/dark theme toggle (data-theme on <html>, persisted) ----------
-  function applyTheme(t){
-    document.documentElement.setAttribute('data-theme', t);
+  // ---------- Light/dark theme ----------
+  //
+  // Three states, and the difference between them is the whole point:
+  //   no data-theme   -> follow the OS via @media (prefers-color-scheme: light)
+  //   data-theme=…    -> an explicit user choice, persisted, which OVERRIDES the OS
+  //
+  // This used to call applyTheme('dark') unconditionally on load, which stamped
+  // data-theme="dark" before the media query could ever apply — so a machine set to
+  // light mode always opened a black page, and the CSS written to follow the OS was
+  // dead code. The bug is invisible in a per-theme screenshot suite unless the suite
+  // asserts the RENDERED background, which it now does.
+  function effectiveTheme(){
+    var explicit = document.documentElement.getAttribute('data-theme');
+    if (explicit === 'light' || explicit === 'dark') return explicit;
+    try {
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+        ? 'light' : 'dark';
+    } catch(e){ return 'dark'; }
+  }
+  function paintThemeButton(){
     var btn = document.getElementById('themeToggle');
-    if (btn) btn.innerHTML = (t === 'light') ? '&#9789; Dark' : '&#9728; Light';
+    if (!btn) return;
+    var eff = effectiveTheme();
+    // The button offers the OTHER theme, and its label says which.
+    btn.innerHTML = (eff === 'light') ? '&#9789; Dark' : '&#9728; Light';
+    btn.setAttribute('aria-label', 'Switch to ' + (eff === 'light' ? 'dark' : 'light') + ' theme');
+    btn.setAttribute('aria-pressed', eff === 'light' ? 'true' : 'false');
+  }
+  function applyTheme(t){
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    paintThemeButton();
   }
   (function initTheme(){
     var saved = null;
     try { saved = localStorage.getItem('cheaper-theme'); } catch(e){}
-    applyTheme(saved === 'light' ? 'light' : 'dark');
+    // ONLY an explicit prior choice stamps the attribute. Absent one, the OS decides.
+    applyTheme(saved === 'light' || saved === 'dark' ? saved : null);
     var btn = document.getElementById('themeToggle');
     if (btn) btn.addEventListener('click', function(){
-      var cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
-      var next = cur === 'light' ? 'dark' : 'light';
+      var next = effectiveTheme() === 'light' ? 'dark' : 'light';
       applyTheme(next);
       try { localStorage.setItem('cheaper-theme', next); } catch(e){}
     });
+    // Follow the OS live while the user has expressed no preference.
+    try {
+      var mq = window.matchMedia('(prefers-color-scheme: light)');
+      var onChange = function(){
+        if (!document.documentElement.hasAttribute('data-theme')) paintThemeButton();
+      };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+      else if (mq.addListener) mq.addListener(onChange);
+    } catch(e){}
+  })();
+
+  // Three scroll regions all announced as "Scrollable table" is barely better than
+  // none. Name each one after the panel it lives in, so a screen-reader user knows
+  // which table they just entered.
+  (function labelScrollRegions(){
+    var wraps = document.querySelectorAll('.table-wrap[role="region"]');
+    for (var i = 0; i < wraps.length; i++){
+      var panel = wraps[i].closest('.panel');
+      var h = panel && panel.querySelector('h2');
+      if (!h) continue;
+      // Use the heading's own text, minus the muted sub-note.
+      var note = h.querySelector('.h2note');
+      var label = note ? h.textContent.replace(note.textContent, '') : h.textContent;
+      wraps[i].setAttribute('aria-label', label.trim() + ' (scrollable)');
+    }
+  })();
+
+  // Same-origin links that hit a token-gated route need the secret too. The token was
+  // stripped from our own address bar, so a plain href="/report" would 401. Rewrite
+  // them at runtime instead of baking the secret into the served markup.
+  (function tokenizeLinks(){
+    if (!TOKEN) return;
+    var links = document.querySelectorAll('a[data-tokened]');
+    for (var i = 0; i < links.length; i++){
+      var href = links[i].getAttribute('href') || '';
+      if (href.charAt(0) !== '/') continue;                 // same-origin paths only
+      links[i].setAttribute('href',
+        href + (href.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN));
+    }
   })();
 
   // Initial empty render so panels aren't blank before first data arrives
