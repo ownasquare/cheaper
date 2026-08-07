@@ -8,6 +8,11 @@
             "type": "command",
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/context/router-policy.md\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/inject-tagline-cmd.js\"",
+            "timeout": 10
           }
         ]
       }
@@ -18,6 +23,11 @@
           {
             "type": "command",
             "command": "cat \"${CLAUDE_PLUGIN_ROOT}/hooks/context/router-policy.md\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/inject-tagline-cmd.js\"",
             "timeout": 10
           }
         ]
