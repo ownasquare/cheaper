@@ -1,0 +1,11 @@
+# Keep the gateway image lean + free of dev/test artifacts and local secrets.
+tests/
+.pytest_cache/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore

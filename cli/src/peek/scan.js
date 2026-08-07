@@ -5,7 +5,7 @@
 // already applied by pricing.estimateCall.
 
 const { contentTier, TIERS, modelTier, effectiveTier } = require('./classify');
-const { estimateCall, FAMILIES, BUCKET } = require('./pricing');
+const { estimateCall } = require('./pricing');
 const { HARNESSES, collectHarness, isInstalled } = require('./adapters');
 
 // --- Time/token model — MUST mirror gateway/app/metrics.py verbatim (values only,

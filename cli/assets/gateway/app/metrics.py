@@ -26,9 +26,13 @@ def _clean_tool(src: str) -> str:
     s = (src or "").strip()
     return s[:48] if s else "unknown"
 
-# Rough relative $/Mtok weights, only used to ESTIMATE savings vs "always top tier".
-# Override with env if you have exact numbers; the ratios are what matter here.
-DEFAULT_PRICE = {"haiku": 1.0, "sonnet": 3.0, "opus": 15.0}
+# Relative $/Mtok input weights for the legacy tier-weight estimate below. Only the
+# RATIOS matter here, but they still have to be the ratios of models that exist:
+# these are the input rates of the current Anthropic representatives in
+# model_prices.json (Haiku 4.5 $1, Sonnet 5 $3, Opus 5 $5). The old 1:3:15 spread
+# was the retired Opus 4 rate and overstated top-tier work threefold. The real-dollar
+# figures the user actually sees come from pricing.py per row, not from this table.
+DEFAULT_PRICE = {"haiku": 1.0, "sonnet": 3.0, "opus": 5.0}
 
 
 def _price() -> dict:
