@@ -20,8 +20,9 @@ capable model, escalate only when it counts, and **see** it working.
 Your bill shows one number. It never tells you that most of it went to running the
 **most expensive model on the easiest work**. Cheaper fixes the cause, not the
 receipt: every request is classified, routine work drops to a model 5–20× cheaper,
-and only the hard, correctness-critical calls stay on the frontier — with a monitor
-that logs every decision so your savings are measured, not promised.
+and only the hard, correctness-critical calls stay on the frontier — with a monitor that
+records the model you asked for and the model it served. Gateway figures are measured;
+figures read from your local chat history are estimates, and are labelled "about".
 
 100% local. Your own API key still flows straight through to the provider.
 
@@ -193,8 +194,10 @@ right-sized sub-agents. Together they cover the whole picture.
 
 ## Supported tools
 
-Any tool that can point at a custom base URL routes through the gateway — **18 and
-counting**:
+Any tool that can point at a custom base URL routes through the gateway — **36 have
+documented setup** (4 via the Anthropic API, 31 via the OpenAI-compatible API, plus
+Gemini's native API). Routing a tool and *reading* its history are different things:
+see the `peek` support table below, which covers 8 harnesses and reads 7.
 
 > **Claude** · **Codex** · **Cursor** · **Copilot** · **Gemini** · **Goose** ·
 > **OpenCode** · **Kilo Code** · **Roo Code** · **Cursor Agent** · **Kiro** ·
@@ -277,7 +280,10 @@ Everything is env-configurable; defaults are safe (downgrade-only, no surprise s
 
 ## How it reads your data
 
-`peek` is a read-only, prompt-text-only scanner. Support is graded honestly:
+`peek` is a read-only, prompt-text-only scanner. It **detects 8 harnesses and reads
+chat history for 7** — Cursor keeps its history in a SQLite database `peek` does not
+read yet, so it is reported as unreadable rather than quietly skipped. The end-of-chat
+savings line is wired to the same 7. Support is graded honestly:
 
 | Harness | Location | Status | Notes |
 |---|---|---|---|

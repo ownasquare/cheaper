@@ -5,6 +5,16 @@ const { spawnSync } = require('child_process');
 const P = require('./paths');
 const { c, copyDir, removePath, nowIso, whichSync, ask, readJSON, readJSONForUpdate, writeJSON } = require('./util');
 const { installCliLauncher } = require('./clilink');
+const { detectHarnesses } = require('./harnesses');
+const taglineInstall = require('./tagline_install');
+
+// Keys that mean "Claude Code" when passed to --harness (peek/adapters.js's
+// canonical key is 'claude-code'; accept the shorter alias too).
+const CLAUDE_HARNESS_KEYS = new Set(['claude-code', 'claude']);
+// Harnesses tagline_install.js actually knows how to wire (its TARGETS list).
+// Any OTHER detected harness gets logged as "detected, no adapter yet" rather
+// than silently skipped or handled by an invented mechanism.
+const TAGLINE_HARNESS_KEYS = new Set(taglineInstall.TARGETS.map((t) => t.key));
 
 const AGENT_FILES = [
   'router-triage.md',
@@ -220,6 +230,35 @@ const COMPONENTS = [
 ];
 const DEFAULT_KEYS = ['skill', 'agents', 'hook', 'gateway'];
 
+// Accept plurals + synonyms so `install hooks`, `install agent`, `install rules`
+// don't silently abort with "Nothing selected". A token may expand to several
+// canonical component keys ("rules"/"policy" = the behavioural set skill+agents+hook).
+const ALIASES = {
+  skill: ['skill'], skills: ['skill'],
+  agent: ['agents'], agents: ['agents'],
+  hook: ['hook'], hooks: ['hook'],
+  gateway: ['gateway'], proxy: ['gateway'],
+  plugin: ['plugin'], bundle: ['plugin'],
+  cli: ['cli'],
+  rules: ['skill', 'agents', 'hook'], rule: ['skill', 'agents', 'hook'],
+  policy: ['skill', 'agents', 'hook'], router: ['skill', 'agents', 'hook'],
+  all: DEFAULT_KEYS.slice(),
+};
+// Map free-text tokens (and "1 2 3" indices) to canonical component keys. Returns the
+// deduped valid keys plus any tokens we couldn't resolve (so we can warn, not abort).
+function normalizeKeys(tokens) {
+  const out = [], unknown = [];
+  for (const raw of tokens) {
+    const t = String(raw).toLowerCase();
+    const asIndex = COMPONENTS[parseInt(t, 10) - 1];
+    if (ALIASES[t]) out.push(...ALIASES[t]);
+    else if (COMPONENTS.some((x) => x.key === t)) out.push(t);
+    else if (/^\d+$/.test(t) && asIndex) out.push(asIndex.key);
+    else unknown.push(raw);
+  }
+  return { keys: [...new Set(out)], unknown };
+}
+
 // Programmatic entry point (used by the CLI's run() and by the desktop app).
 // Applies the plugin-supersedes-standalone rule and returns per-component results.
 function install({ components } = {}) {
@@ -246,27 +285,69 @@ function status() {
   };
 }
 
+// Wire the tagline/routing line into every detected harness OTHER than
+// Claude Code, using whatever tagline_install.js already knows how to write
+// (its TARGETS list). Harnesses detected but not in TARGETS are reported,
+// never guessed at with an invented mechanism. Read from `detected` (already
+// computed by the caller) so this and the printed summary never disagree.
+function installEverywhereElse(detected) {
+  const others = detected.filter((h) => !CLAUDE_HARNESS_KEYS.has(h.key));
+  const summary = [];
+  for (const h of others) {
+    if (!h.installed) { summary.push({ key: h.key, label: h.label, action: 'not-detected' }); continue; }
+    if (!TAGLINE_HARNESS_KEYS.has(h.key)) { summary.push({ key: h.key, label: h.label, action: 'no-adapter' }); continue; }
+    try {
+      const results = taglineInstall.run(['--harness', h.key]);
+      const wired = Array.isArray(results) && results.some((r) => r.action === 'wrote' && !r.error);
+      summary.push({ key: h.key, label: h.label, action: wired ? 'wired' : 'failed', results });
+    } catch (e) {
+      summary.push({ key: h.key, label: h.label, action: 'failed', error: e.message });
+    }
+  }
+  return summary;
+}
+
 async function run(argv) {
-  const preset = new Set(argv.filter((a) => !a.startsWith('-')));
-  const all = argv.includes('--all');
+  const hIdx = argv.indexOf('--harness');
+  const harnessFlag = hIdx !== -1 ? String(argv[hIdx + 1] || '').toLowerCase() : null;
+  // Strip --harness <value> before parsing the rest as component tokens/flags,
+  // so e.g. `install --harness codex` doesn't treat "codex" as a component.
+  const rest = argv.filter((a, i) => i !== hIdx && i !== hIdx + 1);
+  const preset = new Set(rest.filter((a) => !a.startsWith('-')));
+  const all = rest.includes('--all');
 
   console.log(c.amber('\n  Cheaper installer') + c.dim('  — adaptive Claude model routing\n'));
+
+  // --harness <key> targeting a NON-Claude tool: wire just that one harness's
+  // tagline/routing line (whatever tagline_install.js knows how to write) and
+  // stop. Claude's component set (skill/agents/hook/gateway/plugin/cli) has
+  // no meaning for another harness, so it's never invoked here.
+  if (harnessFlag && !CLAUDE_HARNESS_KEYS.has(harnessFlag)) {
+    if (!TAGLINE_HARNESS_KEYS.has(harnessFlag)) {
+      console.log(c.red(`  No adapter yet for harness "${harnessFlag}".`) +
+        c.dim(' Known: ' + [...TAGLINE_HARNESS_KEYS].join(', ') + ', claude-code\n'));
+      return;
+    }
+    const results = taglineInstall.run(['--harness', harnessFlag]);
+    console.log(c.dim('\n  Done.\n'));
+    return results;
+  }
+
   let chosen;
   if (all) {
     chosen = DEFAULT_KEYS.slice();
   } else if (preset.size) {
-    chosen = COMPONENTS.filter((x) => preset.has(x.key)).map((x) => x.key);
+    const { keys, unknown } = normalizeKeys([...preset]);
+    if (unknown.length) console.log(c.dim('  (ignoring unrecognized: ' + unknown.join(', ') +
+      ' — valid: ' + COMPONENTS.map((x) => x.key).join(', ') + ', rules, all)\n'));
+    chosen = keys;
   } else {
     COMPONENTS.forEach((x, i) => console.log(`  ${c.bold(String(i + 1))}. ${x.label}`));
-    console.log(c.dim('\n  Choose components (e.g. "1 2 3", "all" = skill+agents+hook+gateway,'));
-    console.log(c.dim('  "5" for the plugin instead, or Enter for the default set):'));
-    const ans = (await ask('  > ')).toLowerCase();
+    console.log(c.dim('\n  Choose components (e.g. "1 2 3", names like "hook gateway", "rules"'));
+    console.log(c.dim('  = skill+agents+hook, "all" = the default set, or Enter for the default):'));
+    const ans = (await ask('  > ')).toLowerCase().trim();
     if (!ans || ans === 'all') chosen = DEFAULT_KEYS.slice();
-    else {
-      const picks = ans.split(/[\s,]+/);
-      chosen = COMPONENTS.filter((x, i) =>
-        picks.includes(String(i + 1)) || picks.includes(x.key)).map((x) => x.key);
-    }
+    else chosen = normalizeKeys(ans.split(/[\s,]+/).filter(Boolean)).keys;
   }
   if (!chosen.length) { console.log(c.red('\n  Nothing selected. Aborting.\n')); return; }
 
@@ -288,9 +369,38 @@ async function run(argv) {
   else if (chosen.some((k) => ['skill', 'agents', 'hook'].includes(k)))
     console.log(c.dim('   • Prefer the managed plugin instead? Run:  ') + 'cheaper install plugin');
   console.log(c.dim('   • Existing Claude sessions must be restarted to pick up the skill/agents/hook.\n'));
+
+  // No --harness given: this is a plain `cheaper install` (or --all, or the
+  // interactive picker above) — Claude just got its component set as before,
+  // and now every OTHER detected AI-coding harness on this machine also gets
+  // wired, not just Claude. Skipped entirely when --harness scoped the run
+  // to Claude specifically (handled above) or to one other harness (returned
+  // above before reaching this point).
+  if (!harnessFlag) {
+    const detected = detectHarnesses();
+    const foundCount = detected.filter((h) => h.installed).length;
+    console.log(c.amber(`  Detected ${foundCount} harness(es) on this machine:`));
+    for (const h of detected)
+      console.log('  ' + (h.installed ? c.green('✓') : c.dim('–')) + ' ' + h.label.padEnd(22) +
+        c.dim(h.installed ? '' : 'not detected'));
+
+    const elseResults = installEverywhereElse(detected);
+    if (elseResults.length) {
+      console.log(c.amber('\n  Wiring the Cheaper.app savings line to other detected harnesses:'));
+      for (const r of elseResults) {
+        if (r.action === 'wired') console.log('  ' + c.green('✓') + ' ' + r.label.padEnd(22) + c.dim('tagline wired'));
+        else if (r.action === 'no-adapter') console.log('  ' + c.dim('–') + ' ' + r.label.padEnd(22) + c.dim('detected, no adapter yet'));
+        else if (r.action === 'not-detected') console.log('  ' + c.dim('–') + ' ' + r.label.padEnd(22) + c.dim('not detected, skipped'));
+        else console.log('  ' + c.red('✗') + ' ' + r.label.padEnd(22) + c.red(r.error || 'failed'));
+      }
+    }
+    console.log(c.dim('\n  Summary: Claude Code -> full component install; other detected harnesses -> tagline/routing'));
+    console.log(c.dim('  line only (via `cheaper peek --tagline`). Target one harness with `cheaper install --harness <key>`.\n'));
+  }
 }
 
 module.exports = {
   run, install, status, COMPONENTS, DEFAULT_KEYS, AGENT_FILES,
   pluginRegistered, dewireStandaloneHook, isCheaperHookEntry, runClaude,
+  detectHarnesses, installEverywhereElse,
 };

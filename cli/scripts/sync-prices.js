@@ -7,14 +7,15 @@
 // between the two shows up as an authoritative-looking wrong figure. Hand-maintaining
 // two copies is what let them drift a full model generation apart, so the JS catalog
 // in src/peek/models.js is now the single source of truth and this script mechanically
-// projects it into gateway/app/model_prices.json.
+// projects it into cli/assets/gateway/app/model_prices.json (the one gateway copy).
 //
 //   node scripts/sync-prices.js          write the gateway table
 //   node scripts/sync-prices.js --check  exit 1 if it is stale (CI / test guard)
 
-// It also syncs the gateway's pricing module into cli/assets/gateway/, which is the
-// copy npm actually ships (see package.json "files"). That copy was previously kept
-// in step by hand, so a fix applied to gateway/app/ never reached a single user.
+// There used to be two gateway copies (a dev tree + the npm-shipped cli/assets/gateway)
+// kept in step by hand, so a fix to one never reached users. They are now ONE directory
+// (cli/assets/gateway; the top-level gateway/ is a symlink to it), so this script only
+// (re)generates the price table and checks cross-runtime JS/Python parity.
 
 const fs = require('fs');
 const path = require('path');
@@ -22,8 +23,10 @@ const { CATALOG, CATALOG_AS_OF } = require('../src/peek/models');
 const { REPRESENTATIVE } = require('../src/peek/pricing');
 
 const REPO = path.resolve(__dirname, '../..');
-const GATEWAY = path.join(REPO, 'gateway/app');           // development copy
-const SHIPPED = path.join(REPO, 'cli/assets/gateway/app'); // the copy npm publishes
+// One gateway copy now: cli/assets/gateway is the single source npm ships, and the
+// top-level `gateway/` is a symlink to it (kept so Docker builds, docs, and
+// `pytest gateway/tests` keep resolving). No dev/shipped split left to drift.
+const GATEWAY = path.join(REPO, 'cli/assets/gateway/app');
 
 function priceTable() {
   return JSON.stringify({
@@ -36,14 +39,17 @@ function priceTable() {
 }
 
 // [label, destination path, contents] — every artifact that must agree.
+//
+// The .py mirror list is DERIVED from gateway/app rather than hand-listed. A hardcoded
+// list silently stops covering a file the moment someone adds one, which is the same
+// failure mode as a hand-maintained price table: it looks maintained right up until it
+// isn't.
 const table = priceTable();
+// A single generated artifact now — the one gateway copy's price table, projected
+// from the JS catalog. (The Python modules live in that same dir and are edited in
+// place; there is no second copy to mirror them into anymore.)
 const targets = [
-  ['gateway/app/model_prices.json', path.join(GATEWAY, 'model_prices.json'), table],
-  ['cli/assets/gateway/app/model_prices.json', path.join(SHIPPED, 'model_prices.json'), table],
-  ['cli/assets/gateway/app/pricing.py', path.join(SHIPPED, 'pricing.py'),
-    fs.readFileSync(path.join(GATEWAY, 'pricing.py'), 'utf8')],
-  ['cli/assets/gateway/app/metrics.py', path.join(SHIPPED, 'metrics.py'),
-    fs.readFileSync(path.join(GATEWAY, 'metrics.py'), 'utf8')],
+  ['cli/assets/gateway/app/model_prices.json', path.join(GATEWAY, 'model_prices.json'), table],
 ];
 
 const check = process.argv.includes('--check');
@@ -57,8 +63,81 @@ for (const [label, dest, next] of targets) {
   console.log('wrote ' + label);
 }
 
-if (check && stale) {
-  console.error('\n' + stale + ' file(s) stale — run: node cli/scripts/sync-prices.js');
+// ---- cross-runtime parity -------------------------------------------------------
+// Byte-identical mirrors are not enough: the two runtimes carry hand-written ports of
+// the same logic, and those can disagree while every file is "in sync". They already
+// did — `magistral-*` and `devstral-*` resolved to the mistral family in JS and to
+// nothing in Python, so the gateway silently reported $0 saved for those users on the
+// path that prints no "about" qualifier.
+//
+// So: ask BOTH runtimes to price the same probes and require identical answers.
+function parityProbes() {
+  const ids = CATALOG.map((e) => e.id);
+  // Plus ids that must resolve to nothing, so a fail-open regression is caught too.
+  return ids.concat(['claude-opus-4-9', 'gpt-5.6', 'o3-deep-research', 'llama-4-maverick',
+    'totally-made-up', 'us.anthropic.claude-opus-5', 'claude-opus-5-20260101']);
+}
+
+function jsAnswers(ids, at) {
+  const { detectFamily, isPriceable, costOfModel } = require('../src/peek/pricing');
+  const out = {};
+  for (const id of ids) {
+    out[id] = {
+      family: detectFamily(id) || null,
+      priceable: !!isPriceable(id),
+      cost: costOfModel(id, { inFresh: 1e6, outTok: 1e6 }, { at }),
+    };
+  }
+  return out;
+}
+
+function pyAnswers(ids, at) {
+  const { execFileSync } = require('child_process');
+  const script = [
+    'import json,sys',
+    'sys.path.insert(0, ' + JSON.stringify(GATEWAY) + ')',
+    'sys.path.insert(0, ' + JSON.stringify(path.dirname(GATEWAY)) + ')',
+    'from pricing import detect_family, is_priceable, cost_of_model',
+    'ids=json.loads(sys.stdin.read()); at=' + JSON.stringify(at),
+    'out={}',
+    'for i in ids:',
+    '    out[i]={"family":detect_family(i),"priceable":bool(is_priceable(i)),'
+      + '"cost":cost_of_model(i,1e6,1e6,at=at)}',
+    'print(json.dumps(out))',
+  ].join('\n');
+  const raw = execFileSync('python3', ['-c', script], {
+    input: JSON.stringify(ids), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  return JSON.parse(raw);
+}
+
+let parityFailures = 0;
+try {
+  const ids = parityProbes();
+  const at = CATALOG_AS_OF; // fixed date so the comparison is deterministic
+  const js = jsAnswers(ids, at);
+  const py = pyAnswers(ids, at);
+  const near = (a, b) => (a == null || b == null) ? a === b : Math.abs(a - b) < 1e-9;
+  for (const id of ids) {
+    const a = js[id], b = py[id];
+    if (!b) { console.error('PARITY: python returned nothing for ' + id); parityFailures++; continue; }
+    if (a.family !== b.family || a.priceable !== b.priceable || !near(a.cost, b.cost)) {
+      console.error('PARITY MISMATCH ' + id
+        + '\n  js:     ' + JSON.stringify(a)
+        + '\n  python: ' + JSON.stringify(b));
+      parityFailures++;
+    }
+  }
+  if (!parityFailures) console.log('cross-runtime parity: ' + ids.length + ' ids agree');
+} catch (e) {
+  // A missing python3 must not silently pass the guard in CI.
+  console.error('PARITY CHECK COULD NOT RUN: ' + (e && e.message));
+  parityFailures++;
+}
+
+if (stale || parityFailures) {
+  if (stale) console.error('\n' + stale + ' file(s) stale — run: node cli/scripts/sync-prices.js');
+  if (parityFailures) console.error(parityFailures + ' cross-runtime parity failure(s)');
   process.exit(1);
 }
 console.log(check ? 'price tables are in sync' : 'done');

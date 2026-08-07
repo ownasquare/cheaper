@@ -22,9 +22,12 @@ const HELP = `
     gateway start       Start the routing gateway (proxy + monitor).
     gateway stop        Stop the gateway.
     gateway status      Is the gateway running?
-    monitor             Live routing/savings monitor in the terminal.
-    launch, init        Open the live savings dashboard in your browser
-                        (starts the gateway if needed, keeps peek data fresh).
+    dashboard | reports | logs | monitor
+                        Open the live localhost dashboard at that tab in your
+                        browser (starts the gateway if needed). Add --terminal to
+                        the monitor command for the in-terminal TUI. launch = Dashboard.
+    savings             Realized savings by period: today / this week / month /
+                        quarter / year / all-time (lifetime). --json for machines.
     peek [options]      Scan your existing harness chat logs (.claude, .codex,
                         …) and estimate the tokens + real $ adaptive routing
                         would have saved — 100% local, nothing is sent anywhere.
@@ -61,12 +64,23 @@ async function main() {
     case 'gateway':
       return require('../src/gateway').run(rest);
     case 'monitor':
-      return require('../src/monitor').run();
+      // Browser Monitor tab by default; the in-terminal TUI on --terminal/--tty.
+      if (rest.includes('--terminal') || rest.includes('--tty'))
+        return require('../src/monitor').run();
+      return require('../src/launch').run(rest, { tab: 'monitor' });
+    case 'reports':
+      return require('../src/launch').run(rest, { tab: 'reports' });
+    case 'logs':
+      return require('../src/launch').run(rest, { tab: 'logs' });
+    case 'dashboard':
+      return require('../src/launch').run(rest, { tab: 'dashboard' });
     case 'launch':
     case 'init':
-      return require('../src/launch').run(rest);
+      return require('../src/launch').run(rest, { tab: 'dashboard' });
     case 'peek':
       return require('../src/peek').run(rest);
+    case 'savings':
+      return require('../src/savings').run(rest);
     case 'taglines':
       return require('../src/tagline_install').run(rest);
     case 'status': {
@@ -79,6 +93,9 @@ async function main() {
       console.log('  plugin   ' + (s.plugin ? c.green('registered + enabled') : c.dim('not installed')));
       console.log('  gateway  ' + yn(s.gateway));
       require('../src/gateway').status();
+      // Existence is not freshness. Installed-but-stale and running-but-stale both
+      // look identical to the checks above, and both silently produce wrong numbers.
+      await require('../src/freshness_report').print({ verbose: rest.includes('--verbose') });
       console.log('');
       return;
     }

@@ -44,9 +44,9 @@ const CATALOG_AS_OF = '2026-08-06';
 // multipliers rather than per-model dollars because they hold across the family.
 const ANTHROPIC_CACHE = { read: 0.1, write5m: 1.25, write1h: 2.0 };
 
-function anthropic(id, inRate, outRate, extra) {
+function anthropic(id, tier, inRate, outRate, extra) {
   return Object.assign({
-    id, family: 'anthropic', in: inRate, out: outRate,
+    id, family: 'anthropic', tier, in: inRate, out: outRate,
     cacheRead: inRate * ANTHROPIC_CACHE.read,
     cacheWrite: inRate * ANTHROPIC_CACHE.write5m,
     cacheWrite1h: inRate * ANTHROPIC_CACHE.write1h,
@@ -55,110 +55,122 @@ function anthropic(id, inRate, outRate, extra) {
 
 // Ordered longest-prefix-first within each family; resolveModel() picks the most
 // specific match so `claude-opus-4-8` never falls through to a `claude-opus` rule.
+// `tier` is a CAPABILITY class (haiku|sonnet|opus), declared here so it is reviewed
+// alongside the price rather than guessed from the model's name at runtime.
+//
+// It is NEVER a price proxy. Savings compare catalog dollars directly (see tagline.js),
+// because capability rank and price rank genuinely disagree: `claude-fable-5` is a top
+// model at $60/Mtok blended while `claude-opus-5` is a top model at $30, and Mistral's
+// flagship costs less than its mid model. The old name-regex tier conflated the two and
+// silently mis-classified 22 of 75 entries by falling through to 'sonnet'.
 const CATALOG = [
   // ---- Anthropic ------------------------------------------------------------
-  anthropic('claude-fable-5', 10, 50),
-  anthropic('claude-mythos-5', 10, 50),
-  anthropic('claude-mythos-preview', 10, 50),
+  // Fable/Mythos are top-class models priced ABOVE Opus 5 ($60 vs $30 blended). Tier
+  // says "as capable as Opus"; it deliberately says nothing about which is cheaper.
+  anthropic('claude-fable-5', 'opus', 10, 50),
+  anthropic('claude-mythos-5', 'opus', 10, 50),
+  // Canonical id is `claude-mythos`: normalizeId() strips a `-preview` suffix, so an
+  // entry literally named `claude-mythos-preview` could never be matched.
+  anthropic('claude-mythos', 'opus', 10, 50, { aliases: ['claude-mythos-preview'] }),
   // Opus 5 / 4.8 / 4.7 / 4.6 / 4.5 are all $5/$25 — a 3x drop from the Opus 4.1
   // era. Fast mode is a genuinely different SKU on Opus 5 and 4.8.
-  anthropic('claude-opus-5', 5, 25, { speed: { fast: { in: 10, out: 50 } } }),
-  anthropic('claude-opus-4-8', 5, 25, { speed: { fast: { in: 10, out: 50 } } }),
-  anthropic('claude-opus-4-7', 5, 25),
-  anthropic('claude-opus-4-6', 5, 25),
-  anthropic('claude-opus-4-5', 5, 25),
-  anthropic('claude-opus-4-1', 15, 75),
-  anthropic('claude-opus-4', 15, 75),
-  anthropic('claude-3-opus', 15, 75),
+  anthropic('claude-opus-5', 'opus', 5, 25, { speed: { fast: { in: 10, out: 50 } } }),
+  anthropic('claude-opus-4-8', 'opus', 5, 25, { speed: { fast: { in: 10, out: 50 } } }),
+  anthropic('claude-opus-4-7', 'opus', 5, 25),
+  anthropic('claude-opus-4-6', 'opus', 5, 25),
+  anthropic('claude-opus-4-5', 'opus', 5, 25),
+  anthropic('claude-opus-4-1', 'opus', 15, 75),
+  anthropic('claude-opus-4', 'opus', 15, 75),
+  anthropic('claude-3-opus', 'opus', 15, 75),
   // Sonnet 5 launched with promotional pricing; the standard rate is $3/$15.
-  anthropic('claude-sonnet-5', 3, 15, {
+  anthropic('claude-sonnet-5', 'sonnet', 3, 15, {
     window: { from: '2026-01-01', until: '2026-08-31', in: 2, out: 10,
               cacheRead: 0.2, cacheWrite: 2.5, cacheWrite1h: 4 },
   }),
-  anthropic('claude-sonnet-4-6', 3, 15),
-  anthropic('claude-sonnet-4-5', 3, 15),
-  anthropic('claude-sonnet-4', 3, 15),
-  anthropic('claude-3-7-sonnet', 3, 15),
-  anthropic('claude-3-5-sonnet', 3, 15),
-  anthropic('claude-haiku-4-5', 1, 5),
-  anthropic('claude-3-5-haiku', 0.8, 4),
-  anthropic('claude-3-haiku', 0.25, 1.25),
+  anthropic('claude-sonnet-4-6', 'sonnet', 3, 15),
+  anthropic('claude-sonnet-4-5', 'sonnet', 3, 15),
+  anthropic('claude-sonnet-4', 'sonnet', 3, 15),
+  anthropic('claude-3-7-sonnet', 'sonnet', 3, 15),
+  anthropic('claude-3-5-sonnet', 'sonnet', 3, 15),
+  anthropic('claude-haiku-4-5', 'haiku', 1, 5),
+  anthropic('claude-3-5-haiku', 'haiku', 0.8, 4),
+  anthropic('claude-3-haiku', 'haiku', 0.25, 1.25),
 
   // ---- OpenAI ---------------------------------------------------------------
   // Cached input is an explicit published rate per model (not a uniform multiplier).
   // Only the 5.6 family charges for cache WRITES; everything older writes free.
-  { id: 'gpt-5.6-sol', family: 'openai', in: 5, out: 30, cacheRead: 0.5, cacheWrite: 6.25 },
-  { id: 'gpt-5.6-terra', family: 'openai', in: 2, out: 12, cacheRead: 0.2, cacheWrite: 2.5 },
-  { id: 'gpt-5.6-luna', family: 'openai', in: 0.2, out: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
-  { id: 'gpt-5.5-pro', family: 'openai', in: 30, out: 180 },
-  { id: 'gpt-5.5', family: 'openai', in: 5, out: 30, cacheRead: 0.5 },
-  { id: 'gpt-5.4-mini', family: 'openai', in: 0.75, out: 4.5, cacheRead: 0.075 },
-  { id: 'gpt-5.4-nano', family: 'openai', in: 0.2, out: 1.25, cacheRead: 0.02 },
-  { id: 'gpt-5.4-pro', family: 'openai', in: 30, out: 180 },
-  { id: 'gpt-5.4', family: 'openai', in: 2.5, out: 15, cacheRead: 0.25 },
-  { id: 'gpt-5.2-pro', family: 'openai', in: 21, out: 168 },
-  { id: 'gpt-5.2', family: 'openai', in: 1.75, out: 14, cacheRead: 0.175 },
-  { id: 'gpt-5.1', family: 'openai', in: 1.25, out: 10, cacheRead: 0.125 },
-  { id: 'gpt-5-mini', family: 'openai', in: 0.25, out: 2, cacheRead: 0.025 },
-  { id: 'gpt-5-nano', family: 'openai', in: 0.05, out: 0.4, cacheRead: 0.005 },
-  { id: 'gpt-5-pro', family: 'openai', in: 15, out: 120 },
-  { id: 'gpt-5', family: 'openai', in: 1.25, out: 10, cacheRead: 0.125 },
-  { id: 'gpt-4.1-mini', family: 'openai', in: 0.4, out: 1.6, cacheRead: 0.1 },
-  { id: 'gpt-4.1-nano', family: 'openai', in: 0.1, out: 0.4, cacheRead: 0.025 },
-  { id: 'gpt-4.1', family: 'openai', in: 2, out: 8, cacheRead: 0.5 },
-  { id: 'gpt-4o-mini', family: 'openai', in: 0.15, out: 0.6, cacheRead: 0.075 },
-  { id: 'gpt-4o', family: 'openai', in: 2.5, out: 10, cacheRead: 1.25 },
-  { id: 'o1-pro', family: 'openai', in: 150, out: 600 },
-  { id: 'o1', family: 'openai', in: 15, out: 60, cacheRead: 7.5 },
-  { id: 'o3-pro', family: 'openai', in: 20, out: 80 },
-  { id: 'o3-mini', family: 'openai', in: 1.1, out: 4.4, cacheRead: 0.55 },
-  { id: 'o3', family: 'openai', in: 2, out: 8, cacheRead: 0.5 },
-  { id: 'o4-mini', family: 'openai', in: 1.1, out: 4.4, cacheRead: 0.275 },
+  { id: 'gpt-5.6-sol', family: 'openai', tier: 'opus', in: 5, out: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+  { id: 'gpt-5.6-terra', family: 'openai', tier: 'sonnet', in: 2, out: 12, cacheRead: 0.2, cacheWrite: 2.5 },
+  { id: 'gpt-5.6-luna', family: 'openai', tier: 'haiku', in: 0.2, out: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
+  { id: 'gpt-5.5-pro', family: 'openai', tier: 'opus', in: 30, out: 180 },
+  { id: 'gpt-5.5', family: 'openai', tier: 'opus', in: 5, out: 30, cacheRead: 0.5 },
+  { id: 'gpt-5.4-mini', family: 'openai', tier: 'haiku', in: 0.75, out: 4.5, cacheRead: 0.075 },
+  { id: 'gpt-5.4-nano', family: 'openai', tier: 'haiku', in: 0.2, out: 1.25, cacheRead: 0.02 },
+  { id: 'gpt-5.4-pro', family: 'openai', tier: 'opus', in: 30, out: 180 },
+  { id: 'gpt-5.4', family: 'openai', tier: 'sonnet', in: 2.5, out: 15, cacheRead: 0.25 },
+  { id: 'gpt-5.2-pro', family: 'openai', tier: 'opus', in: 21, out: 168 },
+  { id: 'gpt-5.2', family: 'openai', tier: 'sonnet', in: 1.75, out: 14, cacheRead: 0.175 },
+  { id: 'gpt-5.1', family: 'openai', tier: 'sonnet', in: 1.25, out: 10, cacheRead: 0.125 },
+  { id: 'gpt-5-mini', family: 'openai', tier: 'haiku', in: 0.25, out: 2, cacheRead: 0.025 },
+  { id: 'gpt-5-nano', family: 'openai', tier: 'haiku', in: 0.05, out: 0.4, cacheRead: 0.005 },
+  { id: 'gpt-5-pro', family: 'openai', tier: 'opus', in: 15, out: 120 },
+  { id: 'gpt-5', family: 'openai', tier: 'sonnet', in: 1.25, out: 10, cacheRead: 0.125 },
+  { id: 'gpt-4.1-mini', family: 'openai', tier: 'haiku', in: 0.4, out: 1.6, cacheRead: 0.1 },
+  { id: 'gpt-4.1-nano', family: 'openai', tier: 'haiku', in: 0.1, out: 0.4, cacheRead: 0.025 },
+  { id: 'gpt-4.1', family: 'openai', tier: 'sonnet', in: 2, out: 8, cacheRead: 0.5 },
+  { id: 'gpt-4o-mini', family: 'openai', tier: 'haiku', in: 0.15, out: 0.6, cacheRead: 0.075 },
+  { id: 'gpt-4o', family: 'openai', tier: 'sonnet', in: 2.5, out: 10, cacheRead: 1.25 },
+  { id: 'o1-pro', family: 'openai', tier: 'opus', in: 150, out: 600 },
+  { id: 'o1', family: 'openai', tier: 'opus', in: 15, out: 60, cacheRead: 7.5 },
+  { id: 'o3-pro', family: 'openai', tier: 'opus', in: 20, out: 80 },
+  { id: 'o3-mini', family: 'openai', tier: 'haiku', in: 1.1, out: 4.4, cacheRead: 0.55 },
+  { id: 'o3', family: 'openai', tier: 'sonnet', in: 2, out: 8, cacheRead: 0.5 },
+  { id: 'o4-mini', family: 'openai', tier: 'haiku', in: 1.1, out: 4.4, cacheRead: 0.275 },
 
   // ---- Google ---------------------------------------------------------------
   // Gemini Pro tiers price by prompt size; cached-content storage is billed per
   // hour and is NOT attributable to a single call, so it is deliberately omitted.
-  { id: 'gemini-3.6-flash', family: 'google', in: 1.5, out: 7.5, cacheRead: 0.15 },
-  { id: 'gemini-3.5-flash-lite', family: 'google', in: 0.3, out: 2.5, cacheRead: 0.03 },
-  { id: 'gemini-3.5-flash', family: 'google', in: 1.5, out: 9, cacheRead: 0.15 },
-  { id: 'gemini-3.1-flash-lite', family: 'google', in: 0.25, out: 1.5, cacheRead: 0.025 },
-  { id: 'gemini-3.1-pro', family: 'google', in: 2, out: 12, cacheRead: 0.2,
+  { id: 'gemini-3.6-flash', family: 'google', tier: 'sonnet', in: 1.5, out: 7.5, cacheRead: 0.15 },
+  { id: 'gemini-3.5-flash-lite', family: 'google', tier: 'haiku', in: 0.3, out: 2.5, cacheRead: 0.03 },
+  { id: 'gemini-3.5-flash', family: 'google', tier: 'sonnet', in: 1.5, out: 9, cacheRead: 0.15 },
+  { id: 'gemini-3.1-flash-lite', family: 'google', tier: 'haiku', in: 0.25, out: 1.5, cacheRead: 0.025 },
+  { id: 'gemini-3.1-pro', family: 'google', tier: 'opus', in: 2, out: 12, cacheRead: 0.2,
     longContext: { over: 200000, in: 4, out: 18, cacheRead: 0.4 } },
-  { id: 'gemini-2.5-pro', family: 'google', in: 1.25, out: 10, cacheRead: 0.125,
+  { id: 'gemini-2.5-pro', family: 'google', tier: 'opus', in: 1.25, out: 10, cacheRead: 0.125,
     longContext: { over: 200000, in: 2.5, out: 15, cacheRead: 0.25 } },
-  { id: 'gemini-2.5-flash-lite', family: 'google', in: 0.1, out: 0.4, cacheRead: 0.01 },
-  { id: 'gemini-2.5-flash', family: 'google', in: 0.3, out: 2.5, cacheRead: 0.03 },
+  { id: 'gemini-2.5-flash-lite', family: 'google', tier: 'haiku', in: 0.1, out: 0.4, cacheRead: 0.01 },
+  { id: 'gemini-2.5-flash', family: 'google', tier: 'sonnet', in: 0.3, out: 2.5, cacheRead: 0.03 },
 
   // ---- xAI ------------------------------------------------------------------
   // Every current Grok model doubles its rate above a 200k-token prompt.
-  { id: 'grok-4.5', family: 'xai', in: 2, out: 6, cacheRead: 0.3,
+  { id: 'grok-4.5', family: 'xai', tier: 'opus', in: 2, out: 6, cacheRead: 0.3,
     longContext: { over: 200000, in: 4, out: 12, cacheRead: 0.6 } },
-  { id: 'grok-4.3', family: 'xai', in: 1.25, out: 2.5, cacheRead: 0.2,
+  { id: 'grok-4.3', family: 'xai', tier: 'sonnet', in: 1.25, out: 2.5, cacheRead: 0.2,
     longContext: { over: 200000, in: 2.5, out: 5, cacheRead: 0.4 } },
-  { id: 'grok-4.20', family: 'xai', in: 1.25, out: 2.5, cacheRead: 0.2,
+  { id: 'grok-4.20', family: 'xai', tier: 'sonnet', in: 1.25, out: 2.5, cacheRead: 0.2,
     longContext: { over: 200000, in: 2.5, out: 5, cacheRead: 0.4 } },
-  { id: 'grok-build-0.1', family: 'xai', in: 1, out: 2, cacheRead: 0.2,
+  { id: 'grok-build-0.1', family: 'xai', tier: 'haiku', in: 1, out: 2, cacheRead: 0.2,
     longContext: { over: 200000, in: 2, out: 4, cacheRead: 0.4 } },
 
   // ---- DeepSeek -------------------------------------------------------------
-  { id: 'deepseek-v4-flash', family: 'deepseek', in: 0.14, out: 0.28, cacheRead: 0.0028 },
-  { id: 'deepseek-v4-pro', family: 'deepseek', in: 0.435, out: 0.87, cacheRead: 0.003625 },
+  { id: 'deepseek-v4-flash', family: 'deepseek', tier: 'haiku', in: 0.14, out: 0.28, cacheRead: 0.0028 },
+  { id: 'deepseek-v4-pro', family: 'deepseek', tier: 'opus', in: 0.435, out: 0.87, cacheRead: 0.003625 },
 
   // ---- Mistral (hosted la Plateforme rates) ---------------------------------
-  { id: 'mistral-medium-3.5', family: 'mistral', in: 1.5, out: 7.5 },
-  { id: 'mistral-small-4', family: 'mistral', in: 0.15, out: 0.6 },
-  { id: 'mistral-large-3', family: 'mistral', in: 0.5, out: 1.5 },
-  { id: 'magistral-medium', family: 'mistral', in: 2, out: 5 },
-  { id: 'magistral-small', family: 'mistral', in: 0.5, out: 1.5 },
-  { id: 'devstral-small-2', family: 'mistral', in: 0.1, out: 0.3 },
-  { id: 'devstral-2', family: 'mistral', in: 0.4, out: 2 },
-  { id: 'codestral', family: 'mistral', in: 0.3, out: 0.9 },
-  { id: 'ministral-3-14b', family: 'mistral', in: 0.2, out: 0.2 },
-  { id: 'ministral-3-8b', family: 'mistral', in: 0.15, out: 0.15 },
-  { id: 'ministral-3-3b', family: 'mistral', in: 0.1, out: 0.1 },
-  { id: 'mistral-nemo', family: 'mistral', in: 0.15, out: 0.15 },
-  { id: 'mixtral-8x22b', family: 'mistral', in: 2, out: 6 },
-  { id: 'mixtral-8x7b', family: 'mistral', in: 0.7, out: 0.7 },
+  { id: 'mistral-medium-3.5', family: 'mistral', tier: 'sonnet', in: 1.5, out: 7.5 },
+  { id: 'mistral-small-4', family: 'mistral', tier: 'haiku', in: 0.15, out: 0.6 },
+  { id: 'mistral-large-3', family: 'mistral', tier: 'opus', in: 0.5, out: 1.5 },
+  { id: 'magistral-medium', family: 'mistral', tier: 'sonnet', in: 2, out: 5 },
+  { id: 'magistral-small', family: 'mistral', tier: 'haiku', in: 0.5, out: 1.5 },
+  { id: 'devstral-small-2', family: 'mistral', tier: 'haiku', in: 0.1, out: 0.3 },
+  { id: 'devstral-2', family: 'mistral', tier: 'sonnet', in: 0.4, out: 2 },
+  { id: 'codestral', family: 'mistral', tier: 'sonnet', in: 0.3, out: 0.9 },
+  { id: 'ministral-3-14b', family: 'mistral', tier: 'haiku', in: 0.2, out: 0.2 },
+  { id: 'ministral-3-8b', family: 'mistral', tier: 'haiku', in: 0.15, out: 0.15 },
+  { id: 'ministral-3-3b', family: 'mistral', tier: 'haiku', in: 0.1, out: 0.1 },
+  { id: 'mistral-nemo', family: 'mistral', tier: 'haiku', in: 0.15, out: 0.15 },
+  { id: 'mixtral-8x22b', family: 'mistral', tier: 'sonnet', in: 2, out: 6 },
+  { id: 'mixtral-8x7b', family: 'mistral', tier: 'haiku', in: 0.7, out: 0.7 },
 ];
 
 // Normalize a model id for matching: lowercase, strip a provider/deployment prefix
@@ -212,17 +224,38 @@ function entryMatches(candidateCanonical, entry) {
   return false;
 }
 
+// Today, UTC, as YYYY-MM-DD. Used as the pricing date when a caller does not supply
+// one — see the note on resolveModel() for why this must NOT default to CATALOG_AS_OF.
+function todayUTC() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// A promotional window is half-open on the right in the sense that `until` is the last
+// day the promo price applies; the day after, standard rates resume.
 function inWindow(win, at) {
-  if (!win) return false;
-  const day = at || CATALOG_AS_OF;
-  if (win.from && day < win.from) return false;
-  if (win.until && day > win.until) return false;
+  if (!win || !at) return false;
+  if (win.from && at < win.from) return false;
+  if (win.until && at > win.until) return false;
   return true;
 }
 
 // Resolve a model id to its catalog entry, or null when we cannot price it honestly.
-// `opts.at` (YYYY-MM-DD) selects promotional windows; defaults to the catalog date so
-// a pinned catalog stays self-consistent.
+//
+// `opts.at` (YYYY-MM-DD) is the date to price AT, and it matters:
+//
+//   - Retrospective work (peek, the tagline) must price each call on the date that
+//     call actually happened, so a session from inside a promotional window keeps the
+//     promotional rate forever and a later one does not.
+//   - Prospective work prices at today.
+//
+// It deliberately does NOT default to CATALOG_AS_OF. A frozen default means a window
+// that has expired in the real world stays open forever in the code: Claude Sonnet 5's
+// launch pricing ends 2026-08-31, and with a CATALOG_AS_OF default every surface would
+// keep quoting $2/$10 instead of $3/$15 indefinitely — a silent ~33% understatement
+// that no catalog update would fix, because the bug is in the date, not the rates.
+// Defaulting to today means known future transitions happen on schedule even if the
+// catalog itself is not refreshed. (Rates that change WITHOUT a scheduled window still
+// need a catalog refresh; that is what the staleness signal is for.)
 function resolveModel(modelId, opts) {
   const cand = canonical(modelId);
   if (!cand) return null;
@@ -231,7 +264,7 @@ function resolveModel(modelId, opts) {
     if (entryMatches(cand, entry)) { best = entry; break; }
   }
   if (!best) return null;
-  const at = (opts && opts.at) || CATALOG_AS_OF;
+  const at = (opts && opts.at) || todayUTC();
   // A live promotional window overrides the standard rates for the fields it names.
   if (inWindow(best.window, at)) {
     const { from, until, ...promo } = best.window;
@@ -289,4 +322,4 @@ function ratesFor(entry, ctx) {
   return r;
 }
 
-module.exports = { CATALOG, CATALOG_AS_OF, ANTHROPIC_CACHE, resolveModel, ratesFor, normalizeId };
+module.exports = { CATALOG, CATALOG_AS_OF, ANTHROPIC_CACHE, resolveModel, ratesFor, normalizeId, todayUTC };

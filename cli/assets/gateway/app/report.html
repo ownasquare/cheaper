@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheaper — savings report</title>
+<style>
+  /* Print-first. The screen view is the print view, so what you see is exactly what
+     the PDF contains — no second layout that can drift from the one people file. */
+  :root{
+    --ink:#16161a; --mut:#5f5f6b; --soft:#3c3c46; --line:#e2e2e8; --bg:#ffffff;
+    --panel:#fafafb; --green:#047857; --red:#b91c1c; --accent:#059669;
+  }
+  @media screen and (prefers-color-scheme: dark){
+    :root:not([data-force-light]){
+      --ink:#f2f2f5; --mut:#8b8b95; --soft:#c7c7cf; --line:#232329; --bg:#0b0b0d;
+      --panel:#121216; --green:#34d399; --red:#f87171; --accent:#34d399;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .sheet{max-width:920px;margin:0 auto;padding:36px 40px 60px;}
+
+  /* ---- masthead ---- */
+  .mast{display:flex;align-items:flex-start;gap:16px;border-bottom:2px solid var(--ink);
+    padding-bottom:14px;margin-bottom:22px;}
+  .brand{font-size:22px;font-weight:800;letter-spacing:-.02em;line-height:1.1;}
+  .brand span{color:var(--accent);}
+  .mast .t{margin-left:auto;text-align:right;font-size:12px;color:var(--mut);line-height:1.5;}
+  h1{font-size:26px;letter-spacing:-.02em;margin:0 0 2px;font-weight:700;}
+  .scope{font-size:13px;color:var(--mut);}
+
+  /* ---- hero figures ---- */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0 26px;}
+  .kpi{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--panel);}
+  .kpi .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);margin-bottom:5px;}
+  .kpi .v{font-size:25px;font-weight:750;letter-spacing:-.02em;line-height:1.08;}
+  .kpi .s{font-size:11.5px;color:var(--mut);margin-top:4px;}
+  .v.green{color:var(--green);} .v.red{color:var(--red);}
+
+  h2{font-size:14px;font-weight:700;letter-spacing:.01em;margin:26px 0 9px;
+     padding-bottom:5px;border-bottom:1px solid var(--line);}
+  h2 .h2note{float:right;font-weight:400;font-size:11.5px;color:var(--mut);}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+     color:var(--mut);font-weight:600;padding:7px 9px;border-bottom:1px solid var(--line);}
+  td{padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top;}
+  tbody tr:last-child td{border-bottom:none;}
+  .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .pos{color:var(--green);font-weight:650;} .neg{color:var(--red);font-weight:650;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;}
+  tr.total td{border-top:2px solid var(--ink);border-bottom:none;font-weight:750;}
+  .muted{color:var(--mut);}
+  .bar{height:5px;border-radius:3px;background:var(--line);overflow:hidden;min-width:70px;}
+  .bar i{display:block;height:100%;background:var(--accent);}
+
+  /* ---- provenance ---- */
+  .prov{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
+        background:var(--panel);padding:14px 16px;font-size:11.5px;line-height:1.65;color:var(--soft);}
+  .prov b{color:var(--ink);}
+  .prov dl{display:grid;grid-template-columns:170px 1fr;gap:3px 12px;margin:0 0 10px;}
+  .prov dt{color:var(--mut);} .prov dd{margin:0;}
+  .warn{color:var(--red);font-weight:650;}
+
+  .empty{color:var(--mut);font-size:12.5px;padding:10px 0;}
+  .toolbar{position:sticky;top:0;display:flex;gap:8px;justify-content:flex-end;
+    padding:10px 0;background:var(--bg);z-index:5;}
+  .btn{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--ink);
+    border-radius:8px;padding:8px 15px;font:600 13px inherit;cursor:pointer;font-family:inherit;}
+  .btn:hover{border-color:var(--mut);}
+  .btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink);}
+
+  /* ---- print ---- */
+  @page{ size:letter; margin:14mm 13mm 16mm; }
+  @media print{
+    :root{ --ink:#16161a; --mut:#55555f; --soft:#333; --line:#d7d7de; --bg:#fff;
+           --panel:#f7f7f9; --green:#046c4e; --red:#a81919; --accent:#046c4e; }
+    html,body{background:#fff;font-size:10.5pt;}
+    .sheet{max-width:none;margin:0;padding:0;}
+    .toolbar{display:none !important;}
+    /* Repeat column headers on every page — a table whose headers vanish on page 2
+       is unreadable as a filed document. */
+    thead{display:table-header-group;}
+    tfoot{display:table-footer-group;}
+    tr,.kpi,.prov,.avoid{break-inside:avoid;page-break-inside:avoid;}
+    h2{break-after:avoid;page-break-after:avoid;}
+    .page-break{break-before:page;page-break-before:always;}
+    a{text-decoration:none;color:inherit;}
+    .kpis{grid-template-columns:repeat(4,1fr);}
+  }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <div class="toolbar">
+    <button class="btn" onclick="location.href='/dashboard'">&larr; Dashboard</button>
+    <button class="btn primary" onclick="window.print()">Save as PDF&nbsp;/&nbsp;Print</button>
+  </div>
+
+  <div class="mast">
+    <div>
+      <div class="brand">Cheap<span>er</span></div>
+      <h1>Model-routing savings report</h1>
+      <div class="scope" id="scope">&nbsp;</div>
+    </div>
+    <div class="t" id="stamp">&nbsp;</div>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <h2>Savings by period <span class="h2note">windows nest — each is &ldquo;since&rdquo; its start, not disjoint</span></h2>
+  <table id="periods"><thead><tr>
+    <th>Period</th><th class="num">Routed calls</th><th class="num">Metered spend</th>
+    <th class="num">Saved</th><th class="num">Share saved</th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2>By tool</h2>
+  <div id="byTool"></div>
+
+  <h2>By capability tier <span class="h2note">tier is capability, never a price rank</span></h2>
+  <div id="byTier"></div>
+
+  <h2>Routing outcomes</h2>
+  <div id="byModel"></div>
+
+  <div class="page-break"></div>
+  <h2>Method &amp; provenance</h2>
+  <div class="prov avoid" id="prov"></div>
+
+</div>
+
+<script id="report-data" type="application/json">__REPORT_DATA__</script>
+<script>
+(function(){
+  var D = {};
+  try { D = JSON.parse(document.getElementById('report-data').textContent) || {}; } catch (e) {}
+
+  var esc = function(s){ return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+  var num = function(v, d){ v = Number(v); return isFinite(v) ? v : (d || 0); };
+  function money(n){
+    n = num(n, 0);
+    var neg = n < 0, a = Math.abs(n);
+    var v = a >= 100 ? Math.round(a) : Math.round(a * 100) / 100;
+    return (neg ? '−' : '') + '$' + v.toLocaleString('en-US',
+      { minimumFractionDigits: a >= 100 ? 0 : 2, maximumFractionDigits: 2 });
+  }
+  function int(n){ return num(n, 0).toLocaleString('en-US'); }
+  function signed(n){
+    var v = money(n);
+    return '<span class="' + (num(n,0) < 0 ? 'neg' : 'pos') + '">' + v + '</span>';
+  }
+
+  // ---- masthead -----------------------------------------------------------
+  var gen = new Date();
+  var tz = '';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+  document.getElementById('stamp').innerHTML =
+    'Generated ' + esc(gen.toLocaleString()) + '<br>' +
+    esc(tz) + '<br>' +
+    'gateway build <span class="mono">' + esc((D.code_sha || '').slice(0, 12) || 'unknown') + '</span>';
+  var cov = D.coverage || {};
+  document.getElementById('scope').textContent =
+    'Routed traffic observed by the Cheaper gateway' +
+    (cov.first ? ' · ' + new Date(cov.first * 1000).toLocaleDateString()
+                 + ' – ' + new Date(cov.last * 1000).toLocaleDateString() : '');
+
+  // ---- KPIs ---------------------------------------------------------------
+  var dol = D.dollars || {}, cnt = D.counts || {};
+  var kpis = [
+    ['Saved', money(dol.saved), (dol.savings_pct != null ? dol.savings_pct + '% of the baseline' : ''),
+     num(dol.saved, 0) < 0 ? 'red' : 'green'],
+    ['Metered spend', money(dol.spent), 'at published list rates', ''],
+    ['Calls routed cheaper', int(cnt.models_changed),
+     'of ' + int(cnt.intercepted) + ' intercepted', ''],
+    ['Costlier routes', money(dol.extra || 0),
+     int(cnt.models_upcharged || 0) + ' call(s), subtracted above',
+     num(dol.extra, 0) > 0 ? 'red' : ''],
+  ];
+  document.getElementById('kpis').innerHTML = kpis.map(function(k){
+    return '<div class="kpi"><div class="k">' + esc(k[0]) + '</div>' +
+           '<div class="v ' + k[3] + '">' + k[1] + '</div>' +
+           '<div class="s">' + esc(k[2]) + '</div></div>';
+  }).join('');
+
+  // ---- periods ------------------------------------------------------------
+  var ORDER = [['today','Today'],['week','This week'],['month','This month'],
+               ['quarter','This quarter'],['year','This year'],['all','All-time']];
+  var P = D.periods || {};
+  document.querySelector('#periods tbody').innerHTML = ORDER.map(function(o){
+    var v = P[o[0]] || {};
+    var saved = num(v.saved, 0), spent = num(v.spent, 0);
+    var base = saved + spent;
+    var pct = base > 0 ? (saved / base * 100) : 0;
+    return '<tr><td>' + esc(o[1]) + '</td>' +
+      '<td class="num">' + int(v.calls) + '</td>' +
+      '<td class="num">' + money(spent) + '</td>' +
+      '<td class="num">' + signed(saved) + '</td>' +
+      '<td class="num">' + (base > 0 ? pct.toFixed(1) + '%' : '<span class="muted">—</span>') + '</td></tr>';
+  }).join('');
+
+  // ---- helper: a simple table ---------------------------------------------
+  function table(el, cols, rows, emptyMsg){
+    var t = document.getElementById(el);
+    if (!rows.length) { t.innerHTML = '<div class="empty">' + esc(emptyMsg) + '</div>'; return; }
+    // A short table split across a page break reads as two unrelated fragments, and
+    // the second one has no heading. Long tables must be allowed to flow (their
+    // headers repeat via thead), so only keep the small ones whole.
+    var whole = rows.length <= 10 ? ' class="avoid"' : '';
+    t.innerHTML = '<div' + whole + '><table><thead><tr>' +
+      cols.map(function(c){ return '<th' + (c[1] ? ' class="num"' : '') + '>' + esc(c[0]) + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
+  }
+
+  // ---- by tool ------------------------------------------------------------
+  var tools = (D.by_tool || []).slice();
+  var maxSaved = tools.reduce(function(m, r){ return Math.max(m, Math.abs(num(r.saved, 0))); }, 0) || 1;
+  table('byTool',
+    [['Tool', 0], ['Calls', 1], ['Spend', 1], ['Saved', 1], ['Downgraded', 1], ['', 0]],
+    tools.map(function(r){
+      var w = Math.min(100, Math.abs(num(r.saved, 0)) / maxSaved * 100);
+      return '<tr><td>' + esc(r.tool) + '</td>' +
+        '<td class="num">' + int(r.calls) + '</td>' +
+        '<td class="num">' + money(r.spent) + '</td>' +
+        '<td class="num">' + signed(r.saved) + '</td>' +
+        '<td class="num">' + num(r.downgrade_rate, 0).toFixed(0) + '%</td>' +
+        '<td><div class="bar"><i style="width:' + w.toFixed(1) + '%"></i></div></td></tr>';
+    }), 'No routed traffic recorded yet.');
+
+  // ---- by tier ------------------------------------------------------------
+  var bt = D.by_tier || {};
+  table('byTier',
+    [['Tier', 0], ['Calls', 1], ['Input tokens', 1], ['Output tokens', 1]],
+    Object.keys(bt).map(function(k){
+      var v = bt[k] || {};
+      return '<tr><td>' + esc(k) + '</td><td class="num">' + int(v.count) + '</td>' +
+        '<td class="num">' + int(v.in_tokens) + '</td>' +
+        '<td class="num">' + int(v.out_tokens) + '</td></tr>';
+    }), 'No tier data.');
+
+  // ---- routing outcomes ---------------------------------------------------
+  var dn = D.downgraded_by_model || {}, up = D.upcharged_by_model || {};
+  var rows = Object.keys(dn).map(function(m){
+    return '<tr><td class="mono">' + esc(m) + '</td><td>routed cheaper</td>' +
+           '<td class="num">' + int(dn[m]) + '</td></tr>';
+  }).concat(Object.keys(up).map(function(m){
+    return '<tr><td class="mono">' + esc(m) + '</td><td class="neg">cost more than baseline</td>' +
+           '<td class="num">' + int(up[m]) + '</td></tr>';
+  }));
+  table('byModel', [['Served model', 0], ['Outcome', 0], ['Calls', 1]], rows,
+        'No routing decisions recorded yet.');
+
+  // ---- provenance ---------------------------------------------------------
+  var cat = D.catalog || {};
+  var stale = num(cat.age_days, 0) > 45;
+  document.getElementById('prov').innerHTML =
+    '<dl>' +
+    '<dt>Price catalog</dt><dd>as of <b>' + esc(cat.as_of || 'unknown') + '</b>' +
+      (cat.age_days != null ? ' (' + int(cat.age_days) + ' days old)' : '') +
+      (stale ? ' <span class="warn">— over 45 days old; re-verify before relying on these figures</span>' : '') +
+      '</dd>' +
+    '<dt>Basis</dt><dd><b>Measured.</b> Every row was observed by the Cheaper gateway, which saw both the model requested and the model served.</dd>' +
+    '<dt>Baseline</dt><dd>' + esc(D.baseline_model || 'the model each request asked for') +
+      ' — the same work priced at the model the caller originally requested.</dd>' +
+    '<dt>Period basis</dt><dd>The timestamp of the call itself. Windows are local-time calendar boundaries and <b>nest</b>: &ldquo;this week&rdquo; includes &ldquo;today&rdquo;.</dd>' +
+    '<dt>Reporting timezone</dt><dd>' + esc(tz || 'system local') + '</dd>' +
+    '</dl>' +
+    '<p style="margin:0 0 8px"><b>How each figure is computed.</b> Each call is priced twice at published ' +
+    'list rates, using that call’s own tokens, its own billing SKU and the rates in force on its own date: ' +
+    'once on the model actually served, once on the baseline model. The difference is the saving, and it is ' +
+    '<b>signed</b> — a call that cost more than its baseline is subtracted, never dropped. Prompt-cache reads ' +
+    'and 5-minute / 1-hour cache writes are priced at their own separate rates. A model absent from the ' +
+    'catalog is <b>unpriceable</b>: it contributes nothing and is never given a guessed rate.</p>' +
+    '<p style="margin:0 0 8px"><b>This is not an invoice.</b> Figures are list-price <i>metered value</i> — ' +
+    'an estimate of what this usage would list for. Negotiated discounts, committed-spend rates, credits, ' +
+    'free tiers, flat-rate subscription plans and taxes are not modelled. Reconcile against your provider ' +
+    'invoice before any accounting, reimbursement or tax use.</p>' +
+    '<p style="margin:0"><b>Scope.</b> This report covers traffic that passed through the Cheaper gateway. ' +
+    'Sessions run without the gateway are not included here.</p>';
+})();
+</script>
+</body>
+</html>

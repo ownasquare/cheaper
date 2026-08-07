@@ -7,7 +7,12 @@
 //   - NEVER route above the model the caller actually requested (a ceiling).
 // Keep the pattern lists in lock-step with router.py.
 
-// Tier ordering: index is the rank (higher = more capable).
+// models.js has no dependencies of its own, so this cannot create a require cycle.
+const { resolveModel } = require('./models');
+
+// Tier ordering: index is the rank (higher = more CAPABLE — never "more expensive").
+// Capability rank and price rank genuinely disagree in this catalog, so nothing that
+// computes dollars may use these ranks; see the note on CATALOG in models.js.
 const TIERS = ['haiku', 'sonnet', 'opus'];
 function rank(tier) { return TIERS.indexOf(tier); }
 
@@ -63,9 +68,18 @@ const TOP_SIGNALS = /(\bopus|\bultra\b|[-\s]pro\b|\breasoner\b|\bthinking\b|\bo1
 function modelTier(modelId) {
   const m = String(modelId || '').toLowerCase();
   if (!m) return null;
+  // Catalog first: a tier reviewed alongside the price beats a guess from the name.
+  const entry = resolveModel(modelId);
+  if (entry && entry.tier) return entry.tier;
+  // Name signals are a fallback for models we hold no catalog entry for.
   if (CHEAP_SIGNALS.test(m)) return 'haiku';
   if (TOP_SIGNALS.test(m)) return 'opus';
-  return 'sonnet';
+  // Fail CLOSED. This used to return 'sonnet', which silently asserted mid capability
+  // for every unrecognized model — 22 of 75 catalog entries reached it, and so does
+  // every model released after CATALOG_AS_OF. null means "we cannot show a cheaper
+  // model would do", so the caller passes the request through untouched instead of
+  // routing on an invented capability claim.
+  return null;
 }
 
 // The effective tier Cheaper WOULD have used: the cheaper of (content tier, the

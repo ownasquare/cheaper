@@ -26,15 +26,62 @@ test('classifier mirrors the router tiers', () => {
   assert.equal(contentTier('do this\n```\ncode\n```').tier, 'sonnet'); // code fence
 });
 
-test('model id -> tier, cheap signals win over top signals', () => {
+test('model tier comes from the catalog, not from the model name', () => {
+  // The catalog's declared tier wins over any name signal. These are CAPABILITY
+  // classes and deliberately do not track price — see the CATALOG note in models.js.
   assert.equal(modelTier('claude-opus-4'), 'opus');
   assert.equal(modelTier('claude-haiku-4-5'), 'haiku');
-  assert.equal(modelTier('gpt-4o-mini'), 'haiku');   // "mini" wins
-  assert.equal(modelTier('o3-mini'), 'haiku');       // o3-mini is cheap
-  assert.equal(modelTier('o3'), 'opus');
+  assert.equal(modelTier('gpt-4o-mini'), 'haiku');
+  assert.equal(modelTier('o3-mini'), 'haiku');
   assert.equal(modelTier('gpt-4o'), 'sonnet');
   assert.equal(modelTier('gemini-2.5-pro'), 'opus');
-  assert.equal(modelTier('gemini-2.5-flash'), 'haiku');
+
+  // Cases the old name-regex got WRONG, now fixed by the catalog:
+  //   o3 matched /\bo3\b/ -> 'opus', but it is a $10-blended mid reasoning model.
+  assert.equal(modelTier('o3'), 'sonnet');
+  //   gemini-2.5-flash matched /\bflash\b/ -> 'haiku'; Flash is Google's MID tier.
+  assert.equal(modelTier('gemini-2.5-flash'), 'sonnet');
+  assert.equal(modelTier('gemini-2.5-flash-lite'), 'haiku');
+  //   fable/mythos matched nothing and fell through to the old 'sonnet' default,
+  //   despite being top-class models priced at DOUBLE Opus 5.
+  assert.equal(modelTier('claude-fable-5'), 'opus');
+  assert.equal(modelTier('claude-mythos-5'), 'opus');
+  //   gpt-5.6-sol fell through to 'sonnet' at $35/Mtok blended.
+  assert.equal(modelTier('gpt-5.6-sol'), 'opus');
+  assert.equal(modelTier('gpt-5.6-luna'), 'haiku');
+});
+
+test('modelTier fails CLOSED for models the catalog does not know', () => {
+  // The old default was 'sonnet', which asserted mid capability for anything
+  // unrecognized — including every model released after CATALOG_AS_OF. Claiming a
+  // capability we cannot evidence is how a router talks itself into a downgrade.
+  assert.equal(modelTier('some-model-invented-tomorrow'), null);
+  assert.equal(modelTier('a-brand-new-thing'), null);
+  assert.equal(modelTier(''), null);
+  assert.equal(modelTier(null), null);
+
+  // An UNAMBIGUOUS name signal still classifies an off-catalog model. This is safe
+  // precisely because tier no longer touches money: `claude-opus-6` is judged
+  // top-capability for routing, while the pricing path independently refuses to
+  // price it. Capability guessed, dollars never.
+  const { isPriceable, costOfModel } = require('../src/peek/pricing');
+  assert.equal(modelTier('claude-opus-6'), 'opus');
+  assert.equal(isPriceable('claude-opus-6'), false);
+  assert.equal(costOfModel('claude-opus-6', { inFresh: 1e6, outTok: 1e6 }), null);
+  assert.equal(modelTier('acme-8b'), 'haiku');
+});
+
+test('capability tier and price rank are allowed to disagree', () => {
+  const { costOfModel } = require('../src/peek/pricing');
+  const toks = { inFresh: 1e6, outTok: 1e6 };
+  // Both are 'opus' capability, but Fable costs double Opus 5. Tier must not be
+  // used to infer which is cheaper — that is exactly the conflation being removed.
+  assert.equal(modelTier('claude-fable-5'), modelTier('claude-opus-5'));
+  assert.ok(costOfModel('claude-fable-5', toks) > costOfModel('claude-opus-5', toks));
+  // And Mistral's flagship is cheaper than its mid model.
+  assert.equal(modelTier('mistral-large-3'), 'opus');
+  assert.equal(modelTier('mistral-medium-3.5'), 'sonnet');
+  assert.ok(costOfModel('mistral-large-3', toks) < costOfModel('mistral-medium-3.5', toks));
 });
 
 test('family detection; unknown models are unpriceable (no phantom savings)', () => {
@@ -130,21 +177,21 @@ test('realized savings: sub-agent calls below the ceiling model are credited', (
     rec('claude-haiku-4-5', 'subagent'),
     rec('claude-sonnet-4-5', 'subagent'),
   ]);
-  assert.equal(r.ceilingTier, 'opus');
-  assert.equal(r.belowCeilingCalls, 2);
-  assert.deepEqual(r.tierHist, { haiku: 1, sonnet: 1, opus: 1 });
+  assert.equal(r.ceilingModel, 'claude-opus-4');
+  assert.equal(r.creditedCalls, 2);
   // haiku saved: (15+75)-(1+5)=84 ; sonnet saved: (15+75)-(3+15)=72 ; total 156.
   assert.ok(Math.abs(r.dollarsSaved - 156) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
-  assert.equal(r.tokensSaved, 4_000_000); // 2M haiku + 2M sonnet
-  // The breakdown reports ONLY the routed-cheaper tiers, not the opus main loop.
-  assert.deepEqual(r.savedTierHist, { haiku: 1, sonnet: 1, opus: 0 });
+  assert.equal(r.tokensCredited, 4_000_000); // 2M haiku + 2M sonnet
+  // The breakdown names the MODELS that saved money, never the un-routed main loop.
+  assert.deepEqual(r.savedByModel, { 'claude-haiku-4-5': 1, 'claude-sonnet-4-5': 1 });
+  assert.deepEqual(r.extraByModel, {});
   const line = buildTagline(r);
-  assert.match(line, /^Cheaper\.app saved 🟢 ~\$156 and 4\.0M tokens by using /);
-  assert.ok(line.includes('haiku tier for 1 call and sonnet tier for 1 call instead of opus.'));
+  assert.match(line, /^Cheaper\.app saved 🟢 about \$156 and 4\.0M tokens by running /);
+  assert.ok(line.includes('1 call on claude-haiku-4-5 and 1 call on claude-sonnet-4-5 instead of claude-opus-4, at list API rates.'));
   // Whole-session usage follows as its own sentence (opus 90 + haiku 6 + sonnet 18 = $114).
   // Phrased as metered value at list rates, never "you spent" — most sessions run on a
   // flat-rate subscription where that sum is never actually charged.
-  assert.match(line, / This session ran 6\.0M tokens, worth 🔴 ~\$114 at list API rates\.$/);
+  assert.match(line, / This session ran 6\.0M tokens, worth 🔴 about \$114 at list API rates\.$/);
   assert.ok(!/you spent/i.test(line), 'must not assert a charge that may never occur: ' + line);
 });
 
@@ -156,15 +203,15 @@ test('breakdown excludes the un-routed main loop — only routed-cheaper tiers a
   for (let i = 0; i < 7; i++) recs.push(rec('claude-opus-4', 'subagent', 1000, 1000));     // opus escalations
   for (let i = 0; i < 12; i++) recs.push(rec('claude-sonnet-4-5', 'subagent', 20000, 3000)); // the savings
   const r = realizedFromRecords(recs);
-  assert.equal(r.ceilingTier, 'opus');
-  assert.equal(r.savedTierHist.sonnet, 12);
-  assert.equal(r.savedTierHist.opus, 0);        // Opus is never a "saving"
-  assert.equal(r.belowCeilingCalls, 12);
+  assert.equal(r.ceilingModel, 'claude-opus-4');
+  assert.equal(r.savedByModel['claude-sonnet-4-5'], 12);
+  assert.equal(r.savedByModel['claude-opus-4'], undefined); // baseline is never a "saving"
+  assert.equal(r.creditedCalls, 12);
   const line = buildTagline(r);
-  // The 175 Opus calls MUST NOT be claimed as "opus tier for 175 calls".
-  assert.ok(!/opus tier for/.test(line), 'main-loop opus must not be claimed: ' + line);
-  assert.ok(line.includes('by using sonnet tier for 12 calls instead of opus.'));
-  assert.match(line, / This session ran [\d.]+[KM] tokens, worth 🔴 ~\$[\d.]+ at list API rates\.$/);
+  // The 175 Opus calls MUST NOT be claimed as routed savings.
+  assert.ok(!/calls on claude-opus-4/.test(line), 'main-loop opus must not be claimed: ' + line);
+  assert.ok(line.includes('by running 12 calls on claude-sonnet-4-5 instead of claude-opus-4'));
+  assert.match(line, / This session ran [\d.]+[KM] tokens, worth 🔴 about \$[\d.]+ at list API rates\.$/);
 });
 
 test('cache-aware pricing: reads 0.1x, 5m writes 1.25x, 1h writes 2x of the real input rate', () => {
@@ -282,6 +329,21 @@ test('every catalog price is well-formed (a typo here is a wrong dollar figure)'
   }
 });
 
+test('a cheap-tier route target is genuinely cheaper than its mid target', () => {
+  const { ROUTE_TARGET, costOfModel } = require('../src/peek/pricing');
+  const toks = { inFresh: 1e6, outTok: 1e6 };
+  for (const [fam, t] of Object.entries(ROUTE_TARGET)) {
+    const cheap = costOfModel(t.cheap, toks);
+    const mid = costOfModel(t.mid, toks);
+    const top = costOfModel(t.top, toks);
+    assert.ok(cheap != null && mid != null && top != null, fam + ' targets must all price');
+    // DeepSeek publishes only two SKUs, so cheap === mid there by necessity.
+    if (fam === 'deepseek') assert.equal(t.cheap, t.mid);
+    else assert.ok(cheap < mid, `${fam}: cheap target (${t.cheap} $${cheap}) must undercut mid (${t.mid} $${mid})`);
+    assert.ok(mid <= top, `${fam}: mid target must not exceed top`);
+  }
+});
+
 test('every representative model resolves to a real catalog entry', () => {
   const { REPRESENTATIVE, isPriceable } = require('../src/peek/pricing');
   for (const [family, buckets] of Object.entries(REPRESENTATIVE)) {
@@ -305,7 +367,43 @@ test('promotional pricing windows apply only inside their date range', () => {
   const toks = { inFresh: 1e6, outTok: 1e6 };
   // Sonnet 5 launch pricing is $2/$10 through 2026-08-31, $3/$15 after.
   assert.equal(costOfModel('claude-sonnet-5', toks, { at: '2026-08-06' }), 12);
+  assert.equal(costOfModel('claude-sonnet-5', toks, { at: '2026-08-31' }), 12); // last promo day
+  assert.equal(costOfModel('claude-sonnet-5', toks, { at: '2026-09-01' }), 18); // standard resumes
   assert.equal(costOfModel('claude-sonnet-5', toks, { at: '2026-09-15' }), 18);
+});
+
+test('the pricing date defaults to TODAY, never to the frozen catalog date', () => {
+  const { costOfModel } = require('../src/peek/pricing');
+  const { todayUTC, CATALOG_AS_OF } = require('../src/peek/models');
+  const toks = { inFresh: 1e6, outTok: 1e6 };
+  // Defaulting `at` to CATALOG_AS_OF would hold an expired promotional window open
+  // forever: Sonnet 5's launch price ends 2026-08-31, and a frozen default would keep
+  // quoting $2/$10 instead of $3/$15 indefinitely — a silent ~33% understatement that
+  // no catalog refresh could fix, because the bug would be in the date, not the rates.
+  assert.match(todayUTC(), /^\d{4}-\d{2}-\d{2}$/);
+  const today = todayUTC();
+  const expected = today <= '2026-08-31' ? 12 : 18;
+  assert.equal(costOfModel('claude-sonnet-5', toks), expected,
+    'default pricing date must track today (' + today + '), not CATALOG_AS_OF (' + CATALOG_AS_OF + ')');
+  // And the default must agree with passing today explicitly.
+  assert.equal(costOfModel('claude-sonnet-5', toks), costOfModel('claude-sonnet-5', toks, { at: today }));
+});
+
+test('retrospective pricing uses the date each call happened', () => {
+  // A session recorded DURING a promotional window keeps the promo rate forever; a
+  // later session on the same model does not. Pricing both at "today" would silently
+  // restate history the moment a window closes.
+  const mk = (ts) => ([
+    { model: 'claude-opus-5', source: 'user', ts: Date.parse(ts),
+      inTokens: 1e6, inFresh: 1e6, outTokens: 0, outTok: 0 },
+    { model: 'claude-sonnet-5', source: 'subagent', ts: Date.parse(ts),
+      inTokens: 1e6, inFresh: 1e6, outTokens: 1e6, outTok: 1e6 },
+  ]);
+  const inWindow = realizedFromRecords(mk('2026-08-10T00:00:00Z'));
+  const after = realizedFromRecords(mk('2026-09-10T00:00:00Z'));
+  // Sonnet 5 in-window: 2 + 10 = $12. After: 3 + 15 = $18. Opus 5 leg is $5 either way.
+  assert.ok(Math.abs(inWindow.totalSpent - 17) < 1e-6, 'in-window totalSpent=' + inWindow.totalSpent);
+  assert.ok(Math.abs(after.totalSpent - 23) < 1e-6, 'after-window totalSpent=' + after.totalSpent);
 });
 
 test('total session spend is cache-aware; routed savings reported separately', () => {
@@ -320,62 +418,64 @@ test('total session spend is cache-aware; routed savings reported separately', (
   // Sonnet is below the opus ceiling → saved (fresh): 90 (opus) - 18 (sonnet) = $72.
   assert.ok(Math.abs(r.dollarsSaved - 72) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
   const line = buildTagline(r);
-  assert.match(line, /by using sonnet tier for 1 call instead of opus\./);
-  assert.match(line, / This session ran 3\.0M tokens, worth 🔴 ~\$19\.50 at list API rates\.$/);
+  assert.match(line, /by running 1 call on claude-sonnet-4-5 instead of claude-opus-4/);
+  assert.match(line, / This session ran 3\.0M tokens, worth 🔴 about \$19\.50 at list API rates\.$/);
 });
 
 test('brand renders as a markdown link when requested', () => {
-  const r = { ceilingTier: 'opus', topTier: 'opus', dollarsSaved: 5, tokensSaved: 1e6,
-    belowCeilingCalls: 1, savedTierHist: { haiku: 0, sonnet: 1, opus: 0 }, totalSpent: 10,
-    totalTokens: 2e6, exact: false };
+  const r = { ceilingModel: 'claude-opus-4', topModel: 'claude-opus-4', dollarsSaved: 5,
+    tokensCredited: 1e6, creditedCalls: 1, savedByModel: { 'claude-sonnet-4-5': 1 },
+    extraByModel: {}, extraCost: 0, totalSpent: 10, totalTokens: 2e6, exact: false };
   const md = buildTagline(r, '[Cheaper.app](https://cheaper.app)');
   assert.ok(md.startsWith('[Cheaper.app](https://cheaper.app) saved '), md);
 });
 
 test('color cues: 🟢 on savings, 🔴 on spend; ANSI adds real colour', () => {
-  const r = { ceilingTier: 'opus', topTier: 'opus', dollarsSaved: 5, tokensSaved: 1e6,
-    belowCeilingCalls: 1, savedTierHist: { haiku: 0, sonnet: 1, opus: 0 }, totalSpent: 10,
-    totalTokens: 2e6, exact: false };
+  const r = { ceilingModel: 'claude-opus-4', topModel: 'claude-opus-4', dollarsSaved: 5,
+    tokensCredited: 1e6, creditedCalls: 1, savedByModel: { 'claude-sonnet-4-5': 1 },
+    extraByModel: {}, extraCost: 0, totalSpent: 10, totalTokens: 2e6, exact: false };
   // Markdown/plain can't colour text, so an emoji dot carries the cue in the chat.
   const md = buildTagline(r, 'Cheaper.app', 'markdown');
-  assert.ok(md.includes('saved 🟢 ~$5.00'), md);   // green cue on the savings
-  assert.ok(md.includes('worth 🔴 ~$10.00'), md);  // red cue on the metered value
+  assert.ok(md.includes('saved 🟢 about $5.00'), md);   // green cue on the savings
+  assert.ok(md.includes('worth 🔴 about $10.00'), md);  // red cue on the metered value
   // ANSI format wraps the amount in true green/red for terminals / the Stop hook.
   const ESC = String.fromCharCode(27);
   const ansi = buildTagline(r, 'Cheaper.app', 'ansi');
-  assert.ok(ansi.includes('🟢 ' + ESC + '[32m~$5.00' + ESC + '[0m'), 'ansi green: ' + JSON.stringify(ansi));
-  assert.ok(ansi.includes('🔴 ' + ESC + '[31m~$10.00' + ESC + '[0m'), 'ansi red: ' + JSON.stringify(ansi));
+  assert.ok(ansi.includes('🟢 ' + ESC + '[32mabout $5.00' + ESC + '[0m'), 'ansi green: ' + JSON.stringify(ansi));
+  assert.ok(ansi.includes('🔴 ' + ESC + '[31mabout $10.00' + ESC + '[0m'), 'ansi red: ' + JSON.stringify(ansi));
 });
 
 test('honesty: a chat with no downgrade claims no dollars (brand line only)', () => {
   const r = realizedFromRecords([rec('claude-opus-4', 'user'), rec('claude-opus-4', 'subagent')]);
   assert.equal(r.dollarsSaved, 0);
-  assert.ok(buildTagline(r).startsWith('Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.'));
+  assert.ok(buildTagline(r).startsWith('Cheaper.app ran this chat on claude-opus-4 — no routing saving to claim.'));
 });
 
 test('honesty: unknown models are unpriceable and never invent a saving', () => {
   // Ceiling is opus; the "cheap" call is an unknown model -> excluded, not credited.
   const r = realizedFromRecords([rec('claude-opus-4', 'user'), rec('totally-made-up-model', 'subagent')]);
   assert.equal(r.dollarsSaved, 0);
-  assert.equal(r.tierHist.haiku, 0);
+  assert.deepEqual(r.savedByModel, {});
   // All-unknown -> nothing priceable -> null -> empty line.
   assert.equal(realizedFromRecords([rec('totally-made-up-model', 'user')]), null);
   assert.equal(buildTagline(null), '');
 });
 
-test('exact (gateway) savings drop the "~"; estimate keeps it', () => {
-  const est = buildTagline({ ceilingTier: 'opus', dollarsSaved: 1.23, tokensSaved: 3e6,
-    belowCeilingCalls: 4, savedTierHist: { haiku: 3, sonnet: 1, opus: 0 }, exact: false });
-  assert.match(est, /saved 🟢 ~\$1\.23 and 3\.0M tokens/);
-  const exact = buildTagline({ ceilingTier: 'opus', dollarsSaved: 1.23, tokensSaved: 3e6,
-    belowCeilingCalls: 4, savedTierHist: { haiku: 3, sonnet: 1, opus: 0 }, exact: true });
+test('exact (gateway) savings drop the "about " qualifier; estimate keeps it', () => {
+  const mk = (exact) => ({ ceilingModel: 'claude-opus-4', dollarsSaved: 1.23,
+    tokensCredited: 3e6, creditedCalls: 4, extraByModel: {}, extraCost: 0,
+    savedByModel: { 'claude-haiku-4-5': 3, 'claude-sonnet-4-5': 1 }, exact });
+  const est = buildTagline(mk(false));
+  assert.match(est, /saved 🟢 about \$1\.23 and 3\.0M tokens/);
+  const exact = buildTagline(mk(true));
   assert.match(exact, /saved 🟢 \$1\.23 and 3\.0M tokens/);
-  assert.ok(!exact.includes('~'));
+  assert.ok(!exact.includes('about $'));
 });
 
 test('fromGateway maps a session-filtered summary to the tagline shape', () => {
   const g = fromGateway({
     total: 5,
+    baseline_model: 'claude-opus-5',
     by_tier: {
       haiku: { count: 3, in_tokens: 1e6, out_tokens: 1e6 },
       sonnet: { count: 1, in_tokens: 5e5, out_tokens: 5e5 },
@@ -384,43 +484,58 @@ test('fromGateway maps a session-filtered summary to the tagline shape', () => {
     dollars: { saved: 1.23 },
     counts: { models_changed: 4 },
     tokens: { downgraded: 3_000_000 }, // gateway's exact tokens-on-downgraded-rows
-    downgraded_by_tier: { haiku: 3, sonnet: 1, opus: 0 }, // the money-saving rows
+    downgraded_by_model: { 'claude-haiku-4-5': 3, 'claude-sonnet-5': 1 },
   });
   assert.equal(g.exact, true);
   assert.equal(g.dollarsSaved, 1.23);
-  assert.equal(g.tokensSaved, 3_000_000); // straight from tokens.downgraded
-  assert.deepEqual(g.savedTierHist, { haiku: 3, sonnet: 1, opus: 0 }); // routed-cheaper only
+  assert.equal(g.tokensCredited, 3_000_000); // straight from tokens.downgraded
+  assert.deepEqual(g.savedByModel, { 'claude-haiku-4-5': 3, 'claude-sonnet-5': 1 });
+  assert.equal(g.ceilingModel, 'claude-opus-5');
+});
+
+test('fromGateway degrades to null for a pre-0.3.0 gateway, never a half shape', () => {
+  // An older gateway reports tiers but no baseline_model / downgraded_by_model. Rendering
+  // that would print "ran this chat on undefined" to precisely the users who installed
+  // the gateway. Returning null falls back to the (less precise) transcript estimate.
+  const old = { total: 5, by_tier: { haiku: { count: 5, in_tokens: 2e6, out_tokens: 1e6 } },
+    dollars: { saved: 4.2 }, counts: { models_changed: 5 },
+    downgraded_by_tier: { haiku: 5, sonnet: 0, opus: 0 } };
+  assert.equal(fromGateway(old), null);
+  assert.equal(buildTagline(fromGateway(old)), '');
 });
 
 test('gateway uniform-downgrade never prints "$X and 0 tokens"', () => {
   // The core value-prop case: an opus-requesting session routed entirely to haiku.
   const summary = {
     total: 5,
+    baseline_model: 'claude-opus-5',
     by_tier: { haiku: { count: 5, in_tokens: 2e6, out_tokens: 1e6 } },
     dollars: { saved: 4.2 },
     counts: { models_changed: 5 },
-    // Old gateway without tokens.downgraded → fall back to processed tokens.
+    tokens: { downgraded: 3_000_000 },
+    downgraded_by_model: { 'claude-haiku-4-5': 5 },
   };
   const g = fromGateway(summary);
-  assert.ok(g.tokensSaved > 0, 'tokensSaved must not be 0 when dollars were saved');
+  assert.ok(g.tokensCredited > 0, 'tokensCredited must not be 0 when dollars were saved');
   const line = buildTagline(g);
   assert.ok(!line.includes('0 tokens'), 'no "0 tokens" contradiction: ' + line);
-  assert.match(line, /^Cheaper\.app saved 🟢 \$4\.20 and 3\.0M tokens by using haiku tier for 5 calls\.$/);
+  assert.match(line, /^Cheaper\.app saved 🟢 \$4\.20 and 3\.0M tokens by running 5 calls on claude-haiku-4-5 instead of claude-opus-5, at list API rates\.$/);
 });
 
 test('sub-cent savings round away — no "$0.00 saved" claim', () => {
   const r = realizedFromRecords([rec('claude-opus-4', 'user'),
     rec('claude-haiku-4-5', 'subagent', 10, 10)]); // ~$0.0009 saved
   assert.ok(r.dollarsSaved > 0 && r.dollarsSaved < 0.01);
-  assert.ok(buildTagline(r).startsWith('Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.'));
+  assert.ok(buildTagline(r).startsWith('Cheaper.app ran this chat on claude-opus-4 — no routing saving to claim.'));
 });
 
 test('an exact sub-cent saving (0.5c–1c) is suppressed, not rounded up to $0.01', () => {
-  const r = { exact: true, dollarsSaved: 0.006, tokensSaved: 20, belowCeilingCalls: 1,
-    savedTierHist: { haiku: 1, sonnet: 0, opus: 0 }, ceilingTier: 'opus', topTier: 'opus' };
+  const r = { exact: true, dollarsSaved: 0.006, tokensCredited: 20, creditedCalls: 1,
+    savedByModel: { 'claude-haiku-4-5': 1 }, extraByModel: {}, extraCost: 0,
+    ceilingModel: 'claude-opus-4', topModel: 'claude-opus-4' };
   const line = buildTagline(r);
   assert.ok(!line.includes('$0.01'), 'must not present $0.006 as an exact $0.01: ' + line);
-  assert.match(line, /kept this chat on the opus tier/);
+  assert.match(line, /ran this chat on claude-opus-4/);
 });
 
 test('cross-family: below-ceiling calls are priced at the ceiling MODEL, not the sub-task family', () => {
@@ -430,7 +545,6 @@ test('cross-family: below-ceiling calls are priced at the ceiling MODEL, not the
     rec('gemini-2.5-pro', 'user'),        // google, opus tier → the ceiling
     rec('claude-haiku-4-5', 'subagent'),  // anthropic, haiku tier → below ceiling
   ]);
-  assert.equal(r.ceilingTier, 'opus');
   assert.equal(r.ceilingModel, 'gemini-2.5-pro');
   // The baseline is the ceiling MODEL's own published rates, including its >200k
   // long-context tier: this 1M-token call bills at $2.50/$15, so baseline = 17.50.
@@ -440,12 +554,20 @@ test('cross-family: below-ceiling calls are priced at the ceiling MODEL, not the
   assert.ok(r.dollarsSaved < 20, 'must not invent Anthropic-Opus-scale savings: ' + r.dollarsSaved);
 });
 
-test('brand line names the true top tier when a subagent ran above the user ceiling', () => {
-  // User turn on Haiku, but an Opus subagent actually ran — the "kept on" line must say opus.
+test('a sub-agent ABOVE the baseline is a named anti-saving, not a silent zero', () => {
+  // User turn on Haiku, but an Opus sub-agent ran. The old code discarded the negative
+  // (`if (save > 0)`) and printed a cheerful "no cheaper routing was warranted" over
+  // work that cost real extra money. Now the overage is stated.
   const r = realizedFromRecords([rec('claude-haiku-4-5', 'user'), rec('claude-opus-4', 'subagent')]);
-  assert.equal(r.topTier, 'opus');
-  assert.equal(r.dollarsSaved, 0); // nothing below the (haiku) user ceiling
-  assert.ok(buildTagline(r).startsWith('Cheaper.app kept this chat on the opus tier — no cheaper routing was warranted.'));
+  assert.equal(r.ceilingModel, 'claude-haiku-4-5');
+  assert.equal(r.topModel, 'claude-opus-4');
+  // baseline haiku on the opus call's tokens = 1 + 5 = 6 ; actual opus = 15 + 75 = 90.
+  assert.ok(Math.abs(r.dollarsSaved + 84) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
+  assert.equal(r.creditedCalls, 0);
+  assert.equal(r.offsetCalls, 1);
+  assert.deepEqual(r.extraByModel, { 'claude-opus-4': 1 });
+  const line = buildTagline(r);
+  assert.match(line, /^Cheaper\.app claims no saving on this chat — routed work cost \$84\.00 more than claude-haiku-4-5 would have\./);
 });
 
 test('scoping: --transcript / --session / --current read exactly one chat', () => {
@@ -534,7 +656,7 @@ test('scoping rolls in the session\'s own sub-agent transcripts (Claude Code)', 
     assert.equal(t.records.length, 2, 'main + sub-agent');
     const rt = realizedFromRecords(t.records);
     assert.ok(rt.dollarsSaved > 80, 'sub-agent savings credited: ' + rt.dollarsSaved);
-    assert.equal(rt.tierHist.haiku, 1);
+    assert.deepEqual(rt.savedByModel, { 'claude-haiku-4-5': 1 });
 
     // --session and --current give the same whole-session view.
     assert.equal(collectHarness(def, { session: 'ses01' }).records.length, 2);
@@ -545,6 +667,31 @@ test('scoping rolls in the session\'s own sub-agent transcripts (Claude Code)', 
     fs.rmSync(dir, { recursive: true, force: true });
     delete require.cache[require.resolve('../src/peek/fsutil')];
     delete require.cache[require.resolve('../src/peek/adapters')];
+  }
+});
+
+test('ledger is signed and always overwrites — not a high-water ratchet', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-ratchet-'));
+  const saved = process.env.CHEAPER_LEDGER_FILE;
+  process.env.CHEAPER_LEDGER_FILE = path.join(dir, 'lifetime.json');
+  try {
+    delete require.cache[require.resolve('../src/peek/ledger')];
+    const led = require('../src/peek/ledger');
+    // A chat that cost MORE than its baseline contributes a negative amount.
+    led.record('chat-a', 10, 1000, false);
+    const afterNeg = led.record('chat-b', -5, 1000, false);
+    assert.ok(Math.abs(afterNeg.usd - 5) < 1e-9, 'signed sum expected 5, got ' + afterNeg.usd);
+    // A corrected re-run must OVERWRITE, even when the corrected figure is smaller or
+    // negative. The old `usd > 0` guard skipped the write and froze the stale value.
+    const corrected = led.record('chat-a', 2, 1000, true);
+    assert.ok(Math.abs(corrected.usd - (-3)) < 1e-9, 'expected -3 after correction, got ' + corrected.usd);
+    // ...and a non-positive lifetime total prints nothing rather than a negative claim.
+    assert.equal(buildTagline(null), '');
+  } finally {
+    if (saved === undefined) delete process.env.CHEAPER_LEDGER_FILE;
+    else process.env.CHEAPER_LEDGER_FILE = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete require.cache[require.resolve('../src/peek/ledger')];
   }
 });
 
@@ -636,7 +783,113 @@ test('tagline run: brand links to /love, appends lifetime, idempotent per chat',
   assert.equal(life2.chats, 1);
   // Brand renders as a markdown link to the /love page, and the lifetime line is appended.
   assert.ok(rendered.startsWith('[Cheaper.app](https://cheaper.app/love)'), 'brand → /love: ' + rendered);
-  assert.match(rendered, / Lifetime savings: 🟢 ~\$84\.00 and 2\.0M tokens\./);
+  assert.match(rendered, / Lifetime savings: 🟢 about \$84\.00 and 2\.0M tokens\./);
   // The "See logs" link to the local dashboard is the very last thing on the line.
   assert.ok(rendered.endsWith(' [See logs](http://localhost:59421/dashboard)'), 'See logs suffix: ' + rendered);
+});
+
+test('regression: no "$" in the tagline is ever preceded by "~" or "-"', () => {
+  // The estimate path (exact: false) is the one that used to prefix "~$", which read
+  // as a minus sign next to the dollar amount. Cover both the per-chat line and the
+  // lifetime sentence, in both the plain/markdown and ansi renderers.
+  const r = { ceilingTier: 'opus', topTier: 'opus', dollarsSaved: 5, tokensSaved: 1e6,
+    belowCeilingCalls: 1, savedTierHist: { haiku: 0, sonnet: 1, opus: 0 }, totalSpent: 10,
+    totalTokens: 2e6, exact: false };
+  for (const format of [undefined, 'markdown', 'ansi']) {
+    const line = buildTagline(r, 'Cheaper.app', format);
+    assert.ok(!/[~-]\$/.test(line), `format=${format}: ${JSON.stringify(line)}`);
+  }
+  const est = buildTagline({ ceilingTier: 'opus', dollarsSaved: 1.23, tokensSaved: 3e6,
+    belowCeilingCalls: 4, savedTierHist: { haiku: 3, sonnet: 1, opus: 0 }, exact: false });
+  assert.ok(!/[~-]\$/.test(est), JSON.stringify(est));
+});
+
+test('a stale gateway can never produce an UNHEDGED figure', () => {
+  // The worst failure mode in the system: a gateway process that imported an older
+  // build keeps serving old logic forever, and its numbers print with no "about "
+  // qualifier. Current builds report `catalog` in their summary; a summary without it
+  // must be refused rather than trusted.
+  const { gatewayIsCurrent } = require('../src/peek/tagline');
+  assert.equal(gatewayIsCurrent({ catalog: { priced: true, as_of: '2026-08-06' } }), true);
+  assert.equal(gatewayIsCurrent({ by_tier: {}, dollars: {} }), false, 'pre-catalog build');
+  assert.equal(gatewayIsCurrent({ catalog: { priced: false } }), false, 'pricing module absent');
+  assert.equal(gatewayIsCurrent(null), false);
+});
+
+test('freshness: content hashes detect drift and ignore runtime state', () => {
+  const fs2 = require('fs');
+  const { hashDir } = require('../src/freshness');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-'));
+  const a = path.join(dir, 'a'), b = path.join(dir, 'b');
+  for (const d of [a, b]) fs2.mkdirSync(path.join(d, 'app'), { recursive: true });
+  for (const d of [a, b]) fs2.writeFileSync(path.join(d, 'app', 'x.py'), 'print(1)\n');
+  try {
+    assert.equal(hashDir(a), hashDir(b), 'identical trees must hash identically');
+
+    // Runtime state Claude Code writes into the plugin cache must NOT count as drift —
+    // a check that always fires is one nobody reads.
+    fs2.mkdirSync(path.join(b, '.in_use'), { recursive: true });
+    fs2.writeFileSync(path.join(b, '.in_use', '12345'), 'pid');
+    fs2.mkdirSync(path.join(b, '__pycache__'), { recursive: true });
+    fs2.writeFileSync(path.join(b, '__pycache__', 'x.pyc'), 'bytecode');
+    assert.equal(hashDir(a), hashDir(b), 'runtime state must be ignored');
+
+    // A real content change MUST be detected.
+    fs2.writeFileSync(path.join(b, 'app', 'x.py'), 'print(2)\n');
+    assert.notEqual(hashDir(a), hashDir(b), 'a real edit must change the digest');
+
+    // A missing directory is distinguishable from a differing one.
+    assert.equal(hashDir(path.join(dir, 'nope')), null);
+  } finally {
+    fs2.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('streamed turns keep MAX usage, and dedupe spans files', () => {
+  // A single API turn is written to the transcript many times as it streams, and the
+  // repeats are NOT identical — usage grows with each line. Keeping the first
+  // occurrence under-counted output tokens by 18.9% across 120 real transcripts
+  // (774 ids grew, 0 shrank). And 157 ids appeared in more than one file, because
+  // Claude Code copies history forward on resume/fork, so a per-file dedupe set
+  // counted those turns twice.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-dedupe-'));
+  const proj = path.join(dir, '.claude', 'projects', 'demo');
+  fs.mkdirSync(proj, { recursive: true });
+  const turn = (id, out, text) => ({
+    type: 'assistant', isSidechain: false,
+    message: { id, role: 'assistant', model: 'claude-opus-5',
+               content: [{ type: 'text', text }],
+               usage: { input_tokens: 1000, output_tokens: out } },
+    timestamp: '2026-01-01T00:00:0' + (out % 10) + 'Z',
+  });
+  // One turn streamed across three growing lines...
+  fs.writeFileSync(path.join(proj, 'a.jsonl'),
+    [turn('msg_S', 10, 'a'), turn('msg_S', 500, 'ab'), turn('msg_S', 4000, 'abc')]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+  // ...and the SAME turn copied forward into a resumed session's file.
+  fs.writeFileSync(path.join(proj, 'b.jsonl'),
+    [turn('msg_S', 4000, 'abc'), turn('msg_T', 77, 'z')]
+      .map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+  const saved = process.env.CHEAPER_PEEK_HOME;
+  process.env.CHEAPER_PEEK_HOME = dir;
+  try {
+    for (const m of ['../src/peek/fsutil', '../src/peek/adapters'])
+      delete require.cache[require.resolve(m)];
+    const { HARNESSES, collectHarness } = require('../src/peek/adapters');
+    const def = HARNESSES.find((h) => h.key === 'claude-code');
+    const recs = collectHarness(def, {}).records;
+
+    const s = recs.filter((r) => r.outTokens === 4000);
+    assert.equal(s.length, 1, 'the streamed turn must appear exactly once');
+    assert.equal(recs.length, 2, 'two distinct turns total, not five lines');
+    // Max-wins, not first-wins: 10 would be an 18.9%-style under-count.
+    assert.equal(recs.reduce((a, r) => a + r.outTokens, 0), 4077);
+  } finally {
+    if (saved === undefined) delete process.env.CHEAPER_PEEK_HOME;
+    else process.env.CHEAPER_PEEK_HOME = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+    for (const m of ['../src/peek/fsutil', '../src/peek/adapters'])
+      delete require.cache[require.resolve(m)];
+  }
 });

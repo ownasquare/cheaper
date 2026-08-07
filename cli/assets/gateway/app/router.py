@@ -19,6 +19,29 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+# Real-dollar pricing, so the requested-model ceiling can be enforced in money rather
+# than in capability rank. Guarded: the router still works without it, minus the
+# dollar ceiling. Keep this the ONLY thing router.py imports from pricing.
+try:
+    from pricing import cost_of_model  # type: ignore
+    _PRICING = True
+except Exception:  # pragma: no cover - import-order safety
+    _PRICING = False
+
+# A fixed basket for comparing two models' unit cost. Same rationale as the CLI's
+# CEILING_BASKET: ranking on the live request's own token mix would make the decision
+# depend on the request, so a long prompt could unlock an escalation a short one can't.
+_RANK_BASKET = dict(in_tok=1_000_000, out_tok=1_000_000)
+
+
+def _unit_cost(model_id) -> Optional[float]:
+    if not _PRICING or not model_id:
+        return None
+    try:
+        return cost_of_model(str(model_id), **_RANK_BASKET)
+    except Exception:
+        return None
+
 # Tier ordering: index is the rank (higher = more capable).
 TIERS = ("haiku", "sonnet", "opus")
 
@@ -82,7 +105,10 @@ class RouterConfig:
 
 @dataclass
 class Decision:
-    tier: str
+    # tier is None for a PASSTHROUGH: Cheaper declined to route and the caller's own
+    # model is used unchanged. That happens when no configured model is provably
+    # cheaper than what was requested, or when the requested model is unrecognized.
+    tier: Optional[str]
     model: str
     reason: str
 
@@ -173,5 +199,32 @@ def decide(body: dict, cfg: RouterConfig, triage_tier: Optional[str] = None,
     if _rank(tier) < _rank(cfg.min_tier):
         tier = cfg.min_tier
         reason = f"{reason}; raised to min_tier '{cfg.min_tier}'"
+
+    # --- The DOLLAR ceiling ---------------------------------------------------
+    # The tier cap above only fires when requested_tier() recognized the caller's
+    # model. It returns None for anything without a haiku/sonnet/opus substring that
+    # is not an exact configured id -- so a request naming `gpt-4o-mini` with
+    # security-flavoured text got NO ceiling at all and was escalated to the opus
+    # model, directly violating allow_upgrade_above_requested=False and INCREASING
+    # the caller's cost. The invariant was always about money; tier rank was only
+    # ever standing in for it, and it stands in badly now that capability rank and
+    # price rank disagree across the catalog.
+    req_cost = _unit_cost(body.get("model"))
+    if req_cost is not None and not cfg.allow_upgrade_above_requested:
+        cand_cost = _unit_cost(model_map.get(tier))
+        if cand_cost is not None and cand_cost > req_cost:
+            # Walk DOWN the tiers until one is genuinely no more expensive.
+            for t in TIERS[:_rank(tier)][::-1]:
+                c = _unit_cost(model_map.get(t))
+                if c is not None and c <= req_cost:
+                    reason = f"{reason}; dollar ceiling: {model_map[t]} costs <= requested"
+                    tier = t
+                    break
+            else:
+                # Nothing configured is cheaper. Passing through is the honest move:
+                # routing here would raise the bill while claiming to lower it.
+                return Decision(tier=None, model=(body.get("model") or ""),
+                                reason=f"{reason}; no configured model is cheaper "
+                                       f"than requested -- passthrough")
 
     return Decision(tier=tier, model=model_map[tier], reason=reason)

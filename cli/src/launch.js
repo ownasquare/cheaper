@@ -53,7 +53,7 @@ async function waitForHealthy(timeoutMs) {
 async function ensureGatewayUp() {
   if (!isGatewayRunning()) {
     console.log(c.dim('  Gateway not running — starting it...'));
-    gateway.run(['start']); // reuses gateway.js's existing start path (may exit(1) if not installed)
+    await gateway.start([], { open: false }); // launch opens the browser itself, so no [ENTER] prompt here
   }
   const healthy = await waitForHealthy(HEALTH_TIMEOUT_MS);
   if (!healthy) {
@@ -99,13 +99,16 @@ function parseArgs(argv) {
   return o;
 }
 
-async function run(argv = []) {
+async function run(argv = [], opts = {}) {
   const o = parseArgs(argv);
 
   const ok = await ensureGatewayUp();
   if (!ok) { process.exitCode = 1; return; }
 
-  const dashUrl = `http://localhost:${PORT}/dashboard`;
+  // Deep-link to a specific dashboard tab (dashboard/reports/logs/monitor) so
+  // `cheaper logs`, `cheaper reports`, etc. open the RIGHT view, not the generic page.
+  const tab = (opts && opts.tab) || '';
+  const dashUrl = `http://localhost:${PORT}/dashboard` + (tab ? '#' + tab : '');
 
   refreshPeek();
   if (o.open) openDashboard(dashUrl);

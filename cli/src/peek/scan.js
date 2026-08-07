@@ -71,7 +71,10 @@ function scanHarness(def, opts) {
     // --- Historical TIME/TOKEN savings, mirroring metrics.py's per-row logic ---
     const usedTier = modelTier(r.model);        // tier the caller actually used ("requested")
     const effTier = effectiveTier(r.text, r.model).tier; // tier Cheaper would route to ("chosen")
-    if (usedTier) {
+    // Both tiers must be known: modelTier() now returns null for a model we hold no
+    // catalog entry for, and an unguarded LAT_TIER[null] would poison the running
+    // total with NaN rather than simply skipping the row.
+    if (usedTier && effTier && LAT_TIER[usedTier] != null && LAT_TIER[effTier] != null) {
       out.timeSavedModelS += Math.max(0, LAT_TIER[usedTier] - LAT_TIER[effTier]);
     }
     if (effTier === 'haiku' && REASONING_RE.test(String(r.model || ''))) {

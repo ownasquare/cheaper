@@ -17,14 +17,50 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from router import RouterConfig, decide, extract_text
 from metrics import Metrics, normalize_effort
+
+
+# ---- ingest sanitization ---------------------------------------------------
+# `x-cheaper-source` and the model ids are raw, client-controlled strings that reach
+# storage, the Logs view, and the report payload. A newline in `source` is a JSONL
+# line-injection primitive once the per-call event log lands; a control char can
+# corrupt a log line or a terminal. Strip control chars, restrict to a safe charset,
+# and cap the length at ingest — never let a client header shape a stored line.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SOURCE_RE = re.compile(r"[^A-Za-z0-9._:/()+ -]")
+
+
+def _sanitize_source(s) -> str:
+    return _SOURCE_RE.sub("", _CTRL_RE.sub("", str(s or "")))[:64]
+
+
+def _sanitize_model(m) -> str:
+    return _CTRL_RE.sub("", str(m or ""))[:128]
+
+
+def _harden_perms() -> None:
+    """~/.cheaper holds a complete record of the user's AI usage. It was created 0755
+    with world-readable 0644 files, so any other local user or process could read it.
+    Tighten the dir to 0700 and the sensitive files to 0600. Best-effort, idempotent."""
+    base = Path(os.path.expanduser("~")) / ".cheaper"
+    try:
+        if base.is_dir():
+            os.chmod(base, 0o700)
+        for name in ("metrics.db", "lifetime.json", "peek.json", "dash.token"):
+            p = base / name
+            if p.exists():
+                os.chmod(p, 0o600)
+    except Exception:
+        pass
 
 
 def _extract_effort(body: dict) -> str:
@@ -93,6 +129,20 @@ ANTHROPIC_MSG_URL = f"{UPSTREAM}/v1/messages"
 OPENAI_CHAT_URL = f"{OPENAI_UPSTREAM}/v1/chat/completions"
 
 app = FastAPI(title="cheaper-gateway")
+
+# Reject requests whose Host header is not a loopback name. Paired with the loopback
+# bind (cli/src/gateway.js), this is defence-in-depth against DNS-rebinding: a page
+# that resolves its own domain to 127.0.0.1 still cannot read the dashboard/logs
+# because the browser sends the attacker's Host and Starlette 400s it. `testserver`
+# is the TestClient's host (not routable). Override CHEAPER_ALLOWED_HOSTS only when
+# you deliberately expose the gateway with CHEAPER_HOST.
+_ALLOWED_HOSTS = [h.strip() for h in os.environ.get(
+    "CHEAPER_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver").split(",") if h.strip()]
+if "*" not in _ALLOWED_HOSTS:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS)
+
+_harden_perms()
+
 _client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
 
 _HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding"}
@@ -122,9 +172,49 @@ async def _triage_tier(body: dict, headers: dict) -> str | None:
     return None
 
 
+def _code_sha() -> str:
+    """Fingerprint of the code this process actually IMPORTED.
+
+    Python holds modules in memory from import time, so a gateway started before an
+    upgrade keeps serving the old logic even though every file on disk is correct --
+    and `cheaper install` cannot fix it, because the bytes were already right. That
+    exact situation shipped wrong dollar figures on the one path that prints them
+    with no hedge, and the only clue was a missing key in a JSON payload.
+
+    Serving a digest here makes the mismatch mechanically detectable: the CLI hashes
+    the same files on disk and compares. Must stay in lock-step with
+    gatewayCodeHash()/GATEWAY_CODE in cli/src/freshness.js -- same file set, same
+    ordering, same digest -- or the comparison silently always-differs.
+    """
+    import hashlib
+
+    here = Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    # `.html` is included: dashboard.html and report.html are read off disk and served,
+    # so an edit to either changes what users see. Leaving them out meant every check
+    # reported "current" while both templates were stale in the installed gateway.
+    names = sorted(p.name for p in here.iterdir()
+                   if p.is_file() and p.suffix in (".py", ".json", ".html"))
+    for name in names:
+        h.update(f"app/{name}".encode())
+        h.update(b"\0")
+        try:
+            h.update((here / name).read_bytes())
+        except Exception:
+            h.update(b"UNREADABLE")
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+CODE_SHA = _code_sha()
+
+
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "mode": MODE, "upstream": UPSTREAM, "models": CFG.models}
+    return {"ok": True, "mode": MODE, "upstream": UPSTREAM, "models": CFG.models,
+            # The build actually running, so `cheaper status` can prove freshness
+            # instead of the user having to remember to restart.
+            "code_sha": CODE_SHA}
 
 
 @app.get("/metrics")
@@ -143,6 +233,55 @@ async def peek():
         return JSONResponse(json.loads(_PEEK_JSON.read_text()))
     except Exception:
         return JSONResponse({"available": False})
+
+
+@app.get("/logs")
+async def logs(request: Request):
+    """Paginated routing-decision log for the dashboard Logs table.
+
+    Query params: limit (default 100, capped 1000), offset (default 0), and an
+    optional session to scope to one chat (mirrors /metrics semantics: absent = whole
+    ledger; present = that chat, including the empty-session bucket). Returns
+    {"rows": [...], "total": N} with rows ordered most-recent-first."""
+    qp = request.query_params
+    try:
+        limit = int(qp.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        offset = int(qp.get("offset", 0))
+    except (TypeError, ValueError):
+        offset = 0
+    session = qp.get("session")  # None when the param is absent -> whole ledger
+    return JSONResponse(await asyncio.to_thread(
+        METRICS.logs, limit=limit, offset=offset, session=session))
+
+
+_REPORT_PATH = Path(__file__).resolve().parent / "report.html"
+
+
+@app.get("/report", response_class=HTMLResponse)
+async def report():
+    """A print-ready savings report with its data EMBEDDED, not fetched.
+
+    Embedding matters for the PDF paths. `webContents.printToPDF` and the browser's
+    own print dialog both capture whatever is rendered at the moment they fire; a page
+    that fetches its data on load can be captured mid-flight and produce a PDF full of
+    empty tables. With the JSON inlined there is nothing to race.
+    """
+    summary = await asyncio.to_thread(METRICS.summary)
+    summary["code_sha"] = CODE_SHA
+    try:
+        html = _REPORT_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return HTMLResponse("<h1>report.html is missing from this gateway build</h1>",
+                            status_code=500)
+    # `</script>` anywhere inside the payload would close the host <script> tag early,
+    # so escape the characters that can break out. Model ids and tool names are
+    # user-influenced, which makes this an injection boundary, not just tidiness.
+    payload = (json.dumps(summary, default=str)
+               .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+    return HTMLResponse(html.replace("__REPORT_DATA__", payload))
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -181,7 +320,7 @@ async def ws(websocket: WebSocket):
 async def messages(request: Request):
     raw = await request.body()
     headers = _fwd_headers(request)
-    source = request.headers.get("x-cheaper-source") or request.headers.get("user-agent", "")[:60]
+    source = _sanitize_source(request.headers.get("x-cheaper-source") or request.headers.get("user-agent", "")[:60])
     # Optional chat id the client forwards so per-chat savings can be attributed
     # exactly (the end-of-chat tagline). Absent for clients that don't send it.
     session = request.headers.get("x-cheaper-session") or request.headers.get("x-session-id") or ""
@@ -194,7 +333,7 @@ async def messages(request: Request):
     except Exception:
         return await _forward(ANTHROPIC_MSG_URL, raw, headers, request)
 
-    original_model = body.get("model")
+    original_model = _sanitize_model(body.get("model"))
     from router import requested_tier as _req_tier
     req_tier = _req_tier(body, CFG)
     triage_tier = await _triage_tier(body, headers) if MODE == "triage" else None
@@ -204,7 +343,7 @@ async def messages(request: Request):
     text_len = len(extract_text(body))
 
     extra = {
-        "x-router-tier": decision.tier,
+        "x-router-tier": decision.tier or "passthrough",
         "x-router-model": decision.model,
         "x-router-original-model": str(original_model),
         "x-router-reason": decision.reason[:300],
@@ -213,9 +352,13 @@ async def messages(request: Request):
                                  extra_response_headers=extra,
                                  stream=bool(body.get("stream")), want_usage=True)
     METRICS.record(
-        tier=decision.tier, model=decision.model, original_model=str(original_model),
+        tier=decision.tier or "passthrough", model=decision.model,
+        original_model=str(original_model),
         requested_tier=str(req_tier), reason=decision.reason, source=source,
         in_tokens=usage.get("input_tokens") or (text_len // 4),
+        cache_read=usage.get("cache_read") or 0,
+        cache_create_5m=usage.get("cache_create_5m") or 0,
+        cache_create_1h=usage.get("cache_create_1h") or 0,
         out_tokens=usage.get("output_tokens") or 0,
         status=usage.get("status", 0), requested_effort=_extract_effort(body),
         session=session)
@@ -253,6 +396,23 @@ async def _forward(url, raw, headers, request, extra_response_headers=None,
             # Anthropic: input/output_tokens ; OpenAI: prompt/completion_tokens
             usage["input_tokens"] = u.get("input_tokens") or u.get("prompt_tokens")
             usage["output_tokens"] = u.get("output_tokens") or u.get("completion_tokens")
+            # Prompt-cache split. Without it every input token is billed as FRESH,
+            # and a cache read costs a tenth of fresh input -- so on a Claude Code
+            # session, where most input is cache reads, the gateway was computing its
+            # (unhedged) dollar figures from a small minority of the real billing
+            # shape. Anthropic reports the 5m/1h write breakdown under `cache_creation`;
+            # OpenAI reports cached input under prompt_tokens_details.cached_tokens.
+            cc = u.get("cache_creation") or {}
+            det = u.get("prompt_tokens_details") or {}
+            usage["cache_read"] = (u.get("cache_read_input_tokens")
+                                   or det.get("cached_tokens") or 0)
+            usage["cache_create_1h"] = cc.get("ephemeral_1h_input_tokens") or 0
+            usage["cache_create_5m"] = (
+                cc.get("ephemeral_5m_input_tokens")
+                # Older payloads report only the total; treat it as 5m, the cheaper of
+                # the two write rates, so an unknown split never OVER-states the bill.
+                or (u.get("cache_creation_input_tokens") or 0) - (cc.get("ephemeral_1h_input_tokens") or 0)
+            )
         except Exception:
             pass
     resp_headers = {k: v for k, v in upstream.headers.items()
@@ -272,8 +432,8 @@ async def chat_completions(request: Request):
     you set an OpenAI base URL (Codex, Cursor, Copilot, OpenCode, …) routes too."""
     raw = await request.body()
     headers = _fwd_headers(request)
-    source = (request.headers.get("x-cheaper-source")
-              or request.headers.get("user-agent", "")[:52]) + " (openai)"
+    source = _sanitize_source((request.headers.get("x-cheaper-source")
+              or request.headers.get("user-agent", "")[:52])) + " (openai)"
     session = request.headers.get("x-cheaper-session") or request.headers.get("x-session-id") or ""
 
     if request.headers.get("x-router-bypass", "").lower() in ("1", "true", "yes"):
@@ -283,13 +443,13 @@ async def chat_completions(request: Request):
     except Exception:
         return await _forward(OPENAI_CHAT_URL, raw, headers, request)
 
-    original_model = body.get("model")
+    original_model = _sanitize_model(body.get("model"))
     decision = decide(body, CFG, models=OPENAI_MODELS)
     body["model"] = decision.model
     new_raw = json.dumps(body).encode()
     text_len = len(extract_text(body))
     extra = {
-        "x-router-tier": decision.tier,
+        "x-router-tier": decision.tier or "passthrough",
         "x-router-model": decision.model,
         "x-router-original-model": str(original_model),
         "x-router-reason": decision.reason[:300],
@@ -298,9 +458,13 @@ async def chat_completions(request: Request):
                                  extra_response_headers=extra,
                                  stream=bool(body.get("stream")), want_usage=True)
     METRICS.record(
-        tier=decision.tier, model=decision.model, original_model=str(original_model),
+        tier=decision.tier or "passthrough", model=decision.model,
+        original_model=str(original_model),
         requested_tier="", reason=decision.reason, source=source,
         in_tokens=usage.get("input_tokens") or (text_len // 4),
+        cache_read=usage.get("cache_read") or 0,
+        cache_create_5m=usage.get("cache_create_5m") or 0,
+        cache_create_1h=usage.get("cache_create_1h") or 0,
         out_tokens=usage.get("output_tokens") or 0, status=usage.get("status", 0),
         requested_effort=_extract_effort(body), session=session)
     _notify_metrics()

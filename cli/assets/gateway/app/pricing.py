@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 
 # --- classify.js -----------------------------------------------------------
 
@@ -128,8 +129,13 @@ def _entry_matches(candidate_canonical: str, entry: dict) -> bool:
     return False
 
 
-def _in_window(win: dict | None, at: str) -> bool:
-    if not win:
+def today_utc() -> str:
+    """Today, UTC, as YYYY-MM-DD. The default pricing date -- see resolve_model()."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _in_window(win: dict | None, at: str | None) -> bool:
+    if not win or not at:
         return False
     if win.get("from") and at < win["from"]:
         return False
@@ -139,7 +145,15 @@ def _in_window(win: dict | None, at: str) -> bool:
 
 
 def resolve_model(model_id: str | None, at: str | None = None) -> dict | None:
-    """Catalog entry for a model, or None when we hold no published price."""
+    """Catalog entry for a model, or None when we hold no published price.
+
+    ``at`` (YYYY-MM-DD) is the date to price AT. It deliberately does NOT default to
+    CATALOG_AS_OF: a frozen default keeps an expired promotional window open forever.
+    Claude Sonnet 5's launch pricing ends 2026-08-31, and with a CATALOG_AS_OF default
+    every caller would keep quoting $2/$10 instead of $3/$15 indefinitely -- a silent
+    ~33% understatement that no catalog refresh would fix, because the bug is in the
+    date rather than the rates. Mirrors resolveModel() in models.js.
+    """
     cand = canonical(model_id)
     if not cand:
         return None
@@ -150,7 +164,7 @@ def resolve_model(model_id: str | None, at: str | None = None) -> dict | None:
             break
     if best is None:
         return None
-    day = at or CATALOG_AS_OF
+    day = at or today_utc()
     if _in_window(best.get("window"), day):
         merged = dict(best)
         promo = {k: v for k, v in best["window"].items() if k not in ("from", "until")}
@@ -238,7 +252,10 @@ _FAMILY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("deepseek", re.compile(r"deepseek", re.IGNORECASE)),
     ("qwen", re.compile(r"qwen|qwq", re.IGNORECASE)),
     ("meta", re.compile(r"(llama|meta-llama)", re.IGNORECASE)),
-    ("mistral", re.compile(r"(mistral|mixtral|codestral|ministral)", re.IGNORECASE)),
+    # Must stay in lock-step with FAMILY_PATTERNS in cli/src/peek/pricing.js. Drift here
+    # is silent: a family the JS recognises but Python does not reports $0 saved on the
+    # gateway path, which is the path that prints no "about" qualifier.
+    ("mistral", re.compile(r"(mistral|mixtral|codestral|ministral|magistral|devstral)", re.IGNORECASE)),
 ]
 
 
@@ -273,14 +290,18 @@ def cost_of_model(
     cache_create_1h: float = 0.0,
     speed: str | None = None,
     service_tier: str | None = None,
+    at: str | None = None,
 ) -> float | None:
     """Exact cost of one call on a specific model, or None if unpriceable.
 
     ``out_tok`` already includes reasoning/thinking tokens: every provider bills
     reasoning at the output rate and folds it into the reported output count, so a
     higher reasoning-effort setting needs no separate term here.
+
+    ``at`` (YYYY-MM-DD) is the date the call happened, used to select promotional
+    windows; defaults to today inside resolve_model().
     """
-    entry = resolve_model(model_id)
+    entry = resolve_model(model_id, at)
     if entry is None:
         return None
     total_in = in_tok + cache_read + cache_create_5m + cache_create_1h
@@ -387,6 +408,15 @@ if __name__ == "__main__":
                     "gpt-5-codex", "o3-deep-research", "claude-opus-6", "grok-5"):
         assert not is_priceable(unknown), unknown + " must be unpriceable"
         assert cost_of_model(unknown, 1e6, 1e6) is None, unknown + " must price as None"
+
+    # Promotional windows are evaluated against the date the call happened, and the
+    # DEFAULT is today -- never CATALOG_AS_OF, which would hold an expired window open
+    # forever. Sonnet 5's launch pricing ($2/$10) ends 2026-08-31; from 2026-09-01 the
+    # standard $3/$15 must apply with no catalog change.
+    assert abs(cost_of_model("claude-sonnet-5", 1e6, 1e6, at="2026-08-06") - 12.0) < 1e-9
+    assert abs(cost_of_model("claude-sonnet-5", 1e6, 1e6, at="2026-08-31") - 12.0) < 1e-9
+    assert abs(cost_of_model("claude-sonnet-5", 1e6, 1e6, at="2026-09-01") - 18.0) < 1e-9
+    assert today_utc() >= "2026-01-01" and len(today_utc()) == 10
     assert estimate_call("totally-unknown", 1_000_000, 1_000_000, "haiku")["saved"] == 0.0
     assert estimate_call("llama-4-maverick", 1_000_000, 1_000_000, "haiku")["saved"] == 0.0
 

@@ -114,3 +114,46 @@ def test_models_param_maps_tier_to_provider_ids():
     assert d.model == "gpt-4o-mini"       # resolved against the OpenAI map, not Anthropic
     d2 = decide(body("diagnose this deadlock and prove the fix", model="gpt-4o"), cfg, models=oai)
     assert d2.model == "o3"               # hard -> OpenAI top tier
+
+
+def test_dollar_ceiling_blocks_a_cost_increasing_escalation():
+    """A cheap requested model must never be escalated into a pricier one.
+
+    `requested_tier()` returns None for any id without a haiku/sonnet/opus substring
+    that is not an exact configured id -- so `gpt-4o-mini` got NO ceiling, and
+    security-flavoured text escalated it to the opus model. That is the exact
+    opposite of the product's promise: it RAISES the bill while claiming to lower it.
+    The ceiling is now enforced in dollars, which is what the invariant always meant.
+    """
+    cfg = RouterConfig()
+    body = {"model": "gpt-4o-mini",
+            "messages": [{"role": "user",
+                          "content": "audit this login flow for a security vulnerability"}]}
+    d = decide(body, cfg)
+    # gpt-4o-mini is $0.15/$0.60 -> $0.75 per 1M+1M. Nothing configured is cheaper
+    # (haiku-4-5 is $6), so the honest outcome is passthrough, not an escalation.
+    assert d.tier is None, f"expected passthrough, got tier={d.tier} model={d.model}"
+    assert d.model == "gpt-4o-mini"
+    assert "passthrough" in d.reason
+
+
+def test_dollar_ceiling_walks_down_to_a_cheaper_configured_tier():
+    """When something configured IS cheaper, route to it rather than passing through."""
+    cfg = RouterConfig()
+    body = {"model": "claude-opus-4-1",  # $15/$75 -> $90 per 1M+1M
+            "messages": [{"role": "user",
+                          "content": "prove this lock-free queue is free of the ABA problem"}]}
+    d = decide(body, cfg)
+    # Opus-worthy content and an expensive requested model: the configured opus
+    # (claude-opus-4-6, $5/$25 = $30) is well under the $90 ceiling, so it routes.
+    assert d.tier == "opus"
+    assert d.model == "claude-opus-4-6"
+
+
+def test_dollar_ceiling_leaves_ordinary_downgrades_alone():
+    """The common case must be untouched: simple text on an expensive model downgrades."""
+    cfg = RouterConfig()
+    body = {"model": "claude-opus-4-1", "messages": [{"role": "user", "content": "rename a var"}]}
+    d = decide(body, cfg)
+    assert d.tier == "haiku"
+    assert d.model == "claude-haiku-4-5"

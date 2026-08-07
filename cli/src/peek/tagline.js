@@ -9,8 +9,10 @@
 // Number source, honoring "real when gateway, else estimate":
 //   1. If the gateway is running and has session-tagged rows for this chat, use its
 //      EXACT realized dollars (what you'd have paid at the requested model vs. what
-//      Cheaper spent). No leading "~".
-//   2. Otherwise, estimate from the chat transcript (ceiling-vs-actual). Marked "~".
+//      Cheaper spent). No "about " qualifier.
+//   2. Otherwise, estimate from the chat transcript (ceiling-vs-actual). Marked with
+//      an "about " qualifier before the amount (never a leading glyph like "~" or
+//      "-", which reads as a minus sign next to a "$").
 //   3. If nothing cheaper happened, stay honest: no "$0.00 saved" — either a plain
 //      "kept on the <tier> tier" brand line, or nothing at all.
 //
@@ -18,8 +20,16 @@
 // gateway on 127.0.0.1; any failure silently falls back to the transcript estimate.
 
 const http = require('http');
-const { TIERS, rank, modelTier } = require('./classify');
-const { detectFamily, isPriceable, costOfModel } = require('./pricing');
+const { isPriceable, costOfModel } = require('./pricing');
+const { resolveModel, CATALOG_AS_OF, todayUTC } = require('./models');
+
+// Whole days since the price catalog was transcribed from the providers' own pages.
+function catalogAgeDays() {
+  const a = Date.parse(CATALOG_AS_OF + 'T00:00:00Z');
+  const b = Date.parse(todayUTC() + 'T00:00:00Z');
+  if (Number.isNaN(a) || Number.isNaN(b)) return null;
+  return Math.max(0, Math.round((b - a) / 86400000));
+}
 const { HARNESSES, collectHarness, sessionStem, sessionIdFor } = require('./adapters');
 const { tokens: fmtTokens } = require('./render');
 const ledger = require('./ledger');
@@ -59,116 +69,161 @@ function tokenBreakdown(r) {
 }
 
 // Billing modifiers that change a call's rate without changing its token counts.
+//
+// `at` is the date the call actually happened, so a call is priced against the rates
+// that were in force THEN — a session inside a promotional window keeps the promo
+// rate forever, and one after it does not. Falling back to today (rather than the
+// catalog's as-of date) means a window that has expired in the real world is also
+// expired here, even on a catalog that has not been refreshed.
 function billingCtx(r) {
-  return { speed: r.speed || null, serviceTier: r.serviceTier || null };
+  const day = r.ts ? new Date(r.ts).toISOString().slice(0, 10) : null;
+  return { speed: r.speed || null, serviceTier: r.serviceTier || null, at: day || undefined };
 }
 
-// Realized savings for a scoped set of chat records. Baseline = the chat's ceiling
-// tier (the top tier its top-level/user turns ran on); every call routed BELOW that
-// ceiling is credited the difference at its own family's rates. Unknown/unpriceable
-// models are skipped (never invent a saving that can't be priced).
-function realizedFromRecords(records) {
-  // A model we hold no published price for is skipped outright. Pricing it at a
-  // neighbour's rate would put a number on screen that no invoice would ever match.
-  const priced = (records || []).filter((r) => isPriceable(r.model) && modelTier(r.model));
-  if (!priced.length) return null;
-  // Ceiling = the top tier a top-level (user) turn ran on, and the exact MODEL that
-  // ran there. The honest counterfactual for a downgraded sub-task is "what it would
-  // have cost on the SESSION'S ceiling model" — so the baseline is priced against that
-  // model's own published rates, not the sub-task's family (which, cross-provider,
-  // would invent savings against a model the session never used) and not a tier
-  // average (which would price Opus 5 work at retired Opus 4.1 rates).
-  const pool = priced.filter((r) => r.source !== 'subagent');
-  const ceilingSrc = pool.length ? pool : priced;
-  let ceilingRank = -1, ceilingModel = null, ceilingCtx = null;
-  for (const r of ceilingSrc) {
-    const rk = rank(modelTier(r.model));
-    if (rk > ceilingRank) { ceilingRank = rk; ceilingModel = r.model; ceilingCtx = billingCtx(r); }
-  }
-  const ceilingTier = TIERS[ceilingRank];
+// The basket used to RANK models against each other when picking the baseline.
+//
+// Fixed on purpose. Ranking on the session's own aggregate token mix would make the
+// baseline depend on the very calls being credited, so adding one cache-heavy
+// sub-agent could retroactively change a different sub-agent's credit.
+const CEILING_BASKET = { inFresh: 1e6, cacheCreate5m: 0, cacheCreate1h: 0,
+                         cacheCreate: 0, cacheRead: 0, outTok: 1e6 };
 
-  const tierHist = { haiku: 0, sonnet: 0, opus: 0 };       // every priced call (diagnostics only)
-  const savedTierHist = { haiku: 0, sonnet: 0, opus: 0 };  // ONLY the calls Cheaper routed cheaper
-  let dollarsSaved = 0, dollarsSpent = 0, tokensSaved = 0, belowCeilingCalls = 0, topRank = ceilingRank;
-  let totalSpent = 0, totalTokens = 0; // the whole session's real (cache-aware) bill
-  let anyEstimated = false;            // true if any leg's tokens were inferred, not reported
+// The session's date — the latest call in it. Used so a historical session is ranked
+// and priced at the rates in force then, rather than moving when a promo window shuts.
+function sessionDate(priced) {
+  let d = null;
   for (const r of priced) {
-    const t = modelTier(r.model);
-    tierHist[t] = (tierHist[t] || 0) + 1;
-    if (rank(t) > topRank) topRank = rank(t); // a subagent above the user ceiling still ran
-    if (r.estimated) anyEstimated = true;
-    const bk = tokenBreakdown(r);
-    // Exact cost of this call on the model that actually ran it, at its own cache,
-    // long-context, speed and service-tier rates.
-    const spent = costOfModel(r.model, bk, billingCtx(r)) || 0;
-    totalSpent += spent;
-    totalTokens += (r.inTokens || 0) + (r.outTokens || 0);
-    if (rank(t) < ceilingRank) {
-      // A call routed BELOW the session ceiling — i.e. work Cheaper delegated to a
-      // cheaper tier. The main loop runs AT the ceiling and is the baseline, never a
-      // "routed" call, so it is deliberately excluded from the savings breakdown.
-      const baseline = costOfModel(ceilingModel, bk, ceilingCtx);
-      const save = baseline == null ? 0 : baseline - spent; // vs the ceiling model
-      if (save > 0) {
-        dollarsSaved += save; dollarsSpent += spent; tokensSaved += (r.inTokens || 0) + (r.outTokens || 0);
-        belowCeilingCalls++; savedTierHist[t]++;
-      }
-    }
+    const c = billingCtx(r).at;
+    if (c && (!d || c > d)) d = c;
   }
-  const wouldHave = dollarsSpent + dollarsSaved; // cost of the routed work at the ceiling model
-  const savedPct = wouldHave > 0 ? Math.round((dollarsSaved / wouldHave) * 100) : 0;
-  return { ceilingTier, ceilingModel, topTier: TIERS[topRank], dollarsSaved, dollarsSpent,
-           wouldHave, savedPct, tokensSaved, totalSpent, totalTokens, belowCeilingCalls,
-           tierHist, savedTierHist, calls: priced.length, estimatedTokens: anyEstimated,
-           exact: false };
+  return d || undefined;
+}
+
+// The priciest model among `records`, by catalog dollars on the fixed basket.
+// Iterating in canonical-id order makes ties resolve deterministically: the same
+// session used to report $24.00 or $84.00 purely from JSONL append order.
+function priciest(records, idOf, at) {
+  let best = -1, winner = null;
+  const sorted = records.slice().sort((a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0));
+  for (const r of sorted) {
+    const c = costOfModel(idOf(r), CEILING_BASKET, { at });
+    if (c != null && c > best) { best = c; winner = idOf(r); }
+  }
+  return winner;
+}
+
+// Realized savings for a scoped set of chat records, in DOLLARS. No tier is involved.
+//
+// CEILING RULE (deliberate — change this comment if you change the rule): the baseline
+// is the priciest model the session's TOP-LEVEL turns ran on, ranked on CEILING_BASKET
+// at the session's own date. Price, not capability: a name-derived tier ranked
+// claude-fable-5 ($60 per 1M in + 1M out) BELOW claude-opus-5 ($30), and 38 such
+// inversions exist in the catalog. Capability rank simply is not price rank, and only
+// price can answer "did this call cost less than the alternative".
+//
+// Unknown/unpriceable models are skipped — never invent a saving that can't be priced.
+function realizedFromRecords(records) {
+  // Priceability is the ONLY gate. The old `&& modelTier(r.model)` conjunct was dead
+  // code when modelTier defaulted to 'sonnet'; now that it fails closed it would have
+  // silently dropped every model newer than CATALOG_AS_OF.
+  const priced = (records || []).filter((r) => isPriceable(r.model));
+  if (!priced.length) return null;
+  const idOf = (r) => resolveModel(r.model).id;   // canonical catalog id
+  const at = sessionDate(priced);
+
+  const pool = priced.filter((r) => r.source !== 'subagent');
+  // No priceable TOP-LEVEL turn means there is no baseline, and therefore no claim.
+  // The old `pool.length ? pool : priced` fallback let a sub-agent become its own
+  // baseline, so an uncatalogued main loop plus two flavours of Haiku manufactured a
+  // saving out of nothing.
+  if (!pool.length) return null;
+  const ceilingModel = priciest(pool, idOf, at);
+  if (!ceilingModel) return null;
+  const topModel = priciest(priced, idOf, at);    // a sub-agent may sit above the ceiling
+
+  // ELIGIBLE = work Cheaper plausibly ROUTED, never the user's own model choice.
+  // Only claude-code tags sidechains; codex hardcodes source:'user' and the generic
+  // harnesses test their SUBAGENT_HINT against a role string that is always
+  // 'assistant', so it never fires. Gating on source alone would zero out 7 of 8
+  // harnesses — so trust sub-agent attribution when this session carries any, and
+  // otherwise fall back to "every call not on the baseline model".
+  const routedAware = priced.some((r) => r.source === 'subagent');
+  const eligible = routedAware ? priced.filter((r) => r.source === 'subagent')
+                               : priced.filter((r) => idOf(r) !== ceilingModel);
+
+  const savedByModel = {}, extraByModel = {};
+  let net = 0, gross = 0, extraCost = 0, wouldHave = 0;
+  let tokensCredited = 0, creditedCalls = 0, offsetCalls = 0;
+  let totalSpent = 0, totalTokens = 0, anyEstimated = false;
+
+  for (const r of priced) {
+    if (r.estimated) anyEstimated = true;
+    totalSpent += costOfModel(r.model, tokenBreakdown(r), billingCtx(r)) || 0;
+    totalTokens += (r.inTokens || 0) + (r.outTokens || 0);
+  }
+
+  for (const r of eligible) {
+    const id = idOf(r);
+    if (id === ceilingModel) continue;             // ran AT the baseline
+    const bk = tokenBreakdown(r), ctx = billingCtx(r);
+    const spent = costOfModel(r.model, bk, ctx) || 0;
+    // SAME call, SAME date, SAME SKU — the only variable is the model, because the
+    // model is the only thing Cheaper controls. The old code priced the baseline with
+    // the CEILING RECORD's context, so a single fast-mode main-loop turn valued every
+    // sub-agent's counterfactual at the 2x fast SKU.
+    const baseline = costOfModel(ceilingModel, bk, ctx);
+    if (baseline == null) continue;
+    const d = baseline - spent;
+    net += d;
+    wouldHave += baseline;
+    // Counted over the SAME call set as `net`. Accumulating tokens only on the
+    // positive branch made the two halves of the printed sentence disagree.
+    tokensCredited += (r.inTokens || 0) + (r.outTokens || 0);
+    if (d > 0) { gross += d; creditedCalls++; savedByModel[id] = (savedByModel[id] || 0) + 1; }
+    else if (d < 0) { extraCost += -d; offsetCalls++; extraByModel[id] = (extraByModel[id] || 0) + 1; }
+  }
+
+  return { ceilingModel, topModel, dollarsSaved: net, gross, extraCost, wouldHave,
+           savedPct: wouldHave > 0 ? Math.round((net / wouldHave) * 100) : 0,
+           tokensCredited, creditedCalls, offsetCalls, savedByModel, extraByModel,
+           totalSpent, totalTokens, calls: priced.length,
+           estimatedTokens: anyEstimated, exact: false };
 }
 
 // Same shape, from the running gateway's EXACT session-filtered metrics summary.
+//
+// Degrades to null rather than emitting a half-populated shape. `buildTagline` is
+// shared between this path and the transcript path, so a gateway older than the
+// model-named vocabulary would otherwise render "ran this chat on undefined" — and it
+// would do so for exactly the users who bothered to install the gateway. Returning
+// null falls back to the transcript estimate, which is merely less precise.
 function fromGateway(summary) {
-  if (!summary || !summary.by_tier || !summary.dollars) return null;
-  const byTier = summary.by_tier;
-  const tierHist = { haiku: 0, sonnet: 0, opus: 0 };
-  const present = [];
-  for (const t of TIERS) {
-    const n = (byTier[t] && byTier[t].count) || 0;
-    tierHist[t] = n;
-    if (n > 0) present.push(t);
-  }
-  if (!present.length) return null;
-  const topRank = Math.max(...present.map((t) => rank(t)));
-  const topTier = TIERS[topRank];
-  const dollarsSaved = (summary.dollars && summary.dollars.saved) || 0;
-  const belowCeilingCalls = (summary.counts && summary.counts.models_changed) || 0;
-  // Per-tier histogram of the DOWNGRADED (money-saving) rows only — what Cheaper
-  // actually routed to a cheaper tier, never the calls that ran at the requested
-  // ceiling. Prefer the gateway's exact figure; fall back for an older gateway.
-  const savedTierHist = { haiku: 0, sonnet: 0, opus: 0 };
-  const dbt = summary.downgraded_by_tier;
-  if (dbt) {
-    for (const t of TIERS) savedTierHist[t] = dbt[t] || 0;
-  } else {
-    for (const t of present) if (rank(t) < topRank) savedTierHist[t] = (byTier[t] && byTier[t].count) || 0;
-    const below = TIERS.reduce((s, t) => s + savedTierHist[t], 0);
-    if (below === 0 && belowCeilingCalls > 0) savedTierHist[present[0]] = belowCeilingCalls; // uniform downgrade
-  }
-  // Tokens attributable to routing. The gateway's dollarsSaved uses a
-  // requested-vs-spent baseline, so tokensSaved must NOT be derived from run-tier
-  // histograms (that yields "$X and 0 tokens" on a uniformly-downgraded session).
-  // Prefer the gateway's exact tokens-on-downgraded-rows figure; if an older gateway
-  // didn't report it, count all processed tokens whenever any call was downgraded.
-  let tokensSaved = (summary.tokens && summary.tokens.downgraded) || 0;
-  if (!tokensSaved && belowCeilingCalls > 0) {
-    for (const t of present) { const d = byTier[t] || {}; tokensSaved += (d.in_tokens || 0) + (d.out_tokens || 0); }
-  }
-  // Whole-session context: the gateway routes every call, so its spend IS the total.
+  if (!summary || !summary.dollars) return null;
+  if (!summary.baseline_model || !summary.downgraded_by_model) return null;
   const dol = summary.dollars || {};
-  const totalSpent = dol.spent || 0;
+  const byTier = summary.by_tier || {};
   let totalTokens = 0;
-  for (const t of present) { const d = byTier[t] || {}; totalTokens += (d.in_tokens || 0) + (d.out_tokens || 0); }
-  const savedPct = dol.savings_pct || 0;
-  return { ceilingTier: topTier, topTier, dollarsSaved, dollarsSpent: totalSpent,
-           wouldHave: totalSpent + dollarsSaved, savedPct, tokensSaved, totalSpent, totalTokens,
-           belowCeilingCalls, tierHist, savedTierHist, calls: summary.total || 0, exact: true };
+  for (const t of Object.keys(byTier)) {
+    totalTokens += (byTier[t].in_tokens || 0) + (byTier[t].out_tokens || 0);
+  }
+  return {
+    ceilingModel: summary.baseline_model,
+    topModel: summary.top_model || summary.baseline_model,
+    dollarsSaved: dol.saved || 0,
+    gross: dol.gross || 0,
+    extraCost: dol.extra || 0,
+    wouldHave: dol.billed_top || 0,
+    savedPct: dol.savings_pct || 0,
+    tokensCredited: (summary.tokens && summary.tokens.downgraded) || 0,
+    creditedCalls: (summary.counts && summary.counts.models_changed) || 0,
+    offsetCalls: (summary.counts && summary.counts.models_upcharged) || 0,
+    savedByModel: summary.downgraded_by_model || {},
+    extraByModel: summary.upcharged_by_model || {},
+    totalSpent: dol.spent || 0,
+    totalTokens,
+    calls: summary.total || 0,
+    exact: true,
+  };
 }
 
 // Best-effort GET to the local gateway for exact, session-scoped metrics. Resolves
@@ -258,46 +313,88 @@ function logsSuffix(format, url) {
 // is the right basis whether the user is billed per-token or on a subscription.
 function spendSentence(r, format) {
   if (!r || !(r.totalSpent >= SHOW_MIN_USD)) return '';
-  const amt = (r.exact ? '' : '~') + money(r.totalSpent);
+  const amt = (r.exact ? '' : 'about ') + money(r.totalSpent);
   const toks = fmtTokens(r.totalTokens || 0);
   return ` This session ran ${toks} tokens, worth ${tint(amt, 'spend', format)} at list API rates.`;
+}
+
+// "3 calls on claude-haiku-4-5", busiest model first, ties by id so the rendered
+// sentence is stable across runs.
+function modelParts(hist) {
+  return Object.entries(hist || {})
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([m, n]) => `${n} call${n === 1 ? '' : 's'} on ${m}`);
 }
 
 function buildTagline(r, brand, format) {
   if (!r) return '';
   brand = brand || 'Cheaper.app';
   const spend = spendSentence(r, format);
-  // The breakdown reports ONLY the tiers Cheaper routed cheaper work to (the savings
-  // drivers) — never the main-loop / ceiling calls, which Cheaper did not route and
-  // which would otherwise balloon the count while the savings stay flat.
-  const parts = [];
-  for (const t of TIERS) {
-    const n = (r.savedTierHist && r.savedTierHist[t]) || 0;
-    if (n > 0) parts.push(`${t} tier for ${n} call${n === 1 ? '' : 's'}`);
+  // Named MODELS, never tiers. "haiku tier instead of opus" was never checkable by the
+  // reader and, after the catalog gained fable/mythos, was not even ordered by cost.
+  const names = Object.keys(r.savedByModel || {});
+  const shown = modelParts(r.savedByModel).slice(0, 3);
+  if (names.length > 3) {
+    const rest = names.length - 3;
+    shown.push(`${rest} other model${rest === 1 ? '' : 's'}`);
   }
-  const realSaving = r.dollarsSaved >= SHOW_MIN_USD && r.belowCeilingCalls > 0 &&
-    r.tokensSaved > 0 && parts.length > 0;
+
+  const realSaving = r.dollarsSaved >= SHOW_MIN_USD && r.creditedCalls > 0 &&
+    r.tokensCredited > 0 && shown.length > 0 && r.ceilingModel;
   if (realSaving) {
-    const amt = (r.exact ? '' : '~') + money(r.dollarsSaved);
-    const savedTop = Math.max(...TIERS.filter((t) => (r.savedTierHist[t] || 0) > 0).map(rank));
-    const base = (r.ceilingTier && rank(r.ceilingTier) > savedTop) ? ` instead of ${r.ceilingTier}` : '';
-    return `${brand} saved ${tint(amt, 'save', format)} and ${fmtTokens(r.tokensSaved)} tokens by using ${joinAnd(parts)}${base}.${spend}`;
+    const amt = (r.exact ? '' : 'about ') + money(r.dollarsSaved);
+    const off = modelParts(r.extraByModel);
+    // The anti-saving is NAMED, not silently netted away. A headline that has been
+    // reduced by an offset the reader cannot see is a breakdown that does not
+    // reconcile with the figure it claims to explain.
+    const offset = off.length
+      ? ` — after ${money(r.extraCost)} more on ${joinAnd(off)}`
+      : '';
+    return `${brand} saved ${tint(amt, 'save', format)} and ${fmtTokens(r.tokensCredited)} tokens ` +
+      `by running ${joinAnd(shown)} instead of ${r.ceilingModel}${offset}, at list API rates.${spend}`;
   }
-  // No cheaper routing this chat: name the ACTUAL top tier that ran (a subagent may
-  // have run above the user-turn ceiling), never understate it.
-  const keptTier = r.topTier || r.ceilingTier;
-  if (keptTier) {
-    return `${brand} kept this chat on the ${keptTier} tier — no cheaper routing was warranted.${spend}`;
+
+  // Routing cost MORE than the baseline would have. Say so plainly rather than
+  // printing a cheerful "no saving warranted" line over a real negative.
+  if (r.dollarsSaved <= -SHOW_MIN_USD && r.ceilingModel &&
+      Object.keys(r.extraByModel || {}).length) {
+    return `${brand} claims no saving on this chat — routed work cost ` +
+      `${money(-r.dollarsSaved)} more than ${r.ceilingModel} would have.${spend}`;
   }
-  return '';
+
+  // Nothing was routed cheaper: name the priciest model that actually ran.
+  const kept = r.topModel || r.ceilingModel;
+  if (kept) return `${brand} ran this chat on ${kept} — no routing saving to claim.${spend}`;
+  return spend ? spend.trimStart() : '';   // never interpolate undefined
+}
+
+// A gateway summary is only trustworthy as an EXACT figure if the gateway is running
+// the current pricing code. A process that imported an older build keeps serving its
+// old logic indefinitely, and its numbers print with no "about " qualifier — so a
+// stale gateway is the single worst source in the system: confidently wrong.
+//
+// The tell is cheap and needs no extra request: current builds report `catalog` in
+// their summary. If it is missing, the gateway predates catalog-aware pricing and its
+// dollar figures were computed by the code that over-reported by 50% on downgrades.
+function gatewayIsCurrent(summary) {
+  return !!(summary && summary.catalog && summary.catalog.priced);
 }
 
 async function computeSavings(opts) {
   const sid = opts.session || (opts.transcript ? sessionStem(opts.transcript) : null);
   if (sid) {
     const summary = await fetchGatewaySession(sid);
-    const g = summary && fromGateway(summary);
-    if (g && g.dollarsSaved >= SHOW_MIN_USD) return g; // exact, real — no "~"
+    if (summary && !gatewayIsCurrent(summary)) {
+      // Prefer the transcript estimate — which is at least computed by THIS build and
+      // is honestly marked "about" — over an unhedged number from unknown-age code.
+      if (!process.env.CHEAPER_QUIET) {
+        console.error('cheaper: gateway is running an older build; using the local '
+          + 'estimate instead. Fix with: cheaper gateway restart');
+      }
+    } else {
+      const g = summary && fromGateway(summary);
+      if (g && g.dollarsSaved >= SHOW_MIN_USD) return g; // exact, real — no "about " qualifier
+    }
   }
   const { records } = collectSessionRecords(opts);
   return realizedFromRecords(records); // may be null
@@ -307,11 +404,16 @@ async function computeSavings(opts) {
 // The all-time running total, appended after the per-chat line so the value Cheaper
 // has delivered is visible at the end of EVERY chat — including a no-routing chat,
 // where the per-chat line is just the "kept on the <tier> tier" brand line. Shown
-// only once the lifetime total is a real amount (>= 1c and some tokens). Marked "~"
-// unless every contributing chat's figure came from the exact gateway numbers.
+// only once the lifetime total is a real amount (>= 1c and some tokens). Marked with
+// an "about " qualifier unless every contributing chat's figure came from the exact
+// gateway numbers.
+// Suppressed when the running total is not a positive amount. Chats can now contribute
+// a NEGATIVE figure (routed work that cost more than the baseline), so the total can
+// legitimately sit at or below zero — and "Lifetime savings: -$3.10" is not a sentence
+// worth printing. Saying nothing is honest; floor-at-zero would overstate.
 function lifetimeSentence(tot, format) {
   if (!tot || !(tot.usd >= SHOW_MIN_USD) || !(tot.tokens > 0)) return '';
-  const amt = (tot.exact ? '' : '~') + money(tot.usd);
+  const amt = (tot.exact ? '' : 'about ') + money(tot.usd);
   return ` Lifetime savings: ${tint(amt, 'save', format)} and ${fmtTokens(tot.tokens)} tokens.`;
 }
 
@@ -327,7 +429,7 @@ async function run(opts = {}) {
     const def = harnessDef(o.only || 'claude-code');
     const key = def ? sessionIdFor(def, o) : null;
     tot = ledger.record(key, (result && result.dollarsSaved) || 0,
-      (result && result.tokensSaved) || 0, !!(result && result.exact));
+      (result && result.tokensCredited) || 0, !!(result && result.exact));
   } catch { tot = null; }
   const lifetime = lifetimeSentence(tot, o.format);
   let out = line ? line + lifetime : lifetime.trimStart();
@@ -335,6 +437,10 @@ async function run(opts = {}) {
   if (out) out += logsSuffix(o.format, dashboardUrl(o));
   if (o.json) {
     console.log(JSON.stringify({
+      // Provenance ships WITH the numbers. A rate stale by months is otherwise
+      // byte-indistinguishable from one verified this morning, which is precisely
+      // how a retired Opus price survived long enough to overstate by 2.74x.
+      catalog: { as_of: CATALOG_AS_OF, age_days: catalogAgeDays() },
       line,                 // the per-chat line only (unchanged meaning)
       full: out,            // per-chat line + lifetime sentence — what actually prints
       lifetime: tot || null,
@@ -346,4 +452,5 @@ async function run(opts = {}) {
   if (out) console.log(out);
 }
 
-module.exports = { run, computeSavings, realizedFromRecords, fromGateway, buildTagline, money };
+module.exports = { run, computeSavings, realizedFromRecords, fromGateway, buildTagline, money,
+                   gatewayIsCurrent };

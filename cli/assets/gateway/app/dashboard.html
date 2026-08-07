@@ -82,57 +82,208 @@
   .dim-card .spent-sub{font-size:0.8rem;color:var(--red);font-weight:600;margin-top:8px;}
   .tag-potential{display:inline-block;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;
     color:var(--blue);background:rgba(96,165,250,0.15);border-radius:99px;padding:2px 7px;margin-left:6px;vertical-align:middle;}
+
+  /* ---- Light theme (opt-in via data-theme="light" on <html>) ---- */
+  :root[data-theme="light"]{
+    --bg:#f6f6f8; --card:#ffffff; --line:#e4e4ea; --text:#18181b; --muted:#6b7280;
+    --green:#059669; --red:#dc2626; --blue:#2563eb; --pink:#db2777;
+  }
+
+  /* ---- Top nav (consistent with cheaper.app) ---- */
+  .topnav{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:22px;
+    padding-bottom:12px;border-bottom:1px solid var(--line);}
+  .topnav .brand{font-size:1.35rem;font-weight:800;letter-spacing:-0.02em;margin-right:14px;color:var(--text);}
+  .topnav .brand span{color:var(--green);}
+  .topnav .tabs{display:flex;gap:2px;flex-wrap:wrap;}
+  .topnav .tabs a{appearance:none;text-decoration:none;color:var(--muted);font-size:0.86rem;font-weight:600;
+    padding:7px 13px;border-radius:8px;transition:background .15s,color .15s;}
+  .topnav .tabs a:hover{color:var(--text);}
+  .topnav .tabs a.active{background:var(--card);color:var(--green);border:1px solid var(--line);}
+  .topnav .right{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap;}
+  .navpill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;
+    padding:6px 12px;font-size:0.8rem;font-weight:600;text-decoration:none;color:var(--text);background:transparent;
+    cursor:pointer;font-family:inherit;transition:background .15s,color .15s,border-color .15s;}
+  .navpill:hover{border-color:var(--muted);}
+  .navpill.love{color:var(--pink);}
+  .navpill.gh{color:var(--text);}
+  .topnav .status{display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--muted);margin-left:0;}
+
+  /* ---- Tab panes ---- */
+  .tabpane{display:none;}
+  .tabpane.active{display:block;}
+
+  /* ---- Savings by period ---- */
+  .period-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;}
+  .period-card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
+  .period-card .label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:6px;}
+  .period-card .headline{font-size:1.4rem;font-weight:700;line-height:1.1;color:var(--green);}
+  .period-card .sub{font-size:0.72rem;color:var(--muted);margin-top:5px;}
+
+  /* ---- Logs table ---- */
+  .logs-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;font-size:0.82rem;color:var(--muted);}
+  .logs-controls .spacer{flex:1;}
+  .logs-controls button{appearance:none;border:1px solid var(--line);background:var(--card);color:var(--text);
+    font-family:inherit;font-size:0.82rem;font-weight:600;padding:6px 12px;border-radius:8px;cursor:pointer;}
+  .logs-controls button:disabled{opacity:0.4;cursor:default;}
+  .logs-controls button:not(:disabled):hover{border-color:var(--muted);}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  th.num{text-align:right;}
+  .decpill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:0.7rem;font-weight:700;text-transform:capitalize;}
+  .decpill.downgrade{background:rgba(52,211,153,0.15);color:var(--green);}
+  .decpill.escalate{background:rgba(248,113,113,0.15);color:var(--red);}
+  .decpill.kept{background:rgba(139,139,149,0.15);color:var(--muted);}
+  .money-pos{color:var(--green);font-weight:600;}
+  .money-neg{color:var(--red);font-weight:600;}
+
+  /* ---- Monitor ---- */
+  .session-row{display:grid;grid-template-columns:14px 1fr 90px 100px 120px;gap:10px;align-items:center;
+    padding:9px 0;border-bottom:1px solid var(--line);font-size:0.82rem;}
+  .session-row:last-child{border-bottom:none;}
+  .session-row .slabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+  .session-row .smeta{color:var(--muted);font-size:0.72rem;}
+  .session-row .scalls{color:var(--muted);text-align:right;}
+  .session-row .ssaved{color:var(--green);text-align:right;font-weight:600;}
+  .session-row .sago{color:var(--muted);text-align:right;font-size:0.74rem;}
+  .live-dot{width:9px;height:9px;border-radius:50%;background:var(--muted);}
+  .live-dot.on{background:var(--green);box-shadow:0 0 0 3px rgba(52,211,153,0.15);}
+  .surface-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;}
+  .surface-card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
+  .surface-card .label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:6px;}
+  .surface-card .headline{font-size:1.3rem;font-weight:700;color:var(--green);}
+  .surface-card .sub{font-size:0.72rem;color:var(--muted);margin-top:5px;}
+  @media (max-width:760px){.session-row{grid-template-columns:12px 1fr 70px 80px;}.session-row .sago{display:none;}}
 </style>
 
-<header>
-  <h1>Cheaper <span class="green">monitor</span></h1>
-  <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></div>
-</header>
-
-<div class="counts-row" id="countsRow"></div>
-
-<div class="grid" id="statCards"></div>
-
-<div class="panel">
-  <h2>Savings breakdown</h2>
-  <div class="toggle" id="baselineToggle" role="group" aria-label="Money baseline">
-    <button type="button" data-baseline="requested_default">vs your model</button>
-    <button type="button" data-baseline="highest_tier">vs all-frontier</button>
-    <button type="button" data-baseline="historical">vs your history</button>
+<nav class="topnav">
+  <div class="brand">Cheap<span>er</span></div>
+  <div class="tabs" id="tabNav">
+    <a href="#dashboard" data-tab="dashboard">Dashboard</a>
+    <a href="#reports" data-tab="reports">Reports</a>
+    <a href="#logs" data-tab="logs">Logs</a>
+    <a href="#monitor" data-tab="monitor">Monitor</a>
   </div>
-  <div class="dim-grid" id="dimGrid"></div>
-</div>
-
-<div class="panel">
-  <h2>Savings over time</h2>
-  <div id="sparkWrap"></div>
-</div>
-
-<div class="two-col">
-  <div class="panel">
-    <h2>Savings by tool</h2>
-    <div id="byTool"></div>
+  <div class="right">
+    <span class="status"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></span>
+    <button type="button" class="navpill" id="themeToggle" aria-label="Toggle light or dark theme">&#9728; Light</button>
+    <a class="navpill gh" href="https://github.com/ownasquare/cheaper" target="_blank" rel="noopener">&#9733; GitHub</a>
+    <a class="navpill love" href="https://cheaper.app/love" target="_blank" rel="noopener">&#9825; Love</a>
   </div>
-  <div class="panel">
-    <h2>Recent decisions</h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Time</th><th>Tier</th><th>Model</th><th>Reason</th><th>Source</th></tr></thead>
-        <tbody id="recentBody"></tbody>
-      </table>
+</nav>
+
+<main>
+  <!-- ============================ DASHBOARD ============================ -->
+  <section class="tabpane active" id="tab-dashboard">
+    <div class="counts-row" id="countsRow"></div>
+
+    <div class="grid" id="statCards"></div>
+
+    <div class="panel">
+      <h2>Savings breakdown</h2>
+      <div class="toggle" id="baselineToggle" role="group" aria-label="Money baseline">
+        <button type="button" data-baseline="requested_default">vs your model</button>
+        <button type="button" data-baseline="highest_tier">vs all-frontier</button>
+        <button type="button" data-baseline="historical">vs your history</button>
+      </div>
+      <div class="dim-grid" id="dimGrid"></div>
     </div>
-  </div>
-</div>
 
-<div class="panel">
-  <h2>Savings by source</h2>
-  <div id="bySource"></div>
-</div>
+    <div class="panel">
+      <h2>Savings over time</h2>
+      <div id="sparkWrap"></div>
+    </div>
+  </section>
 
-<div class="panel">
-  <h2>Peek &mdash; what you could have saved sooner</h2>
-  <div id="peekPanel"></div>
-</div>
+  <!-- ============================= REPORTS ============================= -->
+  <section class="tabpane" id="tab-reports">
+    <div class="two-col">
+      <div class="panel">
+        <h2>Savings by tool</h2>
+        <div id="byTool"></div>
+      </div>
+      <div class="panel">
+        <h2>Savings by source</h2>
+        <div id="bySource"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Savings by period</h2>
+      <div class="period-grid" id="byPeriod"></div>
+      <!-- Navigates rather than printing in place: /report is a print-first layout
+           with the audit provenance block, and it embeds its data server-side so the
+           PDF can never capture a half-loaded page. In the desktop app the dashboard
+           is loaded remotely and cannot reach the preload bridge, so this stays a
+           plain link; the one-click PDF lives in the tray menu. -->
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <a class="navpill" href="/report">📄 Printable report &amp; PDF</a>
+        <span class="muted" style="font-size:0.78rem">Opens a print-ready page with the
+          full method and provenance statement.</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Peek &mdash; what you could have saved sooner</h2>
+      <div id="peekPanel"></div>
+    </div>
+  </section>
+
+  <!-- ============================== LOGS =============================== -->
+  <section class="tabpane" id="tab-logs">
+    <div class="panel">
+      <h2>Routing decisions</h2>
+      <div class="logs-controls">
+        <span id="logsRange">&mdash;</span>
+        <span class="spacer"></span>
+        <button type="button" id="logsPrev" disabled>&larr; Newer</button>
+        <button type="button" id="logsNext" disabled>Older &rarr;</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Source</th><th>Original model</th><th>Routed model</th>
+            <th>Decision type</th><th class="num">Original cost</th>
+            <th class="num">Actual cost</th><th class="num">Savings</th>
+          </tr></thead>
+          <tbody id="logsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= MONITOR ============================= -->
+  <section class="tabpane" id="tab-monitor">
+    <div class="panel">
+      <h2>Active sessions</h2>
+      <div id="sessions"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Where it got cheaper</h2>
+      <div class="surface-grid" id="surfaces"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Live decision feed</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Tier</th><th>Model</th><th>Reason</th><th>Source</th></tr></thead>
+          <tbody id="recentBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="provenance" style="text-align:center;color:var(--muted);font-size:0.82rem;
+  margin-top:18px;line-height:1.5"></div>
+
+<footer style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;justify-content:center;
+  border-top:1px solid var(--line);margin-top:8px;padding:22px 0 10px;color:var(--muted);font-size:0.9rem">
+  <span style="font-weight:700;color:var(--text)">Cheaper is <span style="color:var(--green)">better</span>.</span>
+  <a href="https://github.com/ownasquare/cheaper" target="_blank" rel="noopener">&#9733; Star on GitHub</a>
+  <a href="https://github.com/sponsors/ownasquare" target="_blank" rel="noopener">&#9829; Sponsor</a>
+  <a href="https://cheaper.app/love" target="_blank" rel="noopener" style="font-weight:600">&#9829; Love Cheaper &rarr;</a>
+</footer>
 
 <script>
 (function(){
@@ -198,6 +349,32 @@
   var lastData = null;
   var lastPeek = null;
   var baselineChoice = 'requested_default';
+
+  // ---------- Price-data provenance ----------
+  // Every dollar on this page is computed from a transcribed price catalog. Showing
+  // its age is the difference between a number you can judge and one you must trust:
+  // a rate stale by six months renders identically to one verified this morning.
+  var STALE_DAYS = 45;
+  function renderProvenance(d){
+    var el = document.getElementById('provenance');
+    if (!el) return;
+    var c = d.catalog || {};
+    if (!c.priced) {
+      el.innerHTML = '<b style="color:var(--red,#ef4444)">Pricing module unavailable</b> — ' +
+        'figures below fall back to coarse tier weights and are not real dollars.';
+      return;
+    }
+    var age = (c.age_days == null) ? null : c.age_days;
+    var stale = age != null && age > STALE_DAYS;
+    var when = age == null ? '' :
+      (age === 0 ? 'today' : age === 1 ? '1 day ago' : age + ' days ago');
+    el.innerHTML = 'Dollar figures use published list prices from the catalog dated <b>' +
+      (c.as_of || 'unknown') + '</b>' + (when ? ' (' + when + ')' : '') + '. ' +
+      (stale ? '<b style="color:var(--red,#ef4444)">This catalog is over ' + STALE_DAYS +
+               ' days old — re-verify provider pricing before relying on these numbers.</b> '
+             : '') +
+      'List rates only: negotiated discounts, credits and flat-rate plans are not modelled.';
+  }
 
   // ---------- Stat cards ----------
   function renderCards(d){
@@ -445,17 +622,43 @@
     body.innerHTML = html;
   }
 
+  // ---------- Savings by period (Reports tab) ----------
+  var PERIOD_ORDER = [
+    ['today', 'Today'], ['week', 'This week'], ['month', 'This month'],
+    ['quarter', 'This quarter'], ['year', 'This year'], ['all', 'All-time']
+  ];
+  function renderPeriods(d){
+    var el = document.getElementById('byPeriod');
+    if (!el) return;
+    var p = d.periods || {};
+    var html = '';
+    PERIOD_ORDER.forEach(function(o){
+      var v = p[o[0]] || {};
+      var saved = num(v.saved, 0), spent = num(v.spent, 0), calls = num(v.calls, 0);
+      html += '<div class="period-card">' +
+        '<div class="label">' + esc(o[1]) + '</div>' +
+        '<div class="headline">' + money(saved) + '</div>' +
+        '<div class="sub">' + calls.toLocaleString('en-US') + ' routed &middot; ' + money(spent) + ' spent</div>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+  }
+
   // ---------- Main render ----------
   function render(data){
     if (!data || typeof data !== 'object') data = {};
     lastData = data;
+    renderProvenance(data);
     renderCards(data);
     renderCounts(data);
     renderDims(data);
     renderSpark(data);
     renderByTool(data);
     renderBySource(data);
+    renderPeriods(data);
     renderRecent(data);
+    // A metrics push means new rows exist; refresh the Monitor if it's on screen.
+    if (typeof refreshMonitor === 'function') refreshMonitor(false);
   }
 
   function setStatus(connected, reconnecting){
@@ -612,7 +815,240 @@
   fetchPeek();
   setInterval(fetchPeek, 60000);
 
+  // ---------- Logs tab (dedicated /logs table, paginated) ----------
+  var LOGS_LIMIT = 100;
+  var logsOffset = 0;
+  var logsTotal = 0;
+  var logsLoading = false;
+
+  function costCell(v){
+    if (v === null || v === undefined) return '<td class="num muted">&mdash;</td>';
+    return '<td class="num">' + money(v) + '</td>';
+  }
+  function savingsCell(v){
+    if (v === null || v === undefined) return '<td class="num muted">&mdash;</td>';
+    var n = num(v, 0);
+    var cls = n > 0 ? 'money-pos' : (n < 0 ? 'money-neg' : 'muted');
+    return '<td class="num ' + cls + '">' + money(n) + '</td>';
+  }
+  function decClass(t){
+    t = String(t || '').toLowerCase();
+    return (t === 'downgrade' || t === 'escalate' || t === 'kept') ? t : 'kept';
+  }
+  function renderLogs(rows){
+    var body = document.getElementById('logsBody');
+    if (!body) return;
+    if (!rows.length){
+      body.innerHTML = '<tr><td colspan="8" class="muted">' +
+        (logsTotal ? 'No rows on this page.' : 'No routing decisions logged yet.') + '</td></tr>';
+    } else {
+      var html = '';
+      rows.forEach(function(r){
+        var t = num(r.ts, 0) * 1000;
+        var timeStr = t > 0 ? new Date(t).toLocaleString('en-US', {hour12:false}) : '—';
+        var dt = decClass(r.decision_type);
+        html += '<tr>' +
+          '<td class="muted">' + esc(timeStr) + '</td>' +
+          '<td title="' + esc(r.source || '') + '">' + esc(truncate(r.source || '—', 22)) + '</td>' +
+          '<td>' + esc(truncate(r.original_model || '—', 26)) + '</td>' +
+          '<td>' + esc(truncate(r.routed_model || '—', 26)) + '</td>' +
+          '<td><span class="decpill ' + dt + '">' + esc(r.decision_type || 'kept') + '</span></td>' +
+          costCell(r.original_cost) +
+          costCell(r.actual_cost) +
+          savingsCell(r.savings) +
+          '</tr>';
+      });
+      body.innerHTML = html;
+    }
+    // Pager state
+    var prev = document.getElementById('logsPrev');
+    var next = document.getElementById('logsNext');
+    var range = document.getElementById('logsRange');
+    var from = logsTotal === 0 ? 0 : logsOffset + 1;
+    var to = Math.min(logsOffset + LOGS_LIMIT, logsTotal);
+    if (range) range.textContent = logsTotal
+      ? ('Showing ' + from.toLocaleString('en-US') + '–' + to.toLocaleString('en-US') +
+         ' of ' + logsTotal.toLocaleString('en-US'))
+      : 'No decisions logged yet.';
+    if (prev) prev.disabled = logsLoading || logsOffset <= 0;
+    if (next) next.disabled = logsLoading || (logsOffset + LOGS_LIMIT) >= logsTotal;
+  }
+  function loadLogs(){
+    if (logsLoading) return;
+    logsLoading = true;
+    fetch('/logs?limit=' + LOGS_LIMIT + '&offset=' + logsOffset)
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        logsTotal = num(j.total, 0);
+        // Clamp offset if the ledger shrank/params drifted out of range.
+        if (logsOffset > 0 && logsOffset >= logsTotal){
+          logsOffset = Math.max(0, (Math.ceil(logsTotal / LOGS_LIMIT) - 1) * LOGS_LIMIT);
+        }
+        logsLoading = false;
+        renderLogs(Array.isArray(j.rows) ? j.rows : []);
+      })
+      .catch(function(){ logsLoading = false; renderLogs([]); });
+  }
+  (function initLogsControls(){
+    var prev = document.getElementById('logsPrev');
+    var next = document.getElementById('logsNext');
+    if (prev) prev.addEventListener('click', function(){
+      if (logsOffset <= 0) return;
+      logsOffset = Math.max(0, logsOffset - LOGS_LIMIT);
+      loadLogs();
+    });
+    if (next) next.addEventListener('click', function(){
+      if ((logsOffset + LOGS_LIMIT) >= logsTotal) return;
+      logsOffset += LOGS_LIMIT;
+      loadLogs();
+    });
+  })();
+
+  // ---------- Monitor tab (real-time active chats from /logs, ws-triggered) ----------
+  var SURFACES = [
+    {key:'main', label:'Main chat'}, {key:'subagent', label:'Sub-agent'},
+    {key:'workflow', label:'Workflow'}, {key:'background', label:'Background'}
+  ];
+  function classifySurface(src){
+    var s = String(src || '').toLowerCase();
+    if (/subagent|sidechain|sub-agent/.test(s)) return 'subagent';
+    if (/workflow/.test(s)) return 'workflow';
+    if (/background|cron|schedul|batch|daemon/.test(s)) return 'background';
+    return 'main';
+  }
+  function agoLabel(sec){
+    if (!sec || sec < 0) return 'just now';
+    if (sec < 60) return Math.round(sec) + 's ago';
+    if (sec < 3600) return Math.round(sec / 60) + 'm ago';
+    if (sec < 86400) return Math.round(sec / 3600) + 'h ago';
+    return Math.round(sec / 86400) + 'd ago';
+  }
+  var ACTIVE_WINDOW_S = 120;   // a session counts as "active" if seen within 2 min
+  function renderMonitor(rows){
+    var nowS = Date.now() / 1000;
+
+    // --- Group by session ---
+    var sessMap = {};
+    var surf = {}; SURFACES.forEach(function(s){ surf[s.key] = {calls:0, saved:0}; });
+    rows.forEach(function(r){
+      var sid = (r.session === undefined || r.session === null) ? '' : String(r.session);
+      var g = sessMap[sid] || (sessMap[sid] = {id:sid, calls:0, saved:0, spent:0, last:0, sources:{}});
+      g.calls += 1;
+      g.saved += num(r.savings, 0);
+      g.spent += num(r.actual_cost, 0);
+      if (num(r.ts, 0) > g.last) g.last = num(r.ts, 0);
+      var srcName = r.source || 'unknown';
+      g.sources[srcName] = (g.sources[srcName] || 0) + 1;
+
+      var sk = classifySurface(r.source);
+      surf[sk].calls += 1;
+      surf[sk].saved += num(r.savings, 0);
+    });
+
+    // --- Active sessions list ---
+    var sessions = Object.keys(sessMap).map(function(k){ return sessMap[k]; });
+    sessions.sort(function(a,b){ return b.last - a.last; });
+    var sEl = document.getElementById('sessions');
+    if (sEl){
+      if (!sessions.length){
+        sEl.innerHTML = '<div class="empty-note">No sessions yet &mdash; point a tool at the gateway to see live chats.</div>';
+      } else {
+        var html = '';
+        sessions.forEach(function(g){
+          var age = nowS - g.last;
+          var active = age <= ACTIVE_WINDOW_S;
+          var label = g.id ? g.id : '(no session id)';
+          // Most-used source for this session, as a hint of which surface it is.
+          var topSrc = '', topN = -1;
+          for (var k in g.sources){ if (g.sources[k] > topN){ topN = g.sources[k]; topSrc = k; } }
+          html += '<div class="session-row">' +
+            '<span class="live-dot ' + (active ? 'on' : '') + '" title="' + (active ? 'active' : 'idle') + '"></span>' +
+            '<span class="slabel" title="' + esc(label) + '">' + esc(truncate(label, 40)) +
+              '<div class="smeta">' + esc(truncate(topSrc || 'unknown', 40)) + '</div></span>' +
+            '<span class="scalls">' + g.calls.toLocaleString('en-US') + ' calls</span>' +
+            '<span class="ssaved">' + money(g.saved) + '</span>' +
+            '<span class="sago">' + esc(agoLabel(age)) + '</span>' +
+            '</div>';
+        });
+        sEl.innerHTML = html;
+      }
+    }
+
+    // --- "Where it got cheaper" by surface ---
+    var fEl = document.getElementById('surfaces');
+    if (fEl){
+      var fhtml = '';
+      SURFACES.forEach(function(s){
+        var v = surf[s.key];
+        fhtml += '<div class="surface-card">' +
+          '<div class="label">' + esc(s.label) + '</div>' +
+          '<div class="headline">' + money(v.saved) + '</div>' +
+          '<div class="sub">' + v.calls.toLocaleString('en-US') + ' routed</div>' +
+          '</div>';
+      });
+      fEl.innerHTML = fhtml;
+    }
+  }
+  var monitorLastFetch = 0;
+  var monitorFetching = false;
+  function refreshMonitor(force){
+    if (!force && currentTab() !== 'monitor') return;   // don't fetch for a hidden tab
+    var now = Date.now();
+    if (!force && (now - monitorLastFetch) < 1500) return;  // throttle bursty ws pings
+    if (monitorFetching) return;
+    monitorFetching = true;
+    monitorLastFetch = now;
+    fetch('/logs?limit=500')
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        monitorFetching = false;
+        renderMonitor(Array.isArray(j.rows) ? j.rows : []);
+      })
+      .catch(function(){ monitorFetching = false; });
+  }
+
+  // ---------- Tab routing (location.hash driven) ----------
+  var TABS = ['dashboard', 'reports', 'logs', 'monitor'];
+  function currentTab(){
+    var h = (location.hash || '').replace(/^#/, '');
+    return TABS.indexOf(h) >= 0 ? h : 'dashboard';
+  }
+  function showTab(name){
+    TABS.forEach(function(t){
+      var pane = document.getElementById('tab-' + t);
+      if (pane) pane.classList.toggle('active', t === name);
+      var link = document.querySelector('#tabNav a[data-tab="' + t + '"]');
+      if (link) link.classList.toggle('active', t === name);
+    });
+    if (name === 'logs') loadLogs();
+    if (name === 'monitor') refreshMonitor(true);
+  }
+  window.addEventListener('hashchange', function(){ showTab(currentTab()); });
+
+  // ---------- Light/dark theme toggle (data-theme on <html>, persisted) ----------
+  function applyTheme(t){
+    document.documentElement.setAttribute('data-theme', t);
+    var btn = document.getElementById('themeToggle');
+    if (btn) btn.innerHTML = (t === 'light') ? '&#9789; Dark' : '&#9728; Light';
+  }
+  (function initTheme(){
+    var saved = null;
+    try { saved = localStorage.getItem('cheaper-theme'); } catch(e){}
+    applyTheme(saved === 'light' ? 'light' : 'dark');
+    var btn = document.getElementById('themeToggle');
+    if (btn) btn.addEventListener('click', function(){
+      var cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+      var next = cur === 'light' ? 'dark' : 'light';
+      applyTheme(next);
+      try { localStorage.setItem('cheaper-theme', next); } catch(e){}
+    });
+  })();
+
   // Initial empty render so panels aren't blank before first data arrives
   render({});
+
+  // Honour the initial hash (default to #dashboard) and activate that tab.
+  if (!location.hash) location.hash = '#dashboard';
+  showTab(currentTab());
 })();
 </script>

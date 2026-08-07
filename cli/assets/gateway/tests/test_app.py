@@ -81,3 +81,43 @@ def test_openai_chat_completions_routes(client_and_capture):
     assert r.headers["x-router-tier"] == "haiku"
     assert captured["body"]["model"] == "gpt-4o-mini"   # rewritten to OpenAI cheap tier
     assert r.headers["x-router-original-model"] == "gpt-4o"
+
+
+# ---- security hardening ----------------------------------------------------
+
+def test_rejects_untrusted_host(client_and_capture):
+    # DNS-rebinding defence: a request whose Host is not a loopback name is 400'd,
+    # even reaching the always-open health route. Loopback hosts still work.
+    client, _ = client_and_capture
+    assert client.get("/healthz").status_code == 200                      # testserver: allowed
+    assert client.get("/healthz", headers={"host": "evil.example.com"}).status_code == 400
+    assert client.get("/metrics", headers={"host": "attacker.test"}).status_code == 400
+
+
+def test_source_header_is_sanitized_at_ingest(client_and_capture, monkeypatch):
+    # x-cheaper-source is a raw client header; a newline in it is a JSONL line-injection
+    # primitive. The value that reaches storage must carry no control chars or
+    # structural characters.
+    import app as app_module
+    rec = {}
+    monkeypatch.setattr(app_module.METRICS, "record", lambda **kw: rec.update(kw))
+    client, _ = client_and_capture
+    client.post("/v1/messages",
+                headers={"x-api-key": "t", "anthropic-version": "2023-06-01",
+                         "x-cheaper-source": 'evil\n{"v":1,"in":999999999}\t<x>'},
+                json={"model": "claude-opus-4-6", "max_tokens": 8,
+                      "messages": [{"role": "user", "content": "hi"}]})
+    s = rec.get("source", "")
+    assert "\n" not in s and "\t" not in s
+    assert not any(ch in s for ch in '<>{}"')
+
+
+def test_sanitize_helpers_are_bounded_and_control_free():
+    from app import _sanitize_source, _sanitize_model
+    s = _sanitize_source('a\r\n{"v":1}\t<b>' + "x" * 200)
+    assert not any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in s)
+    assert not any(ch in s for ch in '<>{}"')
+    assert len(s) <= 64
+    m = _sanitize_model("claude-opus-5\ninjected" + "y" * 200)
+    assert "\n" not in m and len(m) <= 128
+    assert _sanitize_model(None) == "" and _sanitize_source(None) == ""

@@ -173,10 +173,21 @@ function collectClaudeCode(opts) {
   const dir = expand(process.env.CLAUDE_CONFIG_DIR ? process.env.CLAUDE_CONFIG_DIR + '/projects' : '~/.claude/projects');
   const records = [];
   const files = scopedFiles(dir, opts, ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: opts.sinceDays, maxDepth: 5 });
+  // One API turn is written to the transcript MANY times as it streams, and the repeats
+  // are not identical: usage GROWS with each line as more output is produced. Measured
+  // over 120 real transcripts (12,966 assistant rows, 5,246 distinct message ids):
+  // 774 ids grew, ZERO shrank, and keeping the FIRST occurrence under-counted output
+  // tokens by 18.9% (6,603,234 vs 8,138,036). The original comment here assumed the
+  // repeats carried identical usage; they do not. Because usage is monotonic, MAX is
+  // both correct and immune to lines arriving out of order.
+  //
+  // The map is also hoisted OUT of the per-file loop. 157 message ids appear in more
+  // than one file — Claude Code copies history forward when a session is resumed or
+  // forked — so a per-file set counted those turns twice.
+  const byId = new Map();
   for (const f of files) {
     const subFile = IS_SUB_PATH.test(f.file);
     let lastUser = { text: '', ts: 0 };
-    const seen = new Set(); // message.id / requestId already counted this file
     readJsonl(f.file, (o) => {
       const msg = o.message || o;
       const role = o.type === 'user' || o.type === 'assistant' ? o.type : msg.role;
@@ -189,9 +200,8 @@ function collectClaudeCode(opts) {
       if (role === 'assistant') {
         const model = msg.model;
         if (!model) return;
-        // Dedupe: many lines of one API turn repeat the same id + usage.
+        // Dedupe key for one API turn; see the note on `byId` above.
         const id = msg.id || o.requestId || null;
-        if (id) { if (seen.has(id)) return; seen.add(id); }
         const u = msg.usage || {};
         const hasUsage = u && (u.input_tokens != null || u.output_tokens != null);
         const inTok = hasUsage
@@ -207,7 +217,7 @@ function collectClaudeCode(opts) {
         const cc5m = cc ? (cc.ephemeral_5m_input_tokens || 0) : 0;
         const cc1h = cc ? (cc.ephemeral_1h_input_tokens || 0) : 0;
         const ccTotal = hasUsage ? (u.cache_creation_input_tokens || 0) : 0;
-        records.push({
+        const rec = {
           harness: 'claude-code', ts: parseTs(o.timestamp || o.ts) || lastUser.ts,
           model, inTokens: inTok, outTokens: outTok,
           // Token breakdown for cache-aware pricing. Absent => treated as plain input.
@@ -227,10 +237,20 @@ function collectClaudeCode(opts) {
           serviceTier: (hasUsage && u.service_tier) || null,
           text: lastUser.text, source: sidechain ? 'subagent' : 'user',
           estimated: !hasUsage,
-        });
+        };
+        // An un-keyed line cannot be deduped, so it stands alone. A keyed one keeps
+        // whichever occurrence reports the MOST usage: the repeats are the same turn
+        // observed mid-stream, and usage only ever grows.
+        if (!id) { records.push(rec); return; }
+        const prev = byId.get(id);
+        if (!prev || (rec.outTokens || 0) > (prev.outTokens || 0)
+                  || (rec.inTokens || 0) > (prev.inTokens || 0)) {
+          byId.set(id, rec);
+        }
       }
     });
   }
+  for (const rec of byId.values()) records.push(rec);
   return { records, filesScanned: files.length, note: '' };
 }
 

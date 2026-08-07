@@ -18,7 +18,7 @@
       "top": "gemini-3.1-pro"
     },
     "xai": {
-      "cheap": "grok-4.3",
+      "cheap": "grok-build-0.1",
       "mid": "grok-4.3",
       "top": "grok-4.5"
     },
@@ -37,6 +37,7 @@
     {
       "id": "claude-fable-5",
       "family": "anthropic",
+      "tier": "opus",
       "in": 10,
       "out": 50,
       "cacheRead": 1,
@@ -46,6 +47,7 @@
     {
       "id": "claude-mythos-5",
       "family": "anthropic",
+      "tier": "opus",
       "in": 10,
       "out": 50,
       "cacheRead": 1,
@@ -53,17 +55,22 @@
       "cacheWrite1h": 20
     },
     {
-      "id": "claude-mythos-preview",
+      "id": "claude-mythos",
       "family": "anthropic",
+      "tier": "opus",
       "in": 10,
       "out": 50,
       "cacheRead": 1,
       "cacheWrite": 12.5,
-      "cacheWrite1h": 20
+      "cacheWrite1h": 20,
+      "aliases": [
+        "claude-mythos-preview"
+      ]
     },
     {
       "id": "claude-opus-5",
       "family": "anthropic",
+      "tier": "opus",
       "in": 5,
       "out": 25,
       "cacheRead": 0.5,
@@ -79,6 +86,7 @@
     {
       "id": "claude-opus-4-8",
       "family": "anthropic",
+      "tier": "opus",
       "in": 5,
       "out": 25,
       "cacheRead": 0.5,
@@ -94,6 +102,7 @@
     {
       "id": "claude-opus-4-7",
       "family": "anthropic",
+      "tier": "opus",
       "in": 5,
       "out": 25,
       "cacheRead": 0.5,
@@ -103,6 +112,7 @@
     {
       "id": "claude-opus-4-6",
       "family": "anthropic",
+      "tier": "opus",
       "in": 5,
       "out": 25,
       "cacheRead": 0.5,
@@ -112,6 +122,7 @@
     {
       "id": "claude-opus-4-5",
       "family": "anthropic",
+      "tier": "opus",
       "in": 5,
       "out": 25,
       "cacheRead": 0.5,
@@ -121,6 +132,7 @@
     {
       "id": "claude-opus-4-1",
       "family": "anthropic",
+      "tier": "opus",
       "in": 15,
       "out": 75,
       "cacheRead": 1.5,
@@ -130,6 +142,7 @@
     {
       "id": "claude-opus-4",
       "family": "anthropic",
+      "tier": "opus",
       "in": 15,
       "out": 75,
       "cacheRead": 1.5,
@@ -139,6 +152,7 @@
     {
       "id": "claude-3-opus",
       "family": "anthropic",
+      "tier": "opus",
       "in": 15,
       "out": 75,
       "cacheRead": 1.5,
@@ -148,6 +162,7 @@
     {
       "id": "claude-sonnet-5",
       "family": "anthropic",
+      "tier": "sonnet",
       "in": 3,
       "out": 15,
       "cacheRead": 0.30000000000000004,
@@ -166,6 +181,7 @@
     {
       "id": "claude-sonnet-4-6",
       "family": "anthropic",
+      "tier": "sonnet",
       "in": 3,
       "out": 15,
       "cacheRead": 0.30000000000000004,
@@ -175,6 +191,7 @@
     {
       "id": "claude-sonnet-4-5",
       "family": "anthropic",
+      "tier": "sonnet",
       "in": 3,
       "out": 15,
       "cacheRead": 0.30000000000000004,
@@ -184,6 +201,7 @@
     {
       "id": "claude-sonnet-4",
       "family": "anthropic",
+      "tier": "sonnet",
       "in": 3,
       "out": 15,
       "cacheRead": 0.30000000000000004,
@@ -193,6 +211,7 @@
     {
       "id": "claude-3-7-sonnet",
       "family": "anthropic",
+      "tier": "sonnet",
       "in": 3,
       "out": 15,
       "cacheRead": 0.30000000000000004,
@@ -202,6 +221,7 @@
     {
       "id": "claude-3-5-sonnet",
       "family": "anthropic",
+      "tier": "sonnet",
       "in": 3,
       "out": 15,
       "cacheRead": 0.30000000000000004,
@@ -211,6 +231,7 @@
     {
       "id": "claude-haiku-4-5",
       "family": "anthropic",
+      "tier": "haiku",
       "in": 1,
       "out": 5,
       "cacheRead": 0.1,
@@ -220,6 +241,7 @@
     {
       "id": "claude-3-5-haiku",
       "family": "anthropic",
+      "tier": "haiku",
       "in": 0.8,
       "out": 4,
       "cacheRead": 0.08000000000000002,
@@ -229,6 +251,7 @@
     {
       "id": "claude-3-haiku",
       "family": "anthropic",
+      "tier": "haiku",
       "in": 0.25,
       "out": 1.25,
       "cacheRead": 0.025,
@@ -238,6 +261,7 @@
     {
       "id": "gpt-5.6-sol",
       "family": "openai",
+      "tier": "opus",
       "in": 5,
       "out": 30,
       "cacheRead": 0.5,
@@ -246,6 +270,7 @@
     {
       "id": "gpt-5.6-terra",
       "family": "openai",
+      "tier": "sonnet",
       "in": 2,
       "out": 12,
       "cacheRead": 0.2,
@@ -254,6 +279,7 @@
     {
       "id": "gpt-5.6-luna",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.2,
       "out": 1.2,
       "cacheRead": 0.02,
@@ -262,12 +288,14 @@
     {
       "id": "gpt-5.5-pro",
       "family": "openai",
+      "tier": "opus",
       "in": 30,
       "out": 180
     },
     {
       "id": "gpt-5.5",
       "family": "openai",
+      "tier": "opus",
       "in": 5,
       "out": 30,
       "cacheRead": 0.5
@@ -275,6 +303,7 @@
     {
       "id": "gpt-5.4-mini",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.75,
       "out": 4.5,
       "cacheRead": 0.075
@@ -282,6 +311,7 @@
     {
       "id": "gpt-5.4-nano",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.2,
       "out": 1.25,
       "cacheRead": 0.02
@@ -289,12 +319,14 @@
     {
       "id": "gpt-5.4-pro",
       "family": "openai",
+      "tier": "opus",
       "in": 30,
       "out": 180
     },
     {
       "id": "gpt-5.4",
       "family": "openai",
+      "tier": "sonnet",
       "in": 2.5,
       "out": 15,
       "cacheRead": 0.25
@@ -302,12 +334,14 @@
     {
       "id": "gpt-5.2-pro",
       "family": "openai",
+      "tier": "opus",
       "in": 21,
       "out": 168
     },
     {
       "id": "gpt-5.2",
       "family": "openai",
+      "tier": "sonnet",
       "in": 1.75,
       "out": 14,
       "cacheRead": 0.175
@@ -315,6 +349,7 @@
     {
       "id": "gpt-5.1",
       "family": "openai",
+      "tier": "sonnet",
       "in": 1.25,
       "out": 10,
       "cacheRead": 0.125
@@ -322,6 +357,7 @@
     {
       "id": "gpt-5-mini",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.25,
       "out": 2,
       "cacheRead": 0.025
@@ -329,6 +365,7 @@
     {
       "id": "gpt-5-nano",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.05,
       "out": 0.4,
       "cacheRead": 0.005
@@ -336,12 +373,14 @@
     {
       "id": "gpt-5-pro",
       "family": "openai",
+      "tier": "opus",
       "in": 15,
       "out": 120
     },
     {
       "id": "gpt-5",
       "family": "openai",
+      "tier": "sonnet",
       "in": 1.25,
       "out": 10,
       "cacheRead": 0.125
@@ -349,6 +388,7 @@
     {
       "id": "gpt-4.1-mini",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.4,
       "out": 1.6,
       "cacheRead": 0.1
@@ -356,6 +396,7 @@
     {
       "id": "gpt-4.1-nano",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.1,
       "out": 0.4,
       "cacheRead": 0.025
@@ -363,6 +404,7 @@
     {
       "id": "gpt-4.1",
       "family": "openai",
+      "tier": "sonnet",
       "in": 2,
       "out": 8,
       "cacheRead": 0.5
@@ -370,6 +412,7 @@
     {
       "id": "gpt-4o-mini",
       "family": "openai",
+      "tier": "haiku",
       "in": 0.15,
       "out": 0.6,
       "cacheRead": 0.075
@@ -377,6 +420,7 @@
     {
       "id": "gpt-4o",
       "family": "openai",
+      "tier": "sonnet",
       "in": 2.5,
       "out": 10,
       "cacheRead": 1.25
@@ -384,12 +428,14 @@
     {
       "id": "o1-pro",
       "family": "openai",
+      "tier": "opus",
       "in": 150,
       "out": 600
     },
     {
       "id": "o1",
       "family": "openai",
+      "tier": "opus",
       "in": 15,
       "out": 60,
       "cacheRead": 7.5
@@ -397,12 +443,14 @@
     {
       "id": "o3-pro",
       "family": "openai",
+      "tier": "opus",
       "in": 20,
       "out": 80
     },
     {
       "id": "o3-mini",
       "family": "openai",
+      "tier": "haiku",
       "in": 1.1,
       "out": 4.4,
       "cacheRead": 0.55
@@ -410,6 +458,7 @@
     {
       "id": "o3",
       "family": "openai",
+      "tier": "sonnet",
       "in": 2,
       "out": 8,
       "cacheRead": 0.5
@@ -417,6 +466,7 @@
     {
       "id": "o4-mini",
       "family": "openai",
+      "tier": "haiku",
       "in": 1.1,
       "out": 4.4,
       "cacheRead": 0.275
@@ -424,6 +474,7 @@
     {
       "id": "gemini-3.6-flash",
       "family": "google",
+      "tier": "sonnet",
       "in": 1.5,
       "out": 7.5,
       "cacheRead": 0.15
@@ -431,6 +482,7 @@
     {
       "id": "gemini-3.5-flash-lite",
       "family": "google",
+      "tier": "haiku",
       "in": 0.3,
       "out": 2.5,
       "cacheRead": 0.03
@@ -438,6 +490,7 @@
     {
       "id": "gemini-3.5-flash",
       "family": "google",
+      "tier": "sonnet",
       "in": 1.5,
       "out": 9,
       "cacheRead": 0.15
@@ -445,6 +498,7 @@
     {
       "id": "gemini-3.1-flash-lite",
       "family": "google",
+      "tier": "haiku",
       "in": 0.25,
       "out": 1.5,
       "cacheRead": 0.025
@@ -452,6 +506,7 @@
     {
       "id": "gemini-3.1-pro",
       "family": "google",
+      "tier": "opus",
       "in": 2,
       "out": 12,
       "cacheRead": 0.2,
@@ -465,6 +520,7 @@
     {
       "id": "gemini-2.5-pro",
       "family": "google",
+      "tier": "opus",
       "in": 1.25,
       "out": 10,
       "cacheRead": 0.125,
@@ -478,6 +534,7 @@
     {
       "id": "gemini-2.5-flash-lite",
       "family": "google",
+      "tier": "haiku",
       "in": 0.1,
       "out": 0.4,
       "cacheRead": 0.01
@@ -485,6 +542,7 @@
     {
       "id": "gemini-2.5-flash",
       "family": "google",
+      "tier": "sonnet",
       "in": 0.3,
       "out": 2.5,
       "cacheRead": 0.03
@@ -492,6 +550,7 @@
     {
       "id": "grok-4.5",
       "family": "xai",
+      "tier": "opus",
       "in": 2,
       "out": 6,
       "cacheRead": 0.3,
@@ -505,6 +564,7 @@
     {
       "id": "grok-4.3",
       "family": "xai",
+      "tier": "sonnet",
       "in": 1.25,
       "out": 2.5,
       "cacheRead": 0.2,
@@ -518,6 +578,7 @@
     {
       "id": "grok-4.20",
       "family": "xai",
+      "tier": "sonnet",
       "in": 1.25,
       "out": 2.5,
       "cacheRead": 0.2,
@@ -531,6 +592,7 @@
     {
       "id": "grok-build-0.1",
       "family": "xai",
+      "tier": "haiku",
       "in": 1,
       "out": 2,
       "cacheRead": 0.2,
@@ -544,6 +606,7 @@
     {
       "id": "deepseek-v4-flash",
       "family": "deepseek",
+      "tier": "haiku",
       "in": 0.14,
       "out": 0.28,
       "cacheRead": 0.0028
@@ -551,6 +614,7 @@
     {
       "id": "deepseek-v4-pro",
       "family": "deepseek",
+      "tier": "opus",
       "in": 0.435,
       "out": 0.87,
       "cacheRead": 0.003625
@@ -558,84 +622,98 @@
     {
       "id": "mistral-medium-3.5",
       "family": "mistral",
+      "tier": "sonnet",
       "in": 1.5,
       "out": 7.5
     },
     {
       "id": "mistral-small-4",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.15,
       "out": 0.6
     },
     {
       "id": "mistral-large-3",
       "family": "mistral",
+      "tier": "opus",
       "in": 0.5,
       "out": 1.5
     },
     {
       "id": "magistral-medium",
       "family": "mistral",
+      "tier": "sonnet",
       "in": 2,
       "out": 5
     },
     {
       "id": "magistral-small",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.5,
       "out": 1.5
     },
     {
       "id": "devstral-small-2",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.1,
       "out": 0.3
     },
     {
       "id": "devstral-2",
       "family": "mistral",
+      "tier": "sonnet",
       "in": 0.4,
       "out": 2
     },
     {
       "id": "codestral",
       "family": "mistral",
+      "tier": "sonnet",
       "in": 0.3,
       "out": 0.9
     },
     {
       "id": "ministral-3-14b",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.2,
       "out": 0.2
     },
     {
       "id": "ministral-3-8b",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.15,
       "out": 0.15
     },
     {
       "id": "ministral-3-3b",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.1,
       "out": 0.1
     },
     {
       "id": "mistral-nemo",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.15,
       "out": 0.15
     },
     {
       "id": "mixtral-8x22b",
       "family": "mistral",
+      "tier": "sonnet",
       "in": 2,
       "out": 6
     },
     {
       "id": "mixtral-8x7b",
       "family": "mistral",
+      "tier": "haiku",
       "in": 0.7,
       "out": 0.7
     }

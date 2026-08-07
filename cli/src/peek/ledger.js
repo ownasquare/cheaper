@@ -37,9 +37,12 @@ function load() {
 function save(data) {
   const p = ledgerPath();
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
+    // ~/.cheaper holds a complete record of the user's AI usage. Create the dir 0700
+    // and the file 0600 so another local user/process can't read it (it was 0755/0644).
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
     const tmp = `${p}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    fs.writeFileSync(tmp, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(tmp, 0o600); } catch { /* umask may have widened it */ }
     fs.renameSync(tmp, p);
   } catch { /* ignore */ }
 }
@@ -63,8 +66,17 @@ function prune(chats) {
 // routing (usd/tokens 0) is a no-op that never erases a prior positive entry for the
 // same id. We re-load immediately before writing so a concurrent write for a
 // DIFFERENT chat is merged rather than clobbered (shrinks the lost-update window).
+// Record THIS chat's realized figure. Signed: a chat where routed work cost MORE than
+// the baseline contributes a negative amount, exactly as it does in the per-chat line.
+//
+// The old guard was `usd > 0 && tokens > 0`, which made the ledger a one-way ratchet:
+// a chat that cost extra silently contributed nothing, and — worse — a corrected
+// re-run of a chat could never OVERWRITE a stale larger figure, because the write was
+// skipped whenever the new value was not positive. That turned the lifetime total into
+// a high-water mark of every optimistic estimate ever computed. Any chat with a real
+// key and real tokens is now written, whatever its sign.
 function record(key, usd, tokens, exact) {
-  if (key && usd > 0 && tokens > 0) {
+  if (key && tokens > 0 && Number.isFinite(usd)) {
     const data = load();
     data.chats[key] = { usd, tokens, exact: !!exact, at: isoNow() };
     prune(data.chats);
@@ -82,7 +94,12 @@ function totals(data) {
   const c = d.chats || {};
   for (const k of Object.keys(c)) {
     const e = c[k];
-    if (e && e.usd > 0) { usd += e.usd; tokens += e.tokens || 0; chats++; if (!e.exact) exact = false; }
+    // Signed sum. Skipping negative chats here would reinstate the ratchet one level
+    // up: every chat where routed work cost extra would vanish from the lifetime
+    // figure, leaving a total that only ever counts the wins.
+    if (e && Number.isFinite(e.usd)) {
+      usd += e.usd; tokens += e.tokens || 0; chats++; if (!e.exact) exact = false;
+    }
   }
   if (chats === 0) exact = false;
   return { usd, tokens, chats, exact };

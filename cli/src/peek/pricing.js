@@ -31,14 +31,32 @@ const BUCKET = { haiku: 'cheap', sonnet: 'mid', opus: 'top' };
 // The model each family+tier is priced as when the caller knows only a tier (the
 // gateway's aggregate path). These are real, current models from the catalog — not
 // invented averages — so a bucket price is always some model's actual price.
-const REPRESENTATIVE = {
+// The model Cheaper WOULD route each tier to, per family. Used only for the
+// PROSPECTIVE counterfactual in estimateCall ("what would this have cost had Cheaper
+// been running?") — never to price a call that actually happened, which is always
+// priced at its own model id.
+//
+// Formerly `REPRESENTATIVE`, which read like "a typical model of this tier" and
+// invited exactly the wrong use. This is a ROUTING TARGET: it answers a routing
+// question, so it must name a model the router would really pick.
+//
+// Two families had `cheap === mid`, which made a cheap-tier downgrade structurally
+// incapable of showing any saving — a silent DEFLATION in the surface that feeds the
+// marketing pages. Both now name genuinely distinct, genuinely cheaper models.
+const ROUTE_TARGET = {
   anthropic: { cheap: 'claude-haiku-4-5', mid: 'claude-sonnet-5', top: 'claude-opus-5' },
   openai:    { cheap: 'gpt-5-mini',       mid: 'gpt-5.4',         top: 'gpt-5.6-sol' },
   google:    { cheap: 'gemini-2.5-flash-lite', mid: 'gemini-3.5-flash', top: 'gemini-3.1-pro' },
-  xai:       { cheap: 'grok-4.3',         mid: 'grok-4.3',        top: 'grok-4.5' },
+  // was cheap:'grok-4.3' === mid — grok-build-0.1 ($3/M blended) is the real cheap SKU.
+  xai:       { cheap: 'grok-build-0.1',   mid: 'grok-4.3',        top: 'grok-4.5' },
+  // DeepSeek publishes only two SKUs, so cheap and mid legitimately coincide. Named
+  // explicitly here so it reads as a deliberate fact about the vendor's lineup rather
+  // than the copy-paste slip it resembles.
   deepseek:  { cheap: 'deepseek-v4-flash', mid: 'deepseek-v4-flash', top: 'deepseek-v4-pro' },
   mistral:   { cheap: 'ministral-3-8b',   mid: 'mistral-small-4', top: 'mistral-medium-3.5' },
 };
+// Back-compat alias; sync-prices.js and the gateway JSON still read this name.
+const REPRESENTATIVE = ROUTE_TARGET;
 
 // Vendor identification. This answers "whose model is this?" and is used for grouping
 // and for the same-family ceiling rule — it does NOT imply we can price the model.
@@ -178,7 +196,7 @@ function estimateCall(actualModel, inTok, outTok, contentTierName) {
 }
 
 module.exports = {
-  BUCKET, REPRESENTATIVE, CATALOG_AS_OF,
+  BUCKET, ROUTE_TARGET, REPRESENTATIVE, CATALOG_AS_OF,
   detectFamily, isPriceable, representativeFor, rate,
   costOf, costOfDetailed, costOfModel, normalizeTokens, estimateCall,
 };

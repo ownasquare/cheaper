@@ -30,16 +30,18 @@ function render(m) {
 }
 
 async function run() {
-  const tick = async () => {
-    try { render(await fetchMetrics()); }
-    catch {
-      console.clear();
-      console.log(c.red('\n  Cannot reach the gateway on port ' + PORT + '.'));
-      console.log(c.dim('  Start it with:  ') + 'cheaper gateway start\n');
-    }
-  };
-  await tick();
-  setInterval(tick, 3000);
+  // First probe. If the gateway isn't up, don't spin a failing 3s loop — print one
+  // clear, actionable hint (the `cheaper dashboard` one-shot starts it AND opens the
+  // browser) and exit.
+  let up = true;
+  try { render(await fetchMetrics()); } catch { up = false; }
+  if (!up) {
+    console.log(c.red('\n  The gateway isn’t running on port ' + PORT + '.'));
+    console.log(c.dim('  Start it + open the live dashboard:  ') + c.bold('cheaper dashboard'));
+    console.log(c.dim('  Gateway only (terminal monitor):     ') + 'cheaper gateway start' + c.dim(', then ') + 'cheaper monitor\n');
+    return;
+  }
+  setInterval(async () => { try { render(await fetchMetrics()); } catch { /* transient — keep the last frame */ } }, 3000);
 }
 
 module.exports = { run, fetchMetrics };
