@@ -131,6 +131,28 @@ function filterFilesBySession(files, opts) {
   return files.filter((f) => fileMatchesSession(f.file, id));
 }
 
+// The stable session id for a harness under the current scope — the key the lifetime
+// ledger uses so the SAME chat maps to the SAME entry across every tagline run
+// (Stop hook + manual append). Mirrors how each collector resolves its files, so the
+// key matches the records actually summed. Returns null when nothing can be resolved
+// (an explicit id/transcript, or --current's newest top-level transcript in-project).
+function sessionIdFor(def, opts) {
+  const o = opts || {};
+  if (o.session) return String(o.session);
+  if (o.transcript) {
+    const first = Array.isArray(o.transcript) ? o.transcript[0] : o.transcript;
+    return sessionStem(first);
+  }
+  if (!o.current || !def) return null;
+  try {
+    const dir = historyDirFor(def) || def.dir;
+    if (!dir) return null;
+    const files = findFiles(expand(dir), ['.jsonl'], { maxFiles: CAP.maxFiles, sinceDays: o.sinceDays, maxDepth: 5 });
+    const id = resolveSessionId(files, o);
+    return id && id !== false ? id : null;
+  } catch { return null; }
+}
+
 // The files a harness adapter should read under the current scope: the whole session
 // (main transcript + its sub-agent transcripts), or all history when unscoped.
 function scopedFiles(dir, opts, exts, findOpts) {
@@ -176,14 +198,33 @@ function collectClaudeCode(opts) {
           ? (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0)
           : estTokens(lastUser.text);
         const outTok = hasUsage ? (u.output_tokens || 0) : 0;
+        // Cache writes bill by TTL: a 5-minute entry costs 1.25x input, a 1-hour entry
+        // 2x. Claude Code writes 1h entries, so collapsing the two (as a single
+        // cache_creation_input_tokens total would) understates a real session's bill by
+        // ~37% of its write volume. Split them when the transcript reports the split;
+        // fall back to the aggregate (priced as the cheaper 5m) when it doesn't.
+        const cc = (hasUsage && u.cache_creation) || null;
+        const cc5m = cc ? (cc.ephemeral_5m_input_tokens || 0) : 0;
+        const cc1h = cc ? (cc.ephemeral_1h_input_tokens || 0) : 0;
+        const ccTotal = hasUsage ? (u.cache_creation_input_tokens || 0) : 0;
         records.push({
           harness: 'claude-code', ts: parseTs(o.timestamp || o.ts) || lastUser.ts,
           model, inTokens: inTok, outTokens: outTok,
-          // Token breakdown for cache-aware pricing (cache reads bill at ~0.1x input,
-          // cache writes at ~1.25x). Absent => treated as plain input.
+          // Token breakdown for cache-aware pricing. Absent => treated as plain input.
+          // outTokens already includes reasoning/thinking tokens — every provider bills
+          // reasoning at the output rate and folds it into output_tokens, so there is
+          // nothing extra to add for a higher reasoning/effort setting.
           inFresh: hasUsage ? (u.input_tokens || 0) : inTok,
-          cacheCreate: hasUsage ? (u.cache_creation_input_tokens || 0) : 0,
+          cacheCreate5m: cc5m,
+          cacheCreate1h: cc1h,
+          // Only carry the unsplit total when no split was reported, so a call is
+          // never counted under both the split and the aggregate.
+          cacheCreate: cc ? Math.max(0, ccTotal - cc5m - cc1h) : ccTotal,
           cacheRead: hasUsage ? (u.cache_read_input_tokens || 0) : 0,
+          // Billing modifiers: 'fast' is a premium SKU (2x on Opus), 'batch' is half
+          // price. Both are recorded per-call by Claude Code.
+          speed: (hasUsage && u.speed) || null,
+          serviceTier: (hasUsage && u.service_tier) || null,
           text: lastUser.text, source: sidechain ? 'subagent' : 'user',
           estimated: !hasUsage,
         });
@@ -219,9 +260,16 @@ function collectCodex(opts) {
         if (/user/i.test(role)) { if (text) lastUser = text; return; }
         if (/assistant/i.test(role)) {
           if (!model) return;
+          // Codex's own token_count events are cumulative and version-fragile, so we
+          // estimate from text rather than risk an N-fold inflation. Output MUST be
+          // estimated too, not left at zero: output bills at 4-8x the input rate on
+          // every provider, so a zero here would understate a Codex session's cost by
+          // most of its actual value. Marked `estimated` so the tagline can qualify it.
+          const answer = text || '';
           records.push({
             harness: 'codex', ts: parseTs(o.timestamp), model,
-            inTokens: estTokens(lastUser || text), outTokens: 0,
+            inTokens: estTokens(lastUser || text), outTokens: estTokens(answer),
+            inFresh: estTokens(lastUser || text), outTok: estTokens(answer),
             text: lastUser || text, source: 'user', estimated: true,
           });
         }
@@ -248,10 +296,23 @@ function pushFromMessages(records, harness, messages, sessionModel, fileTs) {
     if (/assistant|model|response|agent/i.test(role) || hasUsage) {
       if (!model) continue;
       const inTok = hasUsage ? (u.input_tokens || u.prompt_tokens || 0) : estTokens(lastUser || text);
-      const outTok = hasUsage ? (u.output_tokens || u.completion_tokens || 0) : 0;
+      // Output must be estimated when unreported, never zeroed — it bills at several
+      // times the input rate, so a zero silently erases most of the call's cost.
+      const outTok = hasUsage ? (u.output_tokens || u.completion_tokens || 0) : estTokens(text || '');
+      // OpenAI-shaped usage reports cache hits under prompt_tokens_details.cached_tokens
+      // and reasoning under completion_tokens_details.reasoning_tokens. Both are already
+      // INCLUDED in the prompt/completion totals: cached tokens must be subtracted out
+      // of fresh input so they bill at the (much cheaper) cache-read rate, while
+      // reasoning tokens need no adjustment — they already bill as output.
+      const cacheRead = hasUsage
+        ? ((u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) ||
+           u.cache_read_input_tokens || 0)
+        : 0;
       records.push({
         harness, ts: parseTs(m.timestamp || m.ts) || fileTs, model,
-        inTokens: inTok, outTokens: outTok, text: lastUser || text,
+        inTokens: inTok, outTokens: outTok,
+        inFresh: Math.max(0, inTok - cacheRead), cacheRead, outTok,
+        text: lastUser || text,
         source: SUBAGENT_HINT.test(role) ? 'subagent' : 'user', estimated: !hasUsage,
       });
     }
@@ -311,4 +372,4 @@ function collectHarness(def, opts) {
   return { records: [], filesScanned: 0, note: 'no adapter' };
 }
 
-module.exports = { HARNESSES, collectHarness, isInstalled, pullUserText, parseTs, estTokens, sessionStem };
+module.exports = { HARNESSES, collectHarness, isInstalled, pullUserText, parseTs, estTokens, sessionStem, sessionIdFor };

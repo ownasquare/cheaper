@@ -1,18 +1,20 @@
 {
   "name": "cheaper",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Cheaper — install and run adaptive Claude model routing (skill, hook, plugin, gateway) with one command.",
   "bin": {
     "cheaper": "bin/cheaper.js"
   },
   "scripts": {
-    "test": "node bin/cheaper.js --help"
+    "test": "node scripts/sync-prices.js --check && node --test test/ && node bin/cheaper.js --help",
+    "sync:prices": "node scripts/sync-prices.js"
   },
   "files": [
     "bin",
     "src",
     "assets/plugin",
     "assets/gateway/app/*.py",
+    "assets/gateway/app/*.json",
     "assets/gateway/app/*.html",
     "assets/gateway/requirements.txt",
     "assets/gateway/.env.example"
