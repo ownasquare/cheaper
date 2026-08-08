@@ -110,6 +110,19 @@ async function run(argv = []) {
     process.exitCode = 1;
     return;
   }
+  // A state.json that EXISTS and cannot be read is refused for the same reason, one step
+  // earlier: `ingested_files` is what makes a re-run a no-op and `tombstones` is what
+  // keeps forgotten sessions out of every total, and neither can be honoured from a
+  // document this build cannot parse. Importing anyway would append events past a
+  // tombstone we cannot see and then overwrite the file that holds it.
+  if (state.unreadable) {
+    console.log('  ' + c.red(`This savings store's state.json could not be read (${state.unreadable}).`));
+    console.log('  ' + c.dim('It holds the coverage intervals and the `cheaper forget` tombstones, so an'));
+    console.log('  ' + c.dim('import would write past deletions it cannot see. Move that file aside first;'));
+    console.log('  ' + c.dim('the events themselves are untouched.'));
+    process.exitCode = 1;
+    return;
+  }
   const already = new Set((state.ingested_files || []).map((f) => `${f.sfile}:${f.size}:${f.mtime}`));
 
   const defs = HARNESSES.filter((d) => (!o.harness || d.key === o.harness) && d.status !== 'sqlite');
@@ -180,7 +193,16 @@ async function run(argv = []) {
         return;
       }
       h.events += evs.length; summary.totals.events += evs.length;
+      // An UNDATED event may not poison the coverage extent. The guard used to be
+      // `=== null`, so the first event with an undefined `ts` set both bounds to
+      // `undefined`; after that `earliest === null` is permanently false and
+      // `e.ts < undefined` is permanently false, so every later dated event was ignored
+      // and store.addCoverage('backfilled', undefined, NaN) wrote an interval with null
+      // on BOTH sides. reporting.coverage_label renders an absent bound as the EMPTY
+      // STRING, so the report masthead then stated the extent as "(backfilled  → )".
+      // Only a finite timestamp may move a bound.
       for (const e of evs) {
+        if (!Number.isFinite(e.ts)) continue;
         if (summary.totals.earliest === null || e.ts < summary.totals.earliest) summary.totals.earliest = e.ts;
         if (summary.totals.latest === null || e.ts > summary.totals.latest) summary.totals.latest = e.ts;
       }
@@ -199,10 +221,20 @@ async function run(argv = []) {
   // Rule 2 + 5: record the coverage the import actually established, and the per-file
   // ledger that makes a re-run a no-op.
   if (!o.dryRun && summary.totals.written > 0) {
-    store.addCoverage('backfilled', summary.totals.earliest, summary.totals.latest + 1);
-    const st = store.loadState();
-    st.ingested_files = (st.ingested_files || []).concat(newFileRecords);
-    store.saveState(st);
+    // …and if NO event carried a usable timestamp, no interval is declared at all. A
+    // half- or un-bounded coverage interval is not a smaller claim than none, it is an
+    // unreadable one.
+    if (Number.isFinite(summary.totals.earliest) && Number.isFinite(summary.totals.latest)) {
+      store.addCoverage('backfilled', summary.totals.earliest, summary.totals.latest + 1);
+    }
+    // `loadState() → mutate → saveState()` over the WHOLE document, unserialised, is the
+    // interleaving that erases a tombstone: a `cheaper forget` landing between this read
+    // and this write was silently dropped when the import put its own copy of the
+    // document back. Same file, same hazard as addCoverage/addTombstone, so the same
+    // lock — see store.js::mutateState.
+    summary.ledgerWritten = store.mutateState((st) => {
+      st.ingested_files = (st.ingested_files || []).concat(newFileRecords);
+    });
   }
 
   if (o.json) { console.log(JSON.stringify(summary, null, 2)); return; }
@@ -223,6 +255,16 @@ async function run(argv = []) {
   console.log('  ' + c.bold('Coverage this import adds:  ') + d(summary.totals.earliest) + ' → ' + d(summary.totals.latest));
   console.log('  ' + c.dim('Backfilled rows are permanently marked ESTIMATED — the gateway cannot'));
   console.log('  ' + c.dim('retro-join them, so no measured figure will ever be claimed for them.'));
+  // The events landed; the per-file ledger did not. Saying so is the difference between a
+  // known, harmless re-read and a user who is told "already imported" about files that
+  // were never recorded as imported. No money moves either way — every event carries an
+  // idempotent key and the fold dedupes a re-import — but the claim has to match the disk.
+  if (summary.ledgerWritten === false) {
+    console.log('');
+    console.log('  ' + c.red('The per-file import ledger could not be written to state.json.'));
+    console.log('  ' + c.dim('The events themselves ARE written. A re-run will re-read these files and'));
+    console.log('  ' + c.dim('report them as new; dedupe means nothing is counted twice.'));
+  }
   if (o.dryRun) {
     console.log('');
     console.log('  ' + c.dim('Run it for real:  ') + c.bold(`cheaper import --since ${o.since}`));

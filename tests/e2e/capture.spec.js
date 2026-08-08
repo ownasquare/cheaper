@@ -1,5 +1,5 @@
 'use strict';
-// Capture-only spec: writes full-page PNGs to `.playwright-tmp/shots/` for HUMAN review.
+// Capture-only spec: writes full-page PNGs to `.playwright-shots/` for HUMAN review.
 //
 // Deliberately separate from visual.spec.js, which ASSERTS. This one only records, so a
 // reviewer (or an agent) can open the images and look for the things no assertion
@@ -12,8 +12,10 @@ const fs = require('fs');
 const path = require('path');
 const { test } = require('./fixtures');
 
-// Deliberately OUTSIDE `.playwright-tmp`: the seeder wipes that directory, so captures
-// written into it would vanish the next time the config is evaluated.
+// Deliberately outside the data sandbox (an OS-temp-dir path the seeder wipes on every
+// config evaluation — see tests/e2e/seed.js): captures written there would vanish before
+// a human got to look at them. This directory is a human-facing artifact, so it stays
+// under the repo (gitignored), same as the HTML report.
 const OUT = path.resolve(__dirname, '..', '..', '.playwright-shots');
 const TABS = ['dashboard', 'reports', 'logs', 'monitor'];
 

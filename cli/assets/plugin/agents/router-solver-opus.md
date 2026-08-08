@@ -1,18 +1,20 @@
 ---
 name: router-solver-opus
 description: |-
-  Top-tier solver for the adaptive model router. Use when router-triage (or
-  router-solver-sonnet) returns "ESCALATE tier=opus", or when a task is clearly
+  Top-tier solver for the adaptive model router. Use whenever a task is
   correctness-critical or subtle — concurrency/races, security, proofs, hard
   debugging, high-stakes judgment, novel design, or dense synthesis where a wrong
-  answer is costly.
+  answer is costly. Send those here DIRECTLY; they are auto-escalate categories, so
+  a classification round-trip only adds cost and gives a weaker tier a chance to
+  answer them. Also the destination when router-triage or router-solver-sonnet
+  returns "ESCALATE tier=opus".
 
   <example>
-  Context: Triage escalated a correctness-critical concurrency task.
+  Context: An obvious auto-escalate category, classified in-loop.
   user: "Diagnose this once-a-day deadlock and give a provably correct fix."
-  assistant: "Triage returned tier=opus — handing off to router-solver-opus with the notes."
+  assistant: "Concurrency plus a correctness proof — straight to router-solver-opus, no triage hop."
   <commentary>
-  Concurrency plus a correctness proof is exactly what the top tier is reserved for.
+  Buying capability, not saving tokens. From a cheaper session this is the trade the router exists to make; from an Opus session it buys context isolation rather than cost.
   </commentary>
   </example>
 

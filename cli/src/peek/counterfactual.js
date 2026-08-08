@@ -15,6 +15,7 @@
 const { isPriceable, costOfModel } = require('./pricing');
 const { resolveModel } = require('./models');
 const { pdayOf } = require('./periods');
+const { cacheStateIndeterminate } = require('./derive');
 
 // The basket used to RANK models against each other when picking the baseline.
 //
@@ -36,6 +37,35 @@ function tokenBreakdown(r) {
     cacheRead: r.cacheRead || 0,
     outTok: r.outTokens || 0,
   };
+}
+
+// The TRANSCRIPT-side reading of the rule `derive.js` applies to stored rows: is this
+// call's counterfactual PROMPT-CACHE STATE recoverable from the record at all?
+//
+// ONE implementation, two field vocabularies. A transcript record carries
+// `cacheRead` / `cacheCreate5m` / `cacheCreate1h` / `cacheCreate` and a raw `model`; a
+// stored row carries `cr` / `c5` / `c1` / `cu` and canonical `served` / `base`. The
+// predicate itself lives in derive.js — see the long note there for why a cold-start
+// call on a SWITCHED model has no derivable baseline, and why a call that did not switch
+// is provably unaffected.
+//
+// ADOPTED. `cli/src/peek/tagline.js::realizedFromRecords` used to price its counterfactual
+// with the SERVED arm's split for every record — one `bk = tokenBreakdown(r)` passed to
+// BOTH `costOfModel` calls — and so overstated the end-of-chat line, and the lifetime
+// ledger it writes, exactly the way the stored path did before this rule existed. It now
+// calls this export per eligible row and SKIPS the row when it returns true. Skips, not
+// zeros: a zeroed row claims the saving was nothing, a skipped row claims it is
+// unknowable. The row is still counted, and `tagline.js::populationNote` renders that
+// count so the exclusion reaches the reader instead of arriving as a shrunken total.
+//
+// Keep the three readers in step. If this predicate changes, `derive.js` (the rule),
+// `gateway/app/metrics.py::_cache_state_indeterminate` (the parity twin) and the tagline's
+// adoption above all move together, or the printed line and the append-only log will
+// publish different money for the same chat.
+function recordCacheStateIndeterminate(r, servedId, baselineId) {
+  const t = tokenBreakdown(r);
+  return cacheStateIndeterminate(servedId, baselineId, t.cacheRead,
+                                 t.cacheCreate5m + t.cacheCreate1h + t.cacheCreate);
 }
 
 // Billing modifiers that change a call's rate without changing its token counts.
@@ -105,4 +135,4 @@ function sessionFrame(records) {
 }
 
 module.exports = { CEILING_BASKET, tokenBreakdown, billingCtx, sessionDate, priciest,
-                   sessionFrame };
+                   sessionFrame, recordCacheStateIndeterminate };

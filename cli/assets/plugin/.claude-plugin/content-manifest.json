@@ -1,0 +1,10 @@
+{
+  "_why": "The plugin exists three times (repo source, ~/.cheaper/marketplace/..., and Claude Code's plugin cache) and the cache directory is named after the version in plugin.json. Editing a file without bumping that version leaves the copy that actually runs stale at the same path with no signal. This manifest pins the tree to its declared version; cli/test/inject_tagline.test.js fails until both are updated together. See the versioning section of README.md.",
+  "_digest": "sha256 over every shipped file, sorted by relative path, hashing '<relpath>\\0<sha256-of-bytes>\\n' per file. Excluded: this manifest, and Claude Code's .in_use/<pid> runtime lockfiles — so an INSTALLED copy hashes identically to the source and can be verified in place.",
+  "version": "0.3.0",
+  "sha256": "95a3695c98efaeb70f3d9f3a0f1fda3c058c11615bfff2827c73849a246f4c7b",
+  "files": 11,
+  "published": {
+    "0.2.0": "fdc770d56733343ed0439d1aecde0db27a51bbf44c4a2a321b432d247d593dd6"
+  }
+}

@@ -1,17 +1,18 @@
 ---
 name: router-solver-sonnet
 description: |-
-  Mid-tier solver for the adaptive model router. Use when router-triage returns
-  "ESCALATE tier=sonnet", or when you already know a subtask needs ordinary
-  reasoning or well-scoped implementation but not top-tier care — normal coding,
-  standard analysis, structured writing, a defined-method data task.
+  Mid-tier solver for the adaptive model router. Use when you have classified a
+  request or subtask as needing ordinary reasoning or well-scoped implementation but
+  not top-tier care — normal coding, standard analysis, structured writing, a
+  defined-method data task. Also the destination when router-triage returns
+  "ESCALATE tier=sonnet".
 
   <example>
-  Context: Triage escalated a moderate implementation task to the mid tier.
+  Context: The orchestrator classified a moderate implementation task in-loop.
   user: "Add cursor-based pagination to this endpoint and update the tests."
-  assistant: "Triage returned tier=sonnet, so I'll hand this to router-solver-sonnet with its notes."
+  assistant: "Well-scoped engineering with a clear target, and it needs to read the endpoint and its tests — router-solver-sonnet."
   <commentary>
-  Well-scoped engineering with a clear target is the mid tier's sweet spot.
+  Mid-tier work whose file reading stays on the worker's side of the boundary: the shape delegation is for.
   </commentary>
   </example>
 

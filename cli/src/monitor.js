@@ -40,6 +40,13 @@ function render(m) {
   if (m.counts && m.counts.truncated) {
     console.log('  ' + c.amber(`  aggregates cover the newest ${m.counts.examined} rows of ${m.total}`));
   }
+  // Priced rows with no all-frontier rate on their OWN day: the vs-all-frontier
+  // baseline covers fewer rows than dollars.spent. Counted so the shortfall is stated
+  // rather than left to make that baseline look complete when it is not.
+  if (m.counts && m.counts.billed_top_missing) {
+    console.log('  ' + c.dim(`  ${m.counts.billed_top_missing} priced call(s) have no all-frontier `
+      + 'rate for their day — excluded from the vs-all-frontier baseline'));
+  }
   console.log(c.dim('\n  recent:'));
   for (const r of (m.recent || []).slice(0, 10)) {
     const ts = new Date(r.ts * 1000).toLocaleTimeString();
@@ -98,4 +105,4 @@ async function run(argv = []) {
   }, 3000);
 }
 
-module.exports = { run, fetchMetrics, parseArgs };
+module.exports = { run, fetchMetrics, parseArgs, render };

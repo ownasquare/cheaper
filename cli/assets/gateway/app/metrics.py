@@ -14,11 +14,22 @@ import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
+import periods
+
 # Real-dollar pricing (shared with the `peek` CLI). Guarded so the gateway still
 # runs if pricing.py is absent — it then falls back to the tier-weight estimate.
 try:
+    # NOTE: `estimate_call` and `cost_of` are deliberately NOT imported. Both resolve
+    # rates at pricing.today_utc() with no way to ask for the row's own day, so any use
+    # of them here restates history the moment a promotional window opens or shuts.
+    # summary() used both; see the top-tier baseline and the unpriceable branch below.
+    # `is_priceable` takes an `at=` (mirroring isPriceable(modelId, {at}) in pricing.js)
+    # and EVERY call from this module passes the row's own day. Asking "is this model
+    # priceable?" at today while pricing it at the row's date is the same frame
+    # substitution `at` exists to close -- it just fails as a wrong NAME rather than a
+    # wrong dollar. See the baseline/top ranking in summary().
     from pricing import (  # type: ignore
-        estimate_call, cost_of, detect_family, cost_of_model, is_priceable,
+        detect_family, cost_of_model, is_priceable, representative_for,
         CATALOG_AS_OF,
     )
     _PRICING = True
@@ -26,13 +37,60 @@ except Exception:  # pragma: no cover - transitional / import-order safety
     _PRICING = False
 
 
-def _day(ts):
-    """UTC date a row was recorded, so it prices at the rates in force THEN rather
-    than at today's -- a historical figure must not move when a promo window shuts."""
+def _pday(ts, tzo):
+    """The row's own LOCAL calendar day, ``YYYY-MM-DD`` -- its price date.
+
+    A historical figure must not move when a promo window shuts, so a row prices at the
+    rates in force on ITS day. Which day that is used to be answered here with the UTC
+    date while ``store.derive_row`` answered it with ``pday`` (``ts + tzo``); for a call
+    logged on a UTC-7 evening the two frames named different dates, and with the
+    ``claude-sonnet-5`` promotional window ending 2026-08-31 that was a 50% dollar
+    difference on both input and output between ``/logs`` and ``/api/v1/logs``.
+
+    There is now ONE frame. ``tzo`` is the offset frozen on the row at write time; a
+    legacy row stored before that column existed has ``tzo IS NULL`` -- a real state,
+    not a zero -- and is reconstructed by ``periods.local_offset_minutes``, the same
+    helper ``reporting.py`` falls back to, so both layers land on the same date for the
+    same row by construction rather than by coincidence.
+    """
     try:
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d")
-    except Exception:
+        ms = float(ts) * 1000.0
+    except (TypeError, ValueError):
         return None
+    return periods.pday_of(ms, _effective_tzo(ts, tzo))
+
+
+def _effective_tzo(ts, tzo):
+    """The row's UTC offset in minutes east: frozen if stored, reconstructed if NULL,
+    or ``None`` when it is neither -- ``int | None``.
+
+    Never defaults to 0. A missing offset is not "UTC" -- it is "unknown", and
+    silently reading it as UTC is precisely the bug this column exists to close. The
+    same reason ``periods.local_offset_minutes`` answers None rather than 0 for an
+    instant whose machine offset it cannot determine: passing that None straight through
+    makes the row UNDATABLE (``pday_of`` returns None, the row is counted as an
+    exclusion), which is a truthful state, where a 0 would have been a fabricated frame.
+    """
+    if tzo is not None:
+        try:
+            return int(tzo)
+        except (TypeError, ValueError):
+            pass
+    try:
+        ms = float(ts) * 1000.0
+    except (TypeError, ValueError):
+        return None
+    return periods.local_offset_minutes(ms)
+
+
+# The widest epoch-SECOND window `periods.pday_of` can render as a calendar day, i.e.
+# years 1..9999. `decisions.ts` is in SECONDS; the event store and periods.js use
+# MILLISECONDS, and that unit confusion is built into the codebase -- a millisecond
+# value written here (ts=1700000000000.0) lands in year 55840, which the read path
+# cannot represent at all. The write path must refuse exactly what the read path cannot
+# render, or one poisoned row takes out the whole audit log instead of itself.
+TS_MIN_S = -62135596800.0        # 0001-01-01T00:00:00Z
+TS_MAX_S = 253402300799.0        # 9999-12-31T23:59:59Z
 
 
 def _age_days(as_of: str):
@@ -47,6 +105,59 @@ def _age_days(as_of: str):
 def _clean_tool(src: str) -> str:
     s = (src or "").strip()
     return s[:48] if s else "unknown"
+
+
+# --- the counterfactual arm's PROMPT-CACHE STATE ------------------------------
+#
+# A prompt cache is keyed on (model, exact prefix), so CHANGING MODEL INVALIDATES IT.
+# The served model starts cold and pays a cache CREATE for a prefix the un-switched
+# baseline model would still have held and merely READ.
+#
+# Both legs of every subtraction in this module are priced off ONE token split -- the
+# SERVED arm's `kw` -- so the baseline is charged CREATE for those tokens too. Every
+# entry in model_prices.json prices a write at or above a read (75/75 verified;
+# claude-opus-5 reads at 0.1x input and writes at 1.25x, a 12.5x spread, so a
+# 200k-token prefix is $0.10 to read against $1.25 to rewrite). That substitution can
+# only ever move the baseline UP and the claimed saving with it: the error is
+# ONE-DIRECTIONAL and never understates.
+#
+# It is not always present, and re-pricing every switched row would be the mirror-image
+# fabrication. Two shapes have to be told apart:
+#
+#   * SERVED ARM WARM (cache_read > 0). Its prefix was already resident, so the CREATE
+#     on this call is NEW content appended since the previous turn -- content the
+#     baseline model would have had to create too. Both arms pay CREATE, the served
+#     split IS the counterfactual split, and the existing pricing is exactly right.
+#   * SERVED ARM COLD (cache_read == 0) WITH A CREATE. The prefix was written from
+#     scratch, and two histories produce that identical row: either the prefix was new
+#     to the session (the baseline model was cold too and would also have paid CREATE,
+#     so the figure is right), or the prefix was resident on the baseline model and the
+#     SWITCH forced the rewrite (the figure is overstated by the full write-read
+#     spread). Nothing recorded separates them -- no prefix hash, no cache lineage, no
+#     per-block provenance; providers report ONE scalar create count per call.
+#
+# So the honest counterfactual for a cold-start switched row is an INTERVAL whose sign
+# the evidence cannot settle. Invariant 4: the row makes NO claim, is labelled
+# `cache_state_indeterminate`, and is COUNTED in counts.unpriced so the exclusion is
+# visible rather than arriving as a quietly smaller total.
+#
+# A row that did NOT switch model is untouched to the cent -- `served == original`
+# means both arms are the same model on the same split, so the two costs are equal and
+# the saving is zero under every cache assumption, and the switch test below means such
+# a row can never reach this branch.
+#
+# MUST stay behaviourally identical to
+# `cli/src/peek/derive.js::cacheStateIndeterminate`. `gateway/app/store.py::derive_row`
+# is a third reader of the same question over the event store and does NOT yet carry the
+# rule; until it does, the two readers disagree on exactly these rows.
+def _cache_state_indeterminate(served, original, cache_read, cache_create) -> bool:
+    if not served or not original:
+        return False                       # no counterfactual to bias
+    if str(served) == str(original):
+        return False                       # NO SWITCH -> nothing was invalidated
+    if not (cache_create or 0) > 0:
+        return False                       # nothing was written
+    return not (cache_read or 0) > 0       # ...and the served arm was COLD
 
 # Relative $/Mtok input weights for the legacy tier-weight estimate below. Only the
 # RATIOS matter here, but they still have to be the ratios of models that exist:
@@ -178,6 +289,19 @@ def _period_starts(now: datetime | None = None) -> dict:
     }
 
 
+# How many times record() will re-attempt a write that SQLite refused with
+# OperationalError, and how long it waits between attempts (doubling each time, so
+# 50ms + 100ms on top of the 5s busy timeout each attempt already carries).
+#
+# BOUNDED on purpose. record() runs inside the proxied request's completion callback;
+# an unbounded retry would hold a routed response open behind a lock contest. Three
+# attempts covers the case this exists for -- a reader (the CLI opening metrics.db)
+# holding a SHARED lock right as the gateway commits -- and anything that survives all
+# three is a real outage, which must be COUNTED and raised, not waited out.
+WRITE_ATTEMPTS = 3
+WRITE_BACKOFF_S = 0.05
+
+
 class Metrics:
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path or os.environ.get(
@@ -185,7 +309,68 @@ class Metrics:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._lock = threading.Lock()
         self.price = _price()
+        # Writes refused because their timestamp is outside the representable calendar.
+        # COUNTED, not swallowed: record() also raises, so the refusal is visible at the
+        # call site AND tallied here for anyone inspecting the store afterwards. A
+        # silent drop would shrink the denominator without saying so.
+        self.rejected_ts = 0
+        # --- durability counters (PROCESS-LOCAL; see summary()["durability"]) -------
+        # Writes that SQLite refused on every attempt. The call site cannot report them:
+        # app.py fires record() from `_fire()`, which is wrapped in
+        # `except Exception: pass  # metrics must never break the proxied response`. So
+        # the exception record() raises is swallowed one frame up and a routed call
+        # would vanish from the ledger with NO trace anywhere. This counter is that
+        # trace. It is not a substitute for the raise -- both happen.
+        self.write_failures = 0
+        # Retries that were needed but eventually succeeded. Zero drops, but a rising
+        # number is the early warning that lock contention is approaching the point
+        # where write_failures starts moving.
+        self.write_retries = 0
+        # INSERT OR IGNORE rows the partial unique index on request_id suppressed. The
+        # suppression is the POINT (it is what makes a replayed write idempotent instead
+        # of a double count), but `cursor.rowcount` was never inspected, so "stored" and
+        # "silently discarded as a duplicate" were the same observable: both returned
+        # None. A duplicate storm and a working gateway looked identical.
+        self.duplicate_suppressed = 0
+        # The journal mode the store actually ENDED UP IN, read back from SQLite rather
+        # than assumed from the PRAGMA we sent. WAL can be refused -- a network
+        # filesystem, read-only media, or another process holding the database at the
+        # moment of the one-time upgrade -- and a gateway silently running on the default
+        # rollback journal is exactly the state this whole change exists to make
+        # visible. Surfaced in summary(); never asserted.
+        self.journal_mode = ""
+        # Non-empty when the WAL upgrade was REFUSED, carrying SQLite's own reason. The
+        # refusal is not fatal (the store still works, just without WAL's reader/writer
+        # concurrency) and it is not hidden either -- both facts ride out in
+        # summary()["durability"].
+        self.journal_mode_error = ""
         with closing(self._conn()) as c:
+            # WAL, set ONCE here because the mode is persisted in the database header.
+            #
+            # The default rollback journal needs an EXCLUSIVE lock to commit, and cannot
+            # take one while any reader holds SHARED. self._lock serialises the
+            # gateway's OWN writers inside this single uvicorn process, so the exposure
+            # is EXTERNAL: `cheaper peek`, the desktop app, or a `sqlite3` shell reading
+            # ~/.cheaper/metrics.db can block the gateway's writer past the 5s busy
+            # timeout, and the OperationalError that follows is swallowed by app.py.
+            # Under WAL, readers and one writer proceed CONCURRENTLY -- the reader takes
+            # no lock the writer needs -- so the contest that dropped the row does not
+            # arise in the first place. The retry in record() is the backstop, not the fix.
+            #
+            # The one-time upgrade needs a moment of exclusive access, so a reader that
+            # happens to hold the database as the gateway starts can refuse it with
+            # SQLITE_BUSY. That must NOT take the gateway down -- app.py builds METRICS
+            # at import, so raising here turns a transient lock into a dead proxy. It is
+            # recorded and re-read instead: `journal_mode` then reports whatever mode is
+            # genuinely in force, which is the honest answer and the visible one. This is
+            # the file's existing "count it, surface it, never assume it" pattern, not a
+            # swallow -- nothing is discarded, and no figure is fabricated.
+            try:
+                _mode = c.execute("PRAGMA journal_mode=WAL").fetchone()
+            except sqlite3.OperationalError as e:
+                self.journal_mode_error = str(e)[:200]
+                _mode = c.execute("PRAGMA journal_mode").fetchone()
+            self.journal_mode = (_mode[0] if _mode else "") or ""
             c.execute("""
                 CREATE TABLE IF NOT EXISTS decisions (
                     ts REAL, tier TEXT, model TEXT, original_model TEXT,
@@ -230,6 +415,22 @@ class Metrics:
                     c.execute(f"ALTER TABLE decisions ADD COLUMN {_col} TEXT")
                 except sqlite3.OperationalError:
                     pass  # column already exists
+            # Additive migration: the machine's UTC offset in MINUTES EAST at the
+            # instant of THIS call (US Central summer = -300), frozen at write.
+            #
+            # Without it the offset had to be reconstructed at read time from the
+            # machine's CURRENT zone, so a laptop that flew to another timezone
+            # restated the price date -- and therefore the dollars -- of every row it
+            # had already recorded. The event store (JSONL) has always frozen `tzo`;
+            # this closes the same hole in SQLite.
+            #
+            # NO DEFAULT. Legacy rows keep tzo NULL, which is the honest value: nobody
+            # recorded an offset for them. `DEFAULT 0` would assert those calls
+            # happened at UTC, which is a claim, not a migration.
+            try:
+                c.execute("ALTER TABLE decisions ADD COLUMN tzo INTEGER")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             # The 16 heaviest rows on the live DB are invisible to every scoped query:
             # `WHERE session = ''` does not match `session IS NULL`, so the sum of the
             # per-session totals did not equal the ungrouped total -- by 1,890,068 of
@@ -251,7 +452,27 @@ class Metrics:
             c.commit()
 
     def _conn(self):
-        return sqlite3.connect(self.db_path, timeout=5)
+        """One connection, with the durability pragmas this store depends on.
+
+        `timeout=5` sets SQLite's busy_timeout to 5000ms: a blocked writer waits that
+        long for the lock before raising OperationalError.
+
+        `synchronous` is a PER-CONNECTION setting -- unlike journal_mode it is NOT
+        persisted in the database header, and a fresh connection comes back at the
+        FULL default. Measured on this machine: after setting NORMAL and reconnecting,
+        `PRAGMA synchronous` reads 2 (FULL) again. So it has to be re-sent here, on
+        every connection, or record() quietly gets none of it.
+
+        NORMAL rather than FULL, and only because the journal is WAL: in WAL mode
+        NORMAL still cannot lose a COMMITTED transaction to a process crash -- only to
+        an OS/power failure, which would cost at most the last few routed calls off a
+        monitoring ledger. FULL fsyncs on every commit, on a path that runs once per
+        proxied request. Do not lower this to OFF: OFF can corrupt the DATABASE, not
+        just lose the tail, and a corrupt ledger is unrecoverable rather than short.
+        """
+        c = sqlite3.connect(self.db_path, timeout=5)
+        c.execute("PRAGMA synchronous=NORMAL")
+        return c
 
     def record(self, *, tier, model, original_model, requested_tier, reason,
                source="", in_tokens=0, out_tokens=0, status=0, requested_effort="",
@@ -270,6 +491,35 @@ class Metrics:
         The old `len(extract_text(body)) // 4` fallback substituted the whole
         conversation's size for the FRESH input count; measured against real traffic
         that is wrong by ~34,000x, and it printed with no hedge.
+
+        `tzo` is FROZEN here, resolved at THIS ROW'S OWN INSTANT rather than at "now":
+        a backfilled or replayed write carrying an explicit `ts=` must get the offset
+        that was in force then, so a DST transition -- or a machine that later changes
+        timezone -- cannot restate the price date of a call already recorded.
+
+        `ts` is RANGE-CHECKED against what the read path can render. It is in SECONDS;
+        passing milliseconds (the unit periods.js and the event store use) writes a row
+        in year 55840, which `periods.pday_of` cannot represent -- and every read of the
+        ledger then has to carry that row. Refusing at the door raises `ValueError` at
+        the call site AND increments `self.rejected_ts`, so the refusal is visible and
+        counted rather than a silent drop.
+
+        Returns True when a row was STORED and False when the partial unique index
+        suppressed it as a duplicate -- and increments `self.duplicate_suppressed` on the
+        latter. `cursor.rowcount` after `INSERT OR IGNORE` is 1 for a stored row and 0
+        for a suppressed one (verified against this runtime: python 3.11 / sqlite
+        3.38.4), and it was never inspected, so a caller could not tell an idempotent
+        no-op from a write. Nor could anyone reading the store afterwards: a replay storm
+        and a healthy gateway produced the same silence.
+
+        WRITE FAILURES ARE RETRIED, THEN COUNTED, THEN RAISED. SQLite raises
+        OperationalError when it cannot get the lock inside the 5s busy timeout; WAL
+        (see `__init__`) removes the usual cause, `WRITE_ATTEMPTS` covers the residual
+        race, and a write that still fails increments `self.write_failures` before the
+        error propagates. The raise on its own is not enough: app.py fires record()
+        inside `except Exception: pass  # metrics must never break the proxied
+        response`, so without the counter the drop leaves no trace at any layer. Same
+        pattern as `rejected_ts` -- counted AND raised, never one or the other.
         """
         us = (usage_source or "").strip().lower()
         if us not in ("body", "estimate"):
@@ -277,26 +527,80 @@ class Metrics:
             # Deliberately NOT defaulted to 'body': claiming a figure is measured when
             # nobody said so is exactly the concealment shape this column exists to end.
             us = ""
-        with self._lock, closing(self._conn()) as c:
-            c.execute(
-                "INSERT OR IGNORE INTO decisions "
-                "(ts, tier, model, original_model, requested_tier, reason, source, "
-                " in_tokens, out_tokens, status, requested_effort, session, "
-                " cache_read, cache_create_5m, cache_create_1h, "
-                " request_id, message_id, usage_source) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (float(ts) if ts is not None else time.time(),
-                 tier, model, original_model, requested_tier,
-                 reason[:300], source,
-                 None if in_tokens is None else int(in_tokens),
-                 None if out_tokens is None else int(out_tokens),
-                 status,
-                 normalize_effort(requested_effort), session or "",
-                 int(cache_read or 0), int(cache_create_5m or 0), int(cache_create_1h or 0),
-                 (str(request_id)[:120] or None) if request_id else None,
-                 (str(message_id)[:120] or None) if message_id else None,
-                 us))
-            c.commit()
+        if ts is None:
+            row_ts = time.time()
+        else:
+            try:
+                row_ts = float(ts)
+            except (TypeError, ValueError):
+                self.rejected_ts += 1
+                raise ValueError("record(ts=%r): not a number" % (ts,))
+            if not (TS_MIN_S <= row_ts <= TS_MAX_S):
+                self.rejected_ts += 1
+                raise ValueError(
+                    "record(ts=%r): outside the representable calendar "
+                    "(%r..%r, epoch SECONDS). A millisecond value lands in year 55840, "
+                    "which no reader can render." % (ts, TS_MIN_S, TS_MAX_S))
+        row_tzo = periods.local_offset_minutes(row_ts * 1000.0)
+        params = (row_ts,
+                  tier, model, original_model, requested_tier,
+                  reason[:300], source,
+                  None if in_tokens is None else int(in_tokens),
+                  None if out_tokens is None else int(out_tokens),
+                  status,
+                  normalize_effort(requested_effort), session or "",
+                  int(cache_read or 0), int(cache_create_5m or 0), int(cache_create_1h or 0),
+                  (str(request_id)[:120] or None) if request_id else None,
+                  (str(message_id)[:120] or None) if message_id else None,
+                  us, row_tzo)
+        for attempt in range(WRITE_ATTEMPTS):
+            try:
+                with self._lock, closing(self._conn()) as c:
+                    cur = c.execute(
+                        "INSERT OR IGNORE INTO decisions "
+                        "(ts, tier, model, original_model, requested_tier, reason, source, "
+                        " in_tokens, out_tokens, status, requested_effort, session, "
+                        " cache_read, cache_create_5m, cache_create_1h, "
+                        " request_id, message_id, usage_source, tzo) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        params)
+                    # Read the rowcount BEFORE commit(): commit() runs another statement
+                    # on the connection and sqlite3 recomputes rowcount from the last
+                    # one, so reading it afterwards answers about the COMMIT, not the
+                    # INSERT.
+                    stored = cur.rowcount != 0
+                    c.commit()
+                    # Counted only once the commit has LANDED, and inside the lock where
+                    # the increment is already serialised against every other writer.
+                    # Counting before the commit would tally a duplicate whose commit
+                    # then failed, and the retry below would tally it a second time.
+                    if not stored:
+                        self.duplicate_suppressed += 1
+                    if attempt:
+                        self.write_retries += attempt
+                return stored
+            except sqlite3.OperationalError:
+                # NOT swallowed, NOT logged-and-continued: retried a bounded number of
+                # times, then counted and re-raised. The only thing this except decides
+                # is whether to try again.
+                #
+                # Retrying cannot double-count. A lock error means the COMMIT did not
+                # happen, and the connection closes with the transaction unwritten; on
+                # top of that, `INSERT OR IGNORE` against ux_decisions_rid makes a second
+                # attempt a no-op for any row the provider gave an id for. That row would
+                # come back as `stored=False` and be tallied in `duplicate_suppressed`,
+                # which is the truthful reading either way -- one call, one row.
+                if attempt + 1 >= WRITE_ATTEMPTS:
+                    with self._lock:
+                        self.write_failures += 1
+                    raise
+                time.sleep(WRITE_BACKOFF_S * (2 ** attempt))
+        # Unreachable while WRITE_ATTEMPTS >= 1: every iteration returns, raises, or
+        # sleeps and retries. Here so that a future WRITE_ATTEMPTS <= 0 fails LOUDLY
+        # instead of falling out of the loop and returning None, which would drop every
+        # write in silence -- the exact failure shape this method was hardened against.
+        raise RuntimeError(
+            "record(): WRITE_ATTEMPTS=%r left no attempt to make" % (WRITE_ATTEMPTS,))
 
     def logs(self, *, limit: int = 100, offset: int = 0,
              session: str | None = None) -> dict:
@@ -308,6 +612,12 @@ class Metrics:
         and `savings` is their signed difference (negative on an escalation). Cache
         splits and the row's historical price date are honoured, exactly like summary()
         -- so a row's numbers here reconcile with the aggregate figures elsewhere.
+
+        The price date is the row's ``pday`` (``ts + tzo``, its own LOCAL calendar day),
+        the same frame ``store.derive_row`` prices at. Each row therefore carries its
+        ``tzo`` and ``pday`` outward, so ``reporting.gateway_row_to_event`` consumes the
+        values this row was priced with rather than deriving its own -- the two layers
+        agree by construction, not by two implementations happening to match.
 
         `session` mirrors summary()'s semantics: None = whole ledger; a present value
         (including "") scopes to that chat and never silently widens.
@@ -331,27 +641,56 @@ class Metrics:
                 "in_tokens, out_tokens, "
                 "COALESCE(cache_read,0), COALESCE(cache_create_5m,0), COALESCE(cache_create_1h,0), "
                 "COALESCE(session,''), COALESCE(status,0), COALESCE(usage_source,''), "
-                "COALESCE(request_id,'') "
+                "COALESCE(request_id,''), tzo "
                 "FROM decisions" + where + " ORDER BY ts DESC LIMIT ? OFFSET ?",
                 sp + (limit, offset)).fetchall()
         rows = []
         for (ts, tier, served, om, rtier, reason, src, it, ot, cr, c5, c1,
-             sess, status, usrc, rid) in raw:
+             sess, status, usrc, rid, tzo) in raw:
             it = it or 0
             ot = ot or 0
+            # NOT COALESCE(tzo,0): a NULL offset means "not recorded", and reading it
+            # as UTC would be a fabricated claim. Reconstructed instead, by the one
+            # helper reporting.py also falls back to.
+            eff_tzo = _effective_tzo(ts, tzo)
+            pday = _pday(ts, tzo)
             original_cost = actual_cost = savings = None
             ok, why = row_is_priceable(status, usrc)
+            # A row whose own day cannot be derived is UNPRICEABLE. Passing at=None to
+            # cost_of_model silently falls back to pricing.today_utc(), which is the one
+            # substitution this whole frame exists to prevent: it would price a row we
+            # cannot even date at today's promo state.
+            if ok and pday is None:
+                ok, why = False, "undatable"
             if _PRICING and ok:
                 kw = dict(cache_read=cr or 0, cache_create_5m=c5 or 0,
-                          cache_create_1h=c1 or 0, at=_day(ts))
+                          cache_create_1h=c1 or 0, at=pday)
                 original_cost = cost_of_model(om, it, ot, **kw)
                 actual_cost = cost_of_model(served, it, ot, **kw)
                 if original_cost is not None and actual_cost is not None:
                     savings = original_cost - actual_cost
                 elif not why:
                     why = "model_not_in_catalog"
+                # A cold-start call on a SWITCHED model has no recoverable counterfactual
+                # cache state (see _cache_state_indeterminate). `actual_cost` is a FACT
+                # and stays -- it is priced on the model that really ran, at that model's
+                # own split. `original_cost` is the counterfactual, and it is the thing
+                # that is not knowable, so it and the saving derived from it are both
+                # withheld and LABELLED. The Logs table renders an em dash with the label
+                # as its tooltip; it never renders $0.00 for this.
+                if _cache_state_indeterminate(served, om, cr or 0,
+                                              (c5 or 0) + (c1 or 0)):
+                    original_cost = None
+                    savings = None
+                    why = why or "cache_state_indeterminate"
             rows.append({
                 "ts": ts,
+                # The time frame this row was PRICED in, carried outward so no consumer
+                # has to re-derive it and land somewhere else. `tzo` is the effective
+                # offset (frozen when the row has one, reconstructed when it does not);
+                # `pday` is `ts + tzo` and is the exact `at=` the costs above used.
+                "tzo": eff_tzo,
+                "pday": pday,
                 "source": src or "",
                 "original_model": om or "",
                 "routed_model": served or "",
@@ -412,7 +751,7 @@ class Metrics:
                 "SELECT ts, tier, original_model, in_tokens, out_tokens, source, "
                 "requested_tier, requested_effort, model, "
                 "COALESCE(cache_read,0), COALESCE(cache_create_5m,0), COALESCE(cache_create_1h,0), "
-                "COALESCE(status,0), COALESCE(usage_source,'') "
+                "COALESCE(status,0), COALESCE(usage_source,''), tzo "
                 "FROM decisions" + where + " ORDER BY ts DESC LIMIT ?",
                 sp + (max_rows,)).fetchall()
         by_tier = {t: {"count": n, "in_tokens": it or 0, "out_tokens": ot or 0}
@@ -462,10 +801,22 @@ class Metrics:
         # Rows deliberately excluded from every dollar figure, counted so the exclusion
         # is VISIBLE. A silently shrinking denominator is how "we weren't watching"
         # becomes indistinguishable from "$0.00".
-        unpriced = {"estimated_usage": 0, "non_2xx": 0, "model_not_in_catalog": 0}
+        unpriced = {"estimated_usage": 0, "non_2xx": 0, "model_not_in_catalog": 0,
+                    # No derivable calendar day -> no historical rate to price at.
+                    # Pricing it at today would be exactly the frame substitution the
+                    # pday column exists to prevent.
+                    "undatable": 0,
+                    # A model switch invalidated the prompt cache and the baseline arm's
+                    # cache state is not recoverable from the record, so the saving's
+                    # SIGN is undetermined. See _cache_state_indeterminate.
+                    "cache_state_indeterminate": 0}
+        # Priced rows for which no all-frontier baseline exists on that row's own day.
+        # They still contribute to saved/spent -- only `billed_top` is short -- so the
+        # shortfall is reported instead of leaving `billed_top` looking complete.
+        billed_top_missing = 0
         if _PRICING:
             for (ts, tier, om, it, ot, src, rtier, reff, served, cr, c5, c1,
-                 status, usrc) in detail:
+                 status, usrc, tzo) in detail:
                 ok, why = row_is_priceable(status, usrc)
                 if not ok:
                     unpriced[why] = unpriced.get(why, 0) + 1
@@ -473,31 +824,74 @@ class Metrics:
                 it = it or 0
                 ot = ot or 0
                 # in_tokens is the FRESH input count; cached traffic is billed separately.
+                # `at` is the row's OWN local calendar day, the same date logs() and
+                # store.derive_row price it at -- never today's, never the UTC one.
                 kw = dict(cache_read=cr or 0, cache_create_5m=c5 or 0,
-                          cache_create_1h=c1 or 0, at=_day(ts))
+                          cache_create_1h=c1 or 0, at=_pday(ts, tzo))
+                if kw["at"] is None:
+                    # Undatable -> unpriceable. at=None makes cost_of_model resolve at
+                    # pricing.today_utc(), so pricing this row would claim a figure at
+                    # TODAY's promo state for a call we cannot even place on a calendar.
+                    unpriced["undatable"] = unpriced.get("undatable", 0) + 1
+                    continue
                 # Price BOTH legs at their exact models. `om` is what the caller asked
                 # for (the baseline); `served` is what Cheaper actually ran. The only
                 # variable between them is the model, which is the only thing Cheaper
                 # controls -- so it is the only thing it may claim credit for.
                 spent_x = cost_of_model(served, it, ot, **kw)
                 base_x = cost_of_model(om, it, ot, **kw)
-                if spent_x is not None and base_x is not None:
-                    spent = spent_x
-                    saved = base_x - spent_x          # SIGNED: a costlier route is negative
-                    changed = (served or "") != (om or "") and abs(saved) > 0
-                else:
-                    # One side is unpriceable -> claim nothing for this row rather than
-                    # falling back to a tier average that no invoice would match.
-                    est = estimate_call(om, it, ot, tier)
-                    spent = est["new_cost"] if is_priceable(om) else 0.0
-                    saved = 0.0
-                    changed = False
+                if spent_x is None or base_x is None:
+                    # One side is unpriceable -> claim NOTHING for this row. It is
+                    # counted in counts.unpriced and contributes to NO dollar
+                    # accumulator, so dollars.spent covers exactly the rows in
+                    # counts.priced and the two figures reconcile.
+                    #
+                    # This branch used to book `estimate_call(om, ...)["new_cost"]` into
+                    # dollars.spent -- contradicting the comment above it and breaking
+                    # three rules at once: the figure was resolved at pricing.today_utc()
+                    # instead of this row's day, an unpriceable SERVED model inherited
+                    # the REQUESTED model's rate (so /metrics made a dollar claim about a
+                    # call /logs reports as actual_cost=None), and the row stayed inside
+                    # dollars.spent and the savings_pct denominator while being counted
+                    # as excluded -- an exclusion that was counted but never actually
+                    # excluded.
                     unpriced["model_not_in_catalog"] = unpriced.get("model_not_in_catalog", 0) + 1
-                billed_top = cost_of(detect_family(om) or "other", "opus", it, ot) \
-                    if detect_family(om) else 0.0
+                    continue
+                # The models are both priceable, but the COUNTERFACTUAL is not: this call
+                # switched model and started COLD, so `base_x` above charged the baseline
+                # a cache CREATE for a prefix that model may well have been holding and
+                # would merely have READ. The subtraction's sign is undetermined by the
+                # evidence (see _cache_state_indeterminate), so no dollar figure on this
+                # summary may include it. Counted, never zeroed: the row contributes to
+                # NO accumulator, so dollars.spent still covers exactly counts.priced and
+                # the two figures reconcile.
+                if _cache_state_indeterminate(served, om, cr or 0, (c5 or 0) + (c1 or 0)):
+                    unpriced["cache_state_indeterminate"] = unpriced.get(
+                        "cache_state_indeterminate", 0) + 1
+                    continue
+                spent = spent_x
+                saved = base_x - spent_x          # SIGNED: a costlier route is negative
+                changed = (served or "") != (om or "") and abs(saved) > 0
+                # The all-frontier baseline, priced at THIS ROW'S OWN DAY. It used to go
+                # through pricing.cost_of(), which takes no `at` and always resolves at
+                # today_utc(); that was right only by luck, because no top representative
+                # currently carries a dated window. The first promo transcribed onto one
+                # would silently restate every historical row.
+                billed_top = None
+                _fam = detect_family(om)
+                if _fam:
+                    _rep = representative_for(_fam, "opus")
+                    if _rep:
+                        billed_top = cost_of_model(_rep, it, ot, at=kw["at"])
+                if billed_top is None:
+                    # No published top-tier rate for this row's family on this row's day.
+                    # COUNTED, so `billed_top` is never quietly assembled from a
+                    # shrinking subset and read as if it covered everything.
+                    billed_top_missing += 1
+                else:
+                    dollars["billed_top"] += billed_top
                 dollars["saved"] += saved
                 dollars["spent"] += spent
-                dollars["billed_top"] += billed_top
                 if saved > 0:
                     dollars["gross"] += saved
                 elif saved < 0:
@@ -520,15 +914,30 @@ class Metrics:
                 # The baseline is the priciest model actually REQUESTED this session,
                 # ranked on a fixed 1M-in/1M-out basket. Price, not tier: capability
                 # rank and price rank genuinely disagree across the catalog.
-                if om and is_priceable(om):
-                    b_rank = cost_of_model(om, 1_000_000, 1_000_000) or 0.0
+                #
+                # ONLY A NAME LEAVES THIS BLOCK. `baseline_model` and `top_model` are
+                # consumed as strings -- the tagline's "...instead of X" clause, in
+                # cli/src/peek/tagline.js -- and no dollar figure on this summary is
+                # derived from `b_rank`/`t_rank`. That is why the basket is a fixed
+                # 1M/1M notional rather than the row's real tokens: it orders models, it
+                # never claims money.
+                #
+                # It is still priced at THIS ROW'S OWN DAY. These four calls used to omit
+                # `at=` entirely and so resolved at pricing.today_utc(), while every
+                # other price in this same loop used at=kw["at"]. No dollar moved, but a
+                # promotional window that reorders two models across its boundary would
+                # make the tagline NAME the wrong one -- the ranking would be taken at
+                # today's rates for a session that ran under different ones. Two frames
+                # in one loop has no defensible reading, so there is now one.
+                if om and is_priceable(om, kw["at"]):
+                    b_rank = cost_of_model(om, 1_000_000, 1_000_000, at=kw["at"]) or 0.0
                     if b_rank > baseline_rank or (
                         b_rank == baseline_rank and (baseline_model is None or om < baseline_model)
                     ):
                         baseline_rank = b_rank
                         baseline_model = om
-                if served and is_priceable(served):
-                    t_rank = cost_of_model(served, 1_000_000, 1_000_000) or 0.0
+                if served and is_priceable(served, kw["at"]):
+                    t_rank = cost_of_model(served, 1_000_000, 1_000_000, at=kw["at"]) or 0.0
                     if t_rank > top_rank:
                         top_rank = t_rank
                         top_model = served
@@ -611,10 +1020,56 @@ class Metrics:
                 "unpriced_total": sum(unpriced.values()),
                 "priced": max(0, min(total, max_rows) - sum(unpriced.values())),
                 "examined": min(total, max_rows),
+                # Priced rows with no all-frontier rate on their own day. > 0 means
+                # `dollars.billed_top` (and therefore baselines.highest_tier) covers
+                # FEWER rows than dollars.spent and must be labelled, not compared.
+                "billed_top_missing": billed_top_missing,
                 # An honest truncation flag: summary() has always capped its aggregates
                 # at max_rows and said nothing, so a ledger past the cap silently
                 # under-reported. Say when the figures are a sample.
                 "truncated": total > max_rows,
+            },
+            # --- what NEVER REACHED the ledger ------------------------------------
+            #
+            # Everything in `counts` above describes rows that ARE in the store. These
+            # describe writes that are not, and they are the only trace those writes
+            # leave anywhere: app.py fires record() inside `except Exception: pass`, so
+            # a refused write is invisible at the call site, invisible in the table, and
+            # -- until this block existed -- invisible everywhere else too. A shrinking
+            # denominator nobody announces is indistinguishable from a quiet week.
+            #
+            # SCOPE, stated because it is easy to misread: these are PROCESS-LOCAL
+            # counters on this Metrics instance, covering writes attempted since the
+            # gateway started. They are NOT stored in SQLite, NOT scoped by the
+            # `session` filter (a per-chat summary still reports the process totals),
+            # and they do not survive a restart. Read them as "is this gateway losing
+            # writes right now", never as a historical figure about the ledger.
+            "durability": {
+                # The journal mode SQLite actually reported back, not the one requested.
+                # Anything other than "wal" means the WAL upgrade was refused (network
+                # filesystem, read-only media, a process holding the database during the
+                # one-time upgrade) and the store is back on the rollback journal, where
+                # an external reader's SHARED lock can starve the writer. When SQLite
+                # gave a reason for refusing, it is carried alongside rather than left to
+                # be guessed at.
+                "journal_mode": self.journal_mode,
+                "journal_mode_error": self.journal_mode_error,
+                "synchronous": "NORMAL",
+                "busy_timeout_ms": 5000,
+                "write_attempts": WRITE_ATTEMPTS,
+                # Writes SQLite refused on every attempt. Each one is a routed call
+                # missing from every figure on this page.
+                "write_failures": self.write_failures,
+                # Retries that were needed but eventually succeeded: zero rows lost, but
+                # a rising number is lock contention on its way to becoming a failure.
+                "write_retries": self.write_retries,
+                # INSERT OR IGNORE rows the partial unique index on request_id absorbed.
+                # Working as designed -- that suppression is what makes a replayed write
+                # idempotent instead of a double count -- but it must be COUNTED, or a
+                # replay storm and a healthy gateway look the same from out here.
+                "duplicate_suppressed": self.duplicate_suppressed,
+                # Writes refused at the door for an unrepresentable timestamp.
+                "rejected_ts": self.rejected_ts,
             },
             "tokens": {"saved_reasoning_potential": tokens_saved_potential,
                        "downgraded": tokens_downgraded},
@@ -643,7 +1098,12 @@ class Metrics:
                 # Money saved vs each baseline. 'historical' is filled by the dashboard
                 # from /peek (the CLI's chat-history analysis).
                 "requested_default": dollars["saved"],
-                "highest_tier": round(max(0.0, dollars["billed_top"] - dollars["spent"]), 4),
+                # SIGNED. `max(0.0, ...)` clamped the arithmetic, so a period in which
+                # Cheaper spent MORE than the all-frontier baseline read as an honest
+                # measured $0.00 -- a suppression done in the math instead of at render,
+                # which is the one place it must never happen. Preserve the sign here;
+                # the renderer labels a negative.
+                "highest_tier": round(dollars["billed_top"] - dollars["spent"], 4),
             },
             # legacy compat fields:
             "est_spend_units": round(spent_u, 3),

@@ -1,11 +1,10 @@
 """The reporting read model: one pricer, one period ladder, one audit header.
 
-WHY `_price_row` LIVES HERE (and how, given metrics.py is frozen)
------------------------------------------------------------------
+WHY THE PER-ROW PRICING IS NOT RE-IMPLEMENTED HERE
+--------------------------------------------------
 The spec calls for extracting the per-row pricing out of ``metrics.py::logs`` so the
-Logs tab and ``/logs`` can never disagree. ``metrics.py`` is not editable in this
-change, so the extraction is done the only other way that produces ONE pricer rather
-than two:
+Logs tab and ``/logs`` can never disagree. Rather than lift the arithmetic into a
+second function, this module produces ONE pricer by composition:
 
   * the row-exclusion POLICY is imported, not re-implemented:
     ``metrics.row_is_priceable(status, usage_source)``;
@@ -18,14 +17,30 @@ than two:
 
 Consequence, stated plainly rather than hidden: ``/api/v1/logs``, ``/api/v1/reports/*``
 and ``/api/v1/export`` are all rendered from ``store.derive_row``, so they cannot
-disagree with each other by construction. The legacy ``/logs`` endpoint still prices at
-``metrics._day(ts)`` -- the **UTC** date -- while this layer prices and buckets at
-``pday`` (``ts + tzo``, the row's own LOCAL calendar day). That is the known P0#8
-defect: with a live promotional window on ``claude-sonnet-5`` ending 2026-08-31, a
-UTC-7 machine prices an evening call as September while the local bucketer files it in
-August, a +50% error on both input and output. This layer uses ONE frame. The two
-endpoints can therefore differ for calls near a UTC-midnight boundary, and the newer
-one is the correct one.
+disagree with each other by construction.
+
+ONE TIME FRAME, ACROSS BOTH LAYERS
+----------------------------------
+The legacy ``/logs`` and ``/metrics`` endpoints used to price at ``metrics._day(ts)``
+-- the **UTC** date -- while this layer priced and bucketed at ``pday``
+(``ts + tzo``, the row's own LOCAL calendar day). With a promotional window on
+``claude-sonnet-5`` running to 2026-08-31, a UTC-7 machine's 23:30 call on August 31st
+is September 1st in UTC: the legacy endpoint dropped the promo and the newer one kept
+it, a 50% dollar difference on both input and output for the same call. ``_day`` is
+gone; ``metrics.py`` now prices every row at ``periods.pday_of(ts, tzo)``, the same
+frame ``store.derive_row`` uses, so the two endpoints agree for calls on either side of
+a UTC-midnight boundary.
+
+The offset itself is now FROZEN on the row. ``decisions.tzo`` holds the machine's
+minutes east of UTC at the instant of that call, written by ``Metrics.record()``, so a
+machine that later changes timezone cannot restate the price date of history it already
+recorded. Rows written before that column existed keep ``tzo IS NULL`` -- a real state,
+never read as 0/UTC -- and are reconstructed by ``periods.local_offset_minutes``. That
+helper lives in ``periods`` precisely because this module imports ``metrics`` and both
+need the identical rule; two implementations of one rule is the defect class that
+produced the UTC/pday split in the first place. ``Metrics.logs()`` also emits each
+row's ``tzo`` and ``pday``, and ``gateway_row_to_event`` consumes them, so the frame is
+carried rather than re-derived.
 
 WHAT THIS MODULE WILL NOT DO
 ----------------------------
@@ -73,20 +88,24 @@ _SORTS = ("ts:desc", "ts:asc")
 # gateway rows (metrics.db) -> the event schema
 # ---------------------------------------------------------------------------
 
-def _local_offset_minutes(ts_ms: float) -> int:
-    """Minutes EAST of UTC on this machine at that instant (US Central summer = -300).
+def _local_offset_minutes(ts_ms: float) -> int | None:
+    """Reconstruct a missing UTC offset. Delegates to ``periods.local_offset_minutes``.
 
-    Mirrors ``periods.js::tzOffsetAt``. The gateway's SQLite rows predate the event
-    schema and carry no frozen ``tzo``, so the machine's offset AT THE INSTANT OF THE
-    CALL is the closest honest reconstruction -- and it is resolved at that instant, not
-    at "now", so a DST transition does not restate history.
+    ``None`` when this machine's offset at that instant cannot be determined -- NOT 0.
+    An unknown offset reported as UTC is the substitution the frozen ``tzo`` column
+    exists to prevent; the None flows on to ``pday_of``, which answers None, and the row
+    becomes a counted, visible exclusion instead of a confident wrong date.
+
+    This is a thin alias kept for the module's own callers, NOT a second implementation.
+    ``metrics.py`` needs the identical rule to reconstruct a legacy SQLite row, and
+    ``reporting`` imports ``metrics``, so the rule cannot live in either of them -- it
+    lives in ``periods``, which imports neither. A legacy row therefore gets the same
+    offset, and so the same ``pday`` and the same dollars, whichever layer reads it.
+
+    Only ever a FALLBACK: a row carrying a frozen ``tzo`` is authoritative and is never
+    passed through here.
     """
-    try:
-        dt = datetime.fromtimestamp(ts_ms / 1000.0).astimezone()
-        off = dt.utcoffset()
-        return int(off.total_seconds() // 60) if off else 0
-    except (OverflowError, OSError, ValueError):
-        return 0
+    return periods.local_offset_minutes(ts_ms)
 
 
 def _weak_key(harness, sess, served, ts_ms, in_tok, out_tok) -> str:
@@ -105,9 +124,20 @@ def gateway_row_to_event(row: dict) -> dict:
     counterfactual: the same call, the same date, the same SKU, the same tokens -- the
     only variable is the model, which is the only thing Cheaper controls and therefore
     the only thing it may claim credit for.
+
+    ``tzo``/``pday`` are taken FROM THE ROW when it carries them -- ``Metrics.logs()``
+    now emits the exact frame it priced at -- so this layer cannot arrive at a different
+    price date than ``/logs`` did for the same call. The reconstruction below is the
+    fallback for a row dict that predates those keys, and it is the same reconstruction
+    ``metrics`` uses, via ``periods``.
     """
     ts_ms = float(row.get("ts") or 0) * 1000.0
-    tzo = _local_offset_minutes(ts_ms)
+    tzo = row.get("tzo")
+    try:
+        tzo = int(tzo) if tzo is not None else _local_offset_minutes(ts_ms)
+    except (TypeError, ValueError):
+        tzo = _local_offset_minutes(ts_ms)
+    pday = row.get("pday") or periods.pday_of(ts_ms, tzo)
     rid = (row.get("request_id") or "").strip()
     usrc = (row.get("basis") or "")
     usrc = "body" if usrc == "measured" else ("estimate" if usrc == "estimated" else "")
@@ -123,7 +153,7 @@ def gateway_row_to_event(row: dict) -> dict:
         "inst": "",
         "ts": ts_ms,
         "tzo": tzo,
-        "pday": periods.pday_of(ts_ms, tzo),
+        "pday": pday,
         "ingested_at": ts_ms,
         "prov": "gateway",
         "usrc": usrc,
@@ -249,7 +279,14 @@ def _finite(v):
 
 def in_window(r: dict, frm, to) -> bool:
     """Half-open ``[from, to)`` -- disjoint by construction, so a month is exactly the
-    sum of its weeks and ``report(Jan) + report(Feb) == report(Jan u Feb)``."""
+    sum of its weeks and ``report(Jan) + report(Feb) == report(Jan u Feb)``.
+
+    Answers on ``ts`` ALONE, and answers False for a row that has no usable ``ts`` --
+    which conflates "outside the range" with "no instant to test". Callers that must
+    tell those two apart use ``_window_disposition`` below; this function stays as it is
+    because the row-listing surfaces (``matching_views``, ``keyset_page``) key their
+    cursors on ``ts`` and cannot carry a row that has none.
+    """
     ts = _finite(r.get("ts"))
     if ts is None:
         return False
@@ -258,6 +295,172 @@ def in_window(r: dict, frm, to) -> bool:
     if to is not None and ts >= to:
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# WHERE A ROW SITS ON THE TIME AXIS -- one rule, three dispositions
+# ---------------------------------------------------------------------------
+#
+# `ts` and `pday` are TWO INDEPENDENT FIELDS on a row and `store.merge` can null either
+# one without the other: it ranks them separately, so two sources that tie on `ts` and
+# disagree null `ts` and NAME it in `conflicts` while an AGREEING `pday` survives
+# untouched. `store.derive_row` prices off `pday`, not off `ts`. So "this row has no
+# usable instant" and "this row cannot be dated" are DIFFERENT CLAIMS, and a row that is
+# the first without being the second is fully PRICEABLE.
+#
+# Exempting a row from the window whenever its `ts` is non-finite -- the shape that
+# stopped undatable rows vanishing -- therefore waved such a row into EVERY window,
+# including windows that provably exclude its own day, with no label and no count:
+# breakdown(April) and breakdown(Aug) each claimed the same $0.06, and their sum was
+# twice their union. That turned a silent OMISSION into a silent FABRICATION.
+#
+# The exemption below covers ONLY rows undatable in BOTH senses -- no finite `ts` AND no
+# usable `pday` -- because those are exactly the rows `derive_row` refuses to price
+# (REASON_NO_TS). They contribute ZERO dollars wherever they are counted, which is what
+# makes exempting them safe; a row carrying a frozen day is dated and is tested BY THAT
+# DAY, at the row's own offset.
+
+_IN = "in"
+_OUT = "out"
+_UNDATABLE = "undatable"
+
+
+def _pday_start_ms(pday, tzo):
+    """The instant the local calendar day ``pday`` BEGAN, in the ROW'S OWN frame.
+
+    ``periods.pday_of`` renders ``ts + tzo`` as YYYY-MM-DD, so that day begins at
+    ``utc_midnight(pday) - tzo`` and ends 24h later. Returns None -- never a substituted
+    instant -- when ``pday`` does not name a representable calendar day, or when no
+    offset can be established at all.
+
+    Which strings name a day is decided by ``store.iso_day_ms``, NOT re-implemented here:
+    ``store.derive_row`` asks the same function before it prices the row, and a placement
+    rule that accepted a day the pricer refuses (or refused one it accepts) is precisely
+    how a priceable row ends up in no window at all.
+
+    THE OFFSET IS THE ROW'S OWN, never the report's host frame: a report rendered in
+    Asia/Tokyo must not restate which day a UTC-7 machine's call happened on. An ABSENT
+    ``tzo`` is RECONSTRUCTED through ``periods.local_offset_minutes`` -- the same helper,
+    the same rule and the same fallback ``periods.pday_of`` documents for exactly this
+    case -- and never read as 0, which is the substitution the frozen ``tzo`` column
+    exists to prevent. The reconstruction is resolved at the day's own MIDDAY so that a
+    DST changeover (02:00-03:00 local in every zone that has one) cannot decide the
+    answer.
+    """
+    midnight = store.iso_day_ms(pday)
+    if midnight is None:
+        return None
+    off = None
+    if tzo is not None:
+        try:
+            off = int(tzo)
+        except (TypeError, ValueError):
+            off = None
+    if off is None:
+        off = periods.local_offset_minutes(midnight + 43200000)
+        if off is None:
+            return None
+    return midnight - off * 60000
+
+
+def _placement(r: dict):
+    """``(kind, instant)`` -- the ONE instant this row is tested against a window.
+
+    ``kind`` is one of:
+
+      ``ts``           a finite ``ts``: the instant itself, tested exactly as
+                       ``in_window`` tests it;
+      ``pday``         no finite ``ts``, but a frozen ``pday`` naming a real day whose
+                       start instant can be established: the instant that day BEGAN in
+                       the row's own frame. A SINGLE instant, not the day's interval --
+                       see below;
+      ``unplaceable``  no finite ``ts``, a ``pday`` that DOES name a representable day,
+                       and no offset with which to say when that day began -- the
+                       ``tzo`` was not recorded AND the machine's offset at that day is
+                       not determinable (only reachable at the year-1 / year-9999
+                       calendar edges, where the local wall time falls outside the
+                       calendar). ``derive_row`` still prices such a row, so it must NOT
+                       be granted the exemption, or it would fabricate dollars into
+                       every window. It answers ``out`` everywhere instead;
+      ``none``         no finite ``ts`` and no ``pday`` that names a representable
+                       calendar day -- absent, empty, or a string like ``2026-13-45``
+                       that names no day. ``store.iso_day_ms`` decides that, and
+                       ``derive_row`` asks the SAME function before it prices, so every
+                       row in this class is refused with REASON_NO_TS and contributes no
+                       dollars wherever it is counted -- which is the entire
+                       justification for exempting it from the window.
+
+    WHY A SINGLE INSTANT AND NOT THE DAY'S INTERVAL. Testing ``[day_start, day_end)``
+    for INTERSECTION with ``[frm, to)`` reads as the more honest choice and is not: a
+    local day that straddles a window boundary then intersects BOTH neighbours and the
+    row is counted twice -- report(Jan) + report(Feb) > report(Jan u Feb), the one
+    failure this workstream exists to end. Requiring CONTAINMENT instead breaks the same
+    identity in the other direction: neither neighbour contains it, so the row is lost
+    from both while their union keeps it. Only a POINT partitions, so a point is what is
+    tested; the point is the day's own start in the row's own frame, so a row whose
+    frame matches the report's lands in exactly the window its day belongs to.
+    """
+    ts = _finite(r.get("ts"))
+    if ts is not None:
+        return "ts", ts
+    pday = r.get("pday")
+    # Asked of the SAME function `derive_row` asks. A `pday` that names no representable
+    # day is not priced, so this row is provably zero-dollar and may safely take the
+    # exemption -- which is what removes it from the `unplaceable` class, where it was
+    # excluded from every window while still carrying dollars nothing counted.
+    if store.iso_day_ms(pday) is None:
+        return "none", None
+    at = _pday_start_ms(pday, r.get("tzo"))
+    return ("pday", at) if at is not None else ("unplaceable", None)
+
+
+def _window_disposition(r: dict, frm, to) -> str:
+    """``in`` / ``out`` / ``undatable`` for one row against one half-open window.
+
+    ONE classification, used by ``report_window``, ``report_breakdown`` and
+    ``report_trend`` alike, so the three endpoints cannot disagree about which rows a
+    window holds. What each surface DOES with ``undatable`` differs -- and every one of
+    those dispositions is counted and visible, never a silent drop:
+
+      ``report_window``     excluded from the fold and counted in ``undated``, labelled
+                            ``incomplete``;
+      ``report_breakdown``  joins its own REAL group on the (non-temporal) dimension,
+                            where ``fold_rows`` counts it as an unpriced call;
+      ``report_trend``      the trailing, labelled ``undated`` point.
+
+    The fourth state, ``unplaceable``, answers ``out`` for EVERY window, bounded or not,
+    and is counted by ``report_window``'s ``undated``. It is now narrow: a row with no
+    finite ``ts``, a ``pday`` that DOES name a representable day, and no way to say when
+    that day began -- ``tzo`` absent AND ``periods.local_offset_minutes`` unable to
+    reconstruct one. That happens only at the calendar edges (a year-9999 day on a
+    far-eastern machine, a year-1 day on a far-western one), where the local wall time
+    leaves the representable calendar. ``derive_row`` DOES price such a row, so it cannot
+    be exempted -- an exempt priceable row is the fabrication this function exists to stop
+    -- and it cannot be placed, because no instant can be named without inventing an
+    offset. Excluding it everywhere is the only disposition that neither fabricates nor
+    double-counts, and it keeps the ladder and lifetime agreeing (both exclude it).
+
+    STATED LIMITATION, unchanged: ``report_breakdown`` and ``report_trend`` have no
+    counter of their own for ``unplaceable``, so there it is an exclusion visible only
+    through ``report_window``'s ``undated``. What used to ALSO fall in this class -- a
+    truthy ``pday`` naming no day at all, e.g. ``"2026-13-45"`` or a numeric ``20260410``
+    -- no longer does: ``store.derive_row`` refuses to price it, so it is ``none``, and
+    every surface counts it through its own visible channel.
+    """
+    kind, at = _placement(r)
+    if kind == "none":
+        return _UNDATABLE
+    if kind == "ts":
+        # Delegated, not re-derived: two implementations of one comparison is how the
+        # window means two things on two surfaces.
+        return _IN if in_window(r, frm, to) else _OUT
+    if at is None:                      # `unplaceable`
+        return _OUT
+    if frm is not None and at < frm:
+        return _OUT
+    if to is not None and at >= to:
+        return _OUT
+    return _IN
 
 
 def decision_of(r: dict, d: dict) -> str:
@@ -586,6 +789,13 @@ def report_window(rows, frm, to, state=None, tz=None, open_sessions=None,
     labels: list = []
     notes: list = []
 
+    # BOTH refusals below report `tombstones: None`, never `len(tombs)`.
+    # `store.load_state` returns an EMPTY tombstone list for both dispositions -- not
+    # because the store holds none, but because this reader declined to interpret the
+    # document that holds them. Publishing that as `0` states a fact about the user's
+    # deletions that was never read, in the one field whose whole job is to make a
+    # deliberate exclusion visible (invariant 7: a "report nothing" case returns a
+    # labelled non-number, never a number).
     if st.get("too_new"):
         return {"status": "suppressed", "from": frm, "to": to,
                 "measured": None, "estimated": None,
@@ -593,10 +803,36 @@ def report_window(rows, frm, to, state=None, tz=None, open_sessions=None,
                 "notes": ["This savings store was written by a newer Cheaper. "
                           "Upgrade with `npm i -g cheaper` — refusing to guess at its "
                           "contents."],
-                "coverage": cov, "tombstones": len(tombs),
+                "coverage": cov, "tombstones": None,
                 "catalog": _catalog_block()}
 
-    windowed = [r for r in rows if in_window(r, frm, to)]
+    # The SAME refusal for a state file that EXISTS and could not be read. It holds the
+    # `cheaper forget` tombstones, so reporting past it would publish totals that may
+    # include events the user asked to have excluded -- the deletion silently undone,
+    # with the figures simply going back up and nothing anywhere saying why. An ABSENT
+    # state file is NOT this case and reports normally: `implied_coverage` speaks for the
+    # events themselves, and a store that never declared coverage has no tombstones to
+    # miss. Mirror of `cli/src/peek/store.js::reportWindow`'s `st.unreadable` branch; the
+    # two must not disagree, or `cheaper savings` refuses while the dashboard reports.
+    if st.get("unreadable"):
+        return {"status": "suppressed", "from": frm, "to": to,
+                "measured": None, "estimated": None,
+                "labels": ["state_unreadable"],
+                "notes": ["The savings store's state.json could not be read "
+                          f"({st['unreadable']}), so its coverage intervals and its "
+                          "`cheaper forget` tombstones are unknown. Refusing to report "
+                          "totals that might include events a tombstone excludes. Move "
+                          "that file aside to start a fresh one — the events themselves "
+                          "are untouched."],
+                "coverage": cov, "tombstones": None,
+                "catalog": _catalog_block()}
+
+    # NOT `in_window` alone. A row whose `ts` was nulled by a merge conflict but whose
+    # `pday` survived is PRICEABLE and is placed by its own frozen day, exactly as
+    # `report_breakdown` and `report_trend` place it -- otherwise this endpoint reports
+    # 0 events for a window in which its siblings report a dollar figure, on the same
+    # row, and `_api_envelope` stamps the requested from/to on both.
+    windowed = [r for r in rows if _window_disposition(r, frm, to) == _IN]
 
     if cov["kind"] == "not_covered":
         return {"status": "not_covered", "from": frm, "to": to,
@@ -614,10 +850,29 @@ def report_window(rows, frm, to, state=None, tz=None, open_sessions=None,
 
     # Case 8 -- an undated row is excluded from every bucket AND counted. periods.js
     # used to `continue` silently, so a report could lose rows and still look complete.
-    undated = sum(1 for r in rows if _finite(r.get("ts")) is None)
+    #
+    # "No usable timestamp" is NOT the test, and using it as one made this counter claim
+    # an exclusion that no longer happens: a row with a surviving `pday` is placed in its
+    # own window above. What is counted here is a row with NO INSTANT TO TEST AT ALL --
+    # no finite `ts` and no usable frozen day -- which is excluded from this window, from
+    # every other window, and from lifetime. `derive_row` refuses to price exactly those
+    # rows, so nothing is being withheld from the dollars by counting them here.
+    undated = sum(1 for r in rows if _placement(r)[1] is None)
     if undated > 0:
         labels.append("incomplete")
-        notes.append(f"{undated} event(s) have no usable timestamp and are excluded.")
+        notes.append(f"{undated} event(s) have no usable timestamp and no usable frozen "
+                     "day, and are excluded.")
+
+    # ...and the converse is DISCLOSED rather than assumed: a row placed by its frozen
+    # day carries less evidence than one placed by its own instant, and a reader is
+    # entitled to know how many of them a figure rests on. This is provenance, not an
+    # exclusion -- these rows ARE in `windowed` and ARE priced, at their own day.
+    dated_by_pday = sum(1 for r in windowed if _placement(r)[0] == "pday")
+    if dated_by_pday > 0:
+        labels.append("dated_by_frozen_day")
+        notes.append(f"{dated_by_pday} event(s) have no usable timestamp and are placed "
+                     "in this period by the calendar day frozen on the row, at the "
+                     "row's own recorded UTC offset — the same day they are priced at.")
 
     # Case 7 -- more than a fifth of the window's tokens unpriceable: suppress DOLLARS
     # and report TOKENS. Sticky and explanatory, never a silent blank.
@@ -650,14 +905,27 @@ def report_window(rows, frm, to, state=None, tz=None, open_sessions=None,
         "estimated": _withhold_dollars(folded["estimated"], folded["dollars_suppressed"]),
         "tokens": {"measured": folded["measured"]["tokens"],
                    "estimated": folded["estimated"]["tokens"]},
-        "events": {"measured": folded["measured"]["calls"],
-                   "estimated": folded["estimated"]["calls"]},
+        # ROWS SEEN in this window, per basis -- NOT `folded[basis]["calls"]`, which counts
+        # only the rows that could be PRICED. Reading `calls` here made this endpoint
+        # answer `events: {"measured": 0, "estimated": 0}` for a window holding one
+        # unpriceable call, directly above its own note asserting "1 of 1 call(s) in this
+        # window ... Call and token counts are exact" -- and dashboard.html renders that
+        # zero under the header "Events (measured)" with a tooltip reading "1 of these
+        # could not be priced". It also made `events` mean ROWS PRICED here and ROWS SEEN
+        # in `cli/src/peek/store.js`, one field name with two meanings, published under the
+        # same key to the same consumers depending only on gateway reachability.
+        # `check-period-parity.js` now diffs this field across both runtimes.
+        "events": folded["events"],
         "grain": "call",
         "unpriced": folded["unpriced"],
         "unpriced_calls": folded["unpriced_calls"],
         "unpriced_tokens": folded["unpriced_tokens"],
         "unpriced_ratio": folded["unpriced_ratio"],
         "undated": undated,
+        # NOT an addend to either basis and not a sum of them: a provenance count of
+        # rows already inside `events`, disclosed so the reader can see how much of the
+        # figure rests on a frozen day rather than on an instant.
+        "dated_by_pday": dated_by_pday,
         "labels": labels, "notes": notes,
         "catalog": _catalog_block(),
     }
@@ -676,13 +944,46 @@ def _withhold_dollars(acc: dict, suppressed: bool) -> dict:
     return out
 
 
+# The reasons that mean THE CATALOG CANNOT PRICE THIS MODEL -- the only ones `cheaper
+# update` can do anything about.
+_CATALOG_REASONS = (store.REASON_SERVED_UNPRICEABLE, store.REASON_BASE_UNPRICEABLE)
+
+# ...and the ones that do not. Spelt out rather than inferred by subtraction so a new
+# reason string added to `store.REASONS` lands in the honest "other" sentence below
+# instead of being silently absorbed into a catalog claim that is false about it.
+_OTHER_REASON_PROSE = {
+    store.REASON_NON_2XX: "did not return a 2xx status, and a failed or retried call "
+                          "is recorded but never priced",
+    store.REASON_NO_TS: "carry no usable timestamp and no usable frozen day",
+    store.REASON_COST_NULL: "priced to no figure at all, which is a catalog defect "
+                            "rather than a missing model",
+}
+
+
 def _suppression_note(windowed, folded) -> str:
     """Per-window and specific. The dashboard renders these notes under the table, and a
     generic percentage sentence leaves the reader unable to tell which row it belongs
-    to -- or how much of the window it describes."""
+    to -- or how much of the window it describes.
+
+    ONE SENTENCE PER REASON, because the reasons are not the same claim. This function
+    used to describe every withheld window as "not in the price catalog ... Refresh with
+    `cheaper update`", which was true while a missing model was the only way to be
+    unpriceable. It stopped being true when `cache_state_indeterminate` arrived: those
+    models ARE in the catalog and priced fine -- what is missing is the COUNTERFACTUAL's
+    cache state, which no catalog contains and no refresh can supply. Telling a user to
+    run `cheaper update` there sends them to fix something that is not broken and then
+    to watch the figure not come back, which reads as the tool being wrong about its own
+    data. A wrong explanation of a correct withholding is still a false statement about
+    money, and it is the kind that destroys trust in the correct part.
+    """
     total_calls = len(windowed)
     unpriced_calls = folded["unpriced_calls"]
     pct = round(folded["unpriced_ratio"] * 100)
+    unpriced = folded["unpriced"] or {}
+
+    # The offending model ids. A `cache_state_indeterminate` row contributes none by
+    # construction -- both of its models resolve, which is exactly why its own sentence
+    # must not say otherwise.
     models = []
     for r in windowed:
         d = store.derive_row(r)
@@ -696,10 +997,40 @@ def _suppression_note(windowed, folded) -> str:
         shown = ", ".join(models[:5])
         more = f" and {len(models) - 5} more" if len(models) > 5 else ""
         tail = f" (models: {shown}{more})"
-    return (f"{unpriced_calls} of {total_calls} call(s) in this window ({pct}% of its "
-            f"tokens) are not in the price catalog{tail}, so no dollar figure is "
-            "claimed. Call and token counts are exact. "
-            "Refresh with `cheaper update`.")
+
+    catalog_n = sum(unpriced.get(k, 0) for k in _CATALOG_REASONS)
+    cache_n = unpriced.get(store.REASON_CACHE_INDETERMINATE, 0)
+
+    parts = [f"{unpriced_calls} of {total_calls} call(s) in this window ({pct}% of its "
+             f"tokens) could not be priced, so no dollar figure is claimed."]
+    if catalog_n:
+        parts.append(f"{catalog_n} call(s) are not in the price catalog{tail} — refresh "
+                     "with `cheaper update`.")
+    if cache_n:
+        # Its OWN sentence, and deliberately not a "refresh" one. The withholding is not
+        # a gap in what Cheaper knows about prices; it is a gap in what the provider
+        # records about caches, and it will not close by updating anything.
+        parts.append(
+            f"{cache_n} call(s) switched model on a cold prompt cache: those models ARE "
+            "in the catalog, but switching invalidates the cache, and nothing recorded "
+            "says whether the un-switched baseline would have paid a cache write or a "
+            "cache read — so the counterfactual is an interval whose sign the evidence "
+            "cannot settle, and no figure is claimed for them. Nothing to refresh; the "
+            "evidence does not exist.")
+    for reason, prose in _OTHER_REASON_PROSE.items():
+        n = unpriced.get(reason, 0)
+        if n:
+            parts.append(f"{n} call(s) {prose}.")
+    # Any reason this function has not been taught is named rather than swallowed: an
+    # unexplained count is still visible, where a silently dropped one is not.
+    known = set(_CATALOG_REASONS) | {store.REASON_CACHE_INDETERMINATE} \
+        | set(_OTHER_REASON_PROSE)
+    rest = {k: v for k, v in unpriced.items() if k not in known and v}
+    if rest:
+        listed = ", ".join(f"{v} {k}" for k, v in sorted(rest.items()))
+        parts.append(f"The remainder were withheld for: {listed}.")
+    parts.append("Call and token counts are exact.")
+    return " ".join(parts)
 
 
 def _priceable_now(model, pday) -> bool:
@@ -826,7 +1157,17 @@ _DIMS = ("served", "base", "tier", "harness", "decision")
 def report_breakdown(rows, dim: str, frm=None, to=None) -> list:
     """Grouped aggregates. Dollars stay split by basis all the way through, because a
     per-call measured figure and a per-chat estimated one in the same column is the same
-    concealment shape in a place where the separation is less visually obvious."""
+    concealment shape in a place where the separation is less visually obvious.
+
+    ``frm``/``to`` filter every row that can be PLACED on the time axis -- by its own
+    ``ts``, or, when that was nulled by a merge conflict, by the calendar day frozen on
+    the row at the row's own offset. Only a row that can be placed NEITHER way is exempt
+    from the window. Every dimension here is NON-TEMPORAL, so such a row still has a real
+    ``served``, ``base``, ``tier``, ``harness`` and ``decision``: it joins its own group
+    and is counted there, rather than being deleted from every group by a range it cannot
+    be tested against -- and ``derive_row`` refuses to price it, so it adds no dollars to
+    the group it joins.
+    """
     if dim not in _DIMS:
         dim = "served"
 
@@ -843,21 +1184,60 @@ def report_breakdown(rows, dim: str, frm=None, to=None) -> list:
 
     groups: dict = {}
     for r in rows:
-        if not in_window(r, frm, to):
+        # SAME SHAPE AS report_trend, and for the same reason -- except that here the
+        # grouping key is NON-TEMPORAL, so the case is even clearer. `in_window` answers
+        # False both for "this row's instant is outside the requested range" and for
+        # "this row has no usable instant at all" (`ts` absent, None, NaN or non-numeric
+        # -- a merge artefact, a truncated import line, a JSON null). Asking it FIRST
+        # collapsed those two different claims into one `continue`, and an undatable row
+        # was deleted from EVERY group of EVERY dimension with no trace: not a group, not
+        # an `events` count, not an `unpriced_calls` count. Nothing in the response or the
+        # envelope recorded it, so a reader grouping by `harness` or `served` -- both
+        # perfectly derivable for a row whose timestamp is unusable -- read a
+        # complete-looking composition table built on a silently smaller denominator.
+        #
+        # Exempting a row on `ts` ALONE then overshot in the opposite direction: `pday`
+        # is a SEPARATE field that survives its own merge, `derive_row` prices off it,
+        # and so a row with a dead `ts` and a live `pday` was waved into every window --
+        # April and August each claiming the same $0.06 that belongs to one of them. The
+        # exemption is therefore decided by DATABILITY, not by `ts`: see
+        # `_window_disposition`. A row that can be placed either way is tested; only a
+        # row that can be placed NEITHER way joins its group unconditionally, and
+        # `store.fold_rows` counts that one honestly as an unpriced call.
+        if _window_disposition(r, frm, to) == _OUT:
             continue
         groups.setdefault(key_of(r), []).append(r)
     out = []
     for k, rs in groups.items():
         f = store.fold_rows(rs)
+        # Case 7, applied HERE TOO -- byte-for-byte the omission
+        # `cli/src/peek/store.js::reportBreakdown` had. `fold_rows` computes
+        # `dollars_suppressed` for every set of rows it folds, and this function computed
+        # it and threw it away: a group whose tokens were more than a fifth unpriceable
+        # published its raw accumulators as if they described the whole group, and the
+        # ladder row over the same rows said "no dollar figure is claimed" while this
+        # group printed one. Only the DOLLARS are withheld; `events`, `calls`, `tokens`
+        # and `unpriced_calls` are exact and survive.
         out.append({"key": k, "grain": "call",
-                    "measured": f["measured"], "estimated": f["estimated"],
+                    "measured": _withhold_dollars(f["measured"],
+                                                  f["dollars_suppressed"]),
+                    "estimated": _withhold_dollars(f["estimated"],
+                                                   f["dollars_suppressed"]),
+                    # The flag a renderer keys off, spelt and meaning exactly what
+                    # `report_window` publishes under the same name.
+                    "dollars_suppressed": bool(f["dollars_suppressed"]),
                     # Events, like Saved and Spent, get the two-column treatment or they
                     # are omitted. A single `calls: len(rs)` here WOULD be a cross-basis
                     # count -- measured calls plus estimated calls in one cell, which is
                     # the same concealment shape as a cross-basis dollar sum in a place
                     # where the separation is far less visually obvious.
-                    "events": {"measured": f["measured"]["calls"],
-                               "estimated": f["estimated"]["calls"]},
+                    #
+                    # ROWS SEEN, not `f[basis]["calls"]` (rows PRICED) -- see
+                    # `report_window`. A group exists because rows landed in it, so a group
+                    # reporting 0 events beside a non-zero `unpriced_calls` contradicts its
+                    # own presence. `unpriced_calls` stays a SUBSET counter of `events`,
+                    # not an addend to it.
+                    "events": f["events"],
                     # NOT an addend to either basis: these rows entered NEITHER
                     # accumulator. Counted so the exclusion is visible rather than a
                     # silently shrinking denominator.
@@ -865,9 +1245,24 @@ def report_breakdown(rows, dim: str, frm=None, to=None) -> list:
                     "unpriced": f["unpriced"]})
     # Sorted by the ESTIMATED saving when that is the only basis present, otherwise by
     # measured -- NEVER by their sum.
-    out.sort(key=lambda g: (g["measured"]["saved"] or g["estimated"]["saved"]),
+    #
+    # A WITHHELD group has no magnitude to be ordered by. `None or None` is None, and
+    # comparing None to a float raises -- so such groups sort LAST, as groups making no
+    # claim, and are never coerced to a 0 that would rank them among the measured zeroes.
+    out.sort(key=lambda g: (_group_sort_value(g) is not None,
+                            _group_sort_value(g) if _group_sort_value(g) is not None
+                            else 0.0),
              reverse=True)
     return out
+
+
+def _group_sort_value(g):
+    """Mirrors cli/src/peek/store.js::groupSortValue -- the same falsy fallback the old
+    ``g["measured"]["saved"] or g["estimated"]["saved"]`` had, made None-aware."""
+    m = (g.get("measured") or {}).get("saved")
+    e = (g.get("estimated") or {}).get("saved")
+    v = m if m else e
+    return None if v is None else v
 
 
 _BUCKETS = ("day", "week", "month")
@@ -875,11 +1270,31 @@ _BUCKETS = ("day", "week", "month")
 
 def report_trend(rows, bucket: str = "day", frm=None, to=None) -> list:
     """A dated series bucketed on ``pday`` -- the row's own local calendar day, never on
-    ingest time. ``ingested_at`` exists for audit and never assigns a row to a period."""
+    ingest time. ``ingested_at`` exists for audit and never assigns a row to a period.
+
+    A row this function CANNOT date is skipped and COUNTED, never bucketed at a
+    fabricated day. ``store.merge`` nulls both ``pday`` and ``tzo`` when two sources
+    disagree about a row's frame (the disagreement is recorded in ``conflicts``), and a
+    timestamp in the wrong unit is not a representable calendar date at all. Those rows
+    surface as ONE trailing, labelled ``undated`` entry -- their calls and dollars are
+    still visible, they are simply attributed to no day. The entry is emitted ONLY when
+    such rows exist, so a clean series is byte-identical to before.
+
+    ``frm``/``to`` filter every row that can be PLACED on the time axis -- by its own
+    ``ts``, or, when that was nulled by a merge conflict, by the calendar day frozen on
+    the row, at the row's own offset. A row carrying a ``pday`` is DATED: it is tested
+    against the window by that day and bucketed at that day, so a 2027 request can no
+    longer emit a bucket labelled ``2026-08-06``. Only a row that can be placed NEITHER
+    way is exempt from the window, and that row lands in the trailing ``undated`` entry
+    where ``derive_row`` refuses to price it -- see the loop below.
+    """
     if bucket not in _BUCKETS:
         bucket = "day"
 
     def key_of(r):
+        # NOT `r.get("tzo") or 0`: a missing offset is reconstructed by pday_of (the
+        # documented fallback, identical on both runtimes), and an explicit 0 is
+        # honoured as the real value it is.
         d = r.get("pday") or periods.pday_of(r.get("ts"), r.get("tzo"))
         if not d:
             return None
@@ -896,22 +1311,74 @@ def report_trend(rows, bucket: str = "day", frm=None, to=None) -> list:
         return d
 
     groups: dict = {}
+    undated: list = []
     for r in rows:
-        if not in_window(r, frm, to):
+        # WINDOW AND DATABILITY ARE TWO DIFFERENT QUESTIONS, and `in_window` cannot be
+        # asked first without collapsing them. `in_window` answers False both for "this
+        # row's instant is outside the requested range" and for "this row has no usable
+        # instant at all" (`ts` absent, None, NaN, or non-numeric -- a merge artefact, a
+        # truncated import line, a JSON null). Asking it first meant the second kind was
+        # dropped by that `continue` and never reached `key_of`, never reached
+        # `undated`, and so left NO trace in the response: not a bucket, not a count, not
+        # a dollar. `store.fold_rows` counts such a row as an unpriced call; this loop
+        # has to give it the chance to, or the docstring's promise that an undatable row
+        # is "skipped and COUNTED" is a claim the function contradicts.
+        #
+        # Exempting on `ts` ALONE then overshot in the other direction. `pday` is a
+        # SEPARATE field with its own merge outcome, and `key_of` buckets on it, so a row
+        # with a dead `ts` and a live `pday` was exempted from the window and then
+        # bucketed at its own day INSIDE a window that excludes that day: a request for
+        # January 2027 emitted a bucket labelled 2026-08-06 carrying real dollars, and
+        # the same dollars appeared again in every other window asked for. The window is
+        # therefore applied on DATABILITY -- see `_window_disposition` -- so a dated row
+        # is tested by whichever frame it still has, and only a row that can be placed
+        # NEITHER way is exempt. That one has no day to be bucketed at either, so it
+        # lands in `undated` below, exactly as the docstring promises.
+        disp = _window_disposition(r, frm, to)
+        if disp == _OUT:
             continue
-        k = key_of(r)
+        k = None if disp == _UNDATABLE else key_of(r)
         if not k:
+            undated.append(r)
             continue
+        # Reachable with no finite `ts`: a row can carry a `pday` frozen at write time
+        # while its instant is unusable. It IS dated -- it has already been TESTED
+        # against the window by that day, at its own offset -- so it is attributed to
+        # its own frozen day and labelled with that day in the output, where a reader
+        # can see it, rather than silently deleted for failing a test it cannot take.
         groups.setdefault(k, []).append(r)
-    out = []
-    for k in sorted(groups):
-        f = store.fold_rows(groups[k])
-        out.append({"bucket": k, "grain": "call",
-                    "measured": f["measured"], "estimated": f["estimated"],
-                    # Two columns or nothing — see report_breakdown.
-                    "events": {"measured": f["measured"]["calls"],
-                               "estimated": f["estimated"]["calls"]},
-                    "unpriced_calls": f["unpriced_calls"]})
+
+    def _point(key, group, undatable=False):
+        f = store.fold_rows(group)
+        # NO scalar `calls` here. It would equal measured.calls + estimated.calls, and
+        # a field produced by reading BOTH a measured and an estimated accumulator is
+        # the one thing this API may never emit -- the invariant is asserted
+        # structurally over the live response in test_reporting.py. Two columns or
+        # nothing; `events` is the two columns.
+        # Case 7 applies to a BUCKET exactly as it applies to a window, and the day-grain
+        # bucket covers exactly the rows the ladder's Today row covers -- so publishing
+        # the raw accumulators put "withheld ... so no dollar figure is claimed" and
+        # "$0.02 | $0.02" on one screen for the SAME calls. Only the DOLLARS are
+        # withheld; the counts are exact and survive.
+        return {"bucket": key, "grain": "call", "undatable": undatable,
+                "measured": _withhold_dollars(f["measured"], f["dollars_suppressed"]),
+                "estimated": _withhold_dollars(f["estimated"], f["dollars_suppressed"]),
+                "dollars_suppressed": bool(f["dollars_suppressed"]),
+                # Two columns or nothing — see report_breakdown. ROWS SEEN, not rows
+                # PRICED: the trailing `undated` point holds rows `derive_row` refuses to
+                # price, so reading `calls` here made that point report 0 measured and 0
+                # estimated events beside its own non-zero `unpriced_calls` — a bucket that
+                # exists only because rows are in it, asserting that it holds none.
+                "events": f["events"],
+                "unpriced_calls": f["unpriced_calls"]}
+
+    out = [_point(k, groups[k]) for k in sorted(groups)]
+    if undated:
+        # LAST, and flagged. It carries no date because none could be derived; a
+        # renderer must label it rather than plot it, and a reader must not add it to a
+        # dated total. Dropping it silently would shrink the denominator with no trace,
+        # which is the same concealment as printing $0.00 for an unpriceable model.
+        out.append(_point("undated", undated, undatable=True))
     return out
 
 

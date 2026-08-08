@@ -6,14 +6,16 @@
 // screenshot for problems" into something mechanical, which is the only way it stays
 // true after the tenth change.
 
-const fs = require('fs');
-const path = require('path');
 const base = require('@playwright/test');
 
-const SANDBOX = path.resolve(__dirname, '..', '..', '.playwright-tmp');
+// The data sandbox lives outside the repo (validated OS temp root, namespaced by user AND
+// by checkout) — see the comment block in ./seed.js for why each of those matters. Import
+// the path and the reader rather than duplicating the namespacing or the file layout:
+// seed.json holds the dashboard token and is written 0600 by the seeder.
+const { SANDBOX, readSeedInfo } = require('./seed');
 
 function seedInfo() {
-  return JSON.parse(fs.readFileSync(path.join(SANDBOX, 'seed.json'), 'utf8'));
+  return readSeedInfo();
 }
 
 // Console noise that is genuinely not a defect. Kept deliberately SHORT and specific —

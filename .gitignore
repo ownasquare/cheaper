@@ -11,12 +11,23 @@ venv/
 .DS_Store
 docs/handoffs/
 
-# Playwright: the seeded sandbox, the captured PNGs for human review, and the HTML
-# report. All are rebuilt from scratch on every run — `tests/e2e/seed.js` wipes and
-# re-seeds the sandbox — so committing them would just be stale bytes.
+# Playwright: captured PNGs for human review, test artifacts (traces/failure
+# screenshots), and the HTML report. All are rebuilt from scratch on every run so
+# committing them would just be stale bytes.
 # The screenshot BASELINES under tests/e2e/*-snapshots/ are NOT ignored: those are the
 # comparison targets and must be versioned.
-.playwright-tmp/
+#
+# NOTE: the seeded DATA sandbox (auth token + metrics DB + event store) no longer lives
+# under the repo at all — tests/e2e/seed.js puts it at
+# <validated-temp-root>/cheaper-e2e-<uid>-<checkout-hash>, specifically so a repo-scoped
+# `git clean` or a deploy automation walking this tree can never touch it. The checkout
+# hash keeps concurrent worktrees from wiping each other's live run.
+#
+# There is intentionally NO ignore rule for it here, and adding one would be a mistake:
+# seed.js hard-rejects any sandbox path that resolves inside this repo (that is how a
+# hostile TMPDIR of "." is caught), so a `cheaper-e2e-*` directory showing up in
+# `git status` means a guard has failed and must be seen, not hidden.
+.playwright-artifacts/
 .playwright-shots/
 .playwright-report/
 test-results/

@@ -115,7 +115,8 @@ test.describe('measured vs estimated', () => {
 
 test.describe('freshness', () => {
   test('/healthz.code_sha equals the hash the CLI computes over the same files',
-    async ({ request }) => {
+    async ({ request, seed }) => {
+      const fs = require('fs');
       const { spawnSync } = require('child_process');
       const path = require('path');
       const j = await (await request.get('/healthz')).json();
@@ -125,11 +126,39 @@ test.describe('freshness', () => {
         `process.stdout.write(String(require(${JSON.stringify(cliPath)}).gatewayCodeHash(${JSON.stringify(gwPath)})))`],
         { encoding: 'utf8' });
       expect(r.status).toBe(0);
-      // The two hashers must cover the SAME file set in the SAME order, or `cheaper
-      // status` and the self-heal on `gateway start` always-differ — a permanent false
-      // alarm, which is worse than no check because people learn to ignore it.
-      expect(j.code_sha, 'gateway/_code_sha() and freshness.js/gatewayCodeHash() disagree')
-        .toBe(r.stdout.trim());
+
+      // TWO different things make this fail, and they need different responses, so name
+      // the one that actually happened instead of printing two opaque digests.
+      //
+      //   (a) the hashers drifted — _code_sha() in app.py and gatewayCodeHash() in
+      //       freshness.js stopped covering the same file set, extensions or order.
+      //       A real, permanent defect: `cheaper status` and the self-heal on `gateway
+      //       start` then ALWAYS report drift, which is worse than no check at all
+      //       because people learn to ignore it.
+      //   (b) a gateway/app file was edited AFTER this run's uvicorn imported it.
+      //       CODE_SHA is a module-level constant frozen at import (app.py), which is
+      //       the whole point — it fingerprints what the process is RUNNING, not what
+      //       is on disk. So the gateway is genuinely stale and the check is correct;
+      //       the suite just needs restarting. This is routine when something else is
+      //       editing the repo while the suite runs, and it cost real time to diagnose
+      //       from a bare digest mismatch: it failed in all five projects at once,
+      //       which reads exactly like (a).
+      //
+      // seed.now is stamped when playwright.config.js seeded the sandbox, immediately
+      // before uvicorn was launched — so an app file newer than it was edited mid-run.
+      const touched = fs.readdirSync(path.join(gwPath, 'app'))
+        .filter((f) => /\.(py|json|html)$/.test(f))
+        .filter((f) => {
+          try { return fs.statSync(path.join(gwPath, 'app', f)).mtimeMs > seed.now; }
+          catch { return false; }
+        });
+      const why = touched.length
+        ? `these gateway/app files were edited AFTER this run's uvicorn imported them, ` +
+          `so the process is legitimately stale — restart the suite: ${touched.join(', ')}`
+        : `no gateway/app file changed during this run, so app.py::_code_sha() and ` +
+          `freshness.js::gatewayCodeHash() have drifted apart (file set / extensions / ` +
+          `order) — a permanent false alarm in \`cheaper status\` until they match again`;
+      expect(j.code_sha, why).toBe(r.stdout.trim());
     });
 });
 

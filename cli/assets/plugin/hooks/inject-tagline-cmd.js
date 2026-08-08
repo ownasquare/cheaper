@@ -25,6 +25,10 @@
 //
 // Contract: read-only, fails silent, always exits 0. Any problem prints nothing, and
 // the policy's "omit the line if none was provided" instruction still stands.
+//
+// "Any problem prints nothing" is enforced by acceptTagline() below, not assumed.
+// The text injected here is copied verbatim into the user's reply as an
+// authoritative dollar figure, so a failed run must reach the chat as silence.
 
 const fs = require('fs');
 const os = require('os');
@@ -57,6 +61,70 @@ function resolveCheaper() {
   return null;
 }
 
+// --- What may be published as a money claim ---------------------------------
+//
+// This block is DUPLICATED VERBATIM in hooks/stop-tagline.js, deliberately. The two
+// hooks are copied into three separate installed trees (product source,
+// ~/.cheaper/marketplace/..., and Claude Code's plugin cache) and only hooks.json
+// names which files run, so a shared `require()` between them would turn any copy
+// that shipped one file without the other into a module-load crash on every turn.
+// A twenty-line duplicate is cheaper than that failure mode; the test suite pins the
+// two copies to identical behavior (see cli/test/inject_tagline.test.js).
+//
+// WHY IT EXISTS. `spawnSync` hands back whatever bytes the child managed to write
+// BEFORE it died — on the 8 s timeout below, on a non-zero exit, and on a crash. The
+// old code read `r.stdout` and inspected neither `status`, nor `signal`, nor `error`.
+// The "take the last non-empty line" rule below made that strictly worse HERE than in
+// the Stop hook: on a crash the last non-empty line of the child's output is the last
+// STACK FRAME, which was then injected as the finished savings line for the model to
+// paste verbatim into the user's reply.
+//
+// Two independent conditions, BOTH required — see acceptTagline():
+//
+//   1. CLEAN RUN. No spawn error, no terminating signal, exit status exactly 0.
+//      Bytes from a killed or failing child are not a measurement, however
+//      well-formed they look. This runs FIRST, which is what disarms the
+//      last-line rule: a crash never gets as far as line selection.
+//   2. WELL-FORMED (looksLikeTagline). The bytes must still parse as this line's
+//      grammar. Belt and braces on purpose: a child can exit 0 and still print
+//      something that is not a savings line.
+//
+// Silence is always the correct fallback. A missing line is a missing feature the
+// user can notice; a wrong number is a claim they have no way to check.
+
+// A COMPLETE rendered amount. `money()` in cli/src/peek/tagline.js emits "$0.42"
+// (2 dp under $100) or "$1,234" (0 dp at/above $100) — nothing else. So "$0.4",
+// "$1,23", "$1234" and a bare "$" are all truncations or foreign text.
+const AMOUNT = /\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?(?![\d.,])/g;
+
+function looksLikeTagline(s) {
+  if (!s) return false;
+  // The brand token, in every form tagline.js renders it: plain `Cheaper.app`,
+  // markdown `[Cheaper.app](…)`, and the OSC-8 ANSI wrapper — all three contain the
+  // literal token. The lifetime-only emission (`buildTagline` returned '' but the
+  // ledger has a running total) carries no brand token, so it is named explicitly
+  // rather than being silently dropped.
+  if (!/Cheaper\.app/.test(s) && !/^Lifetime savings:/.test(s)) return false;
+  // EVERY `$` must begin a complete amount — not merely "one complete amount
+  // exists". A line cut mid-write keeps its first, well-formed figure and truncates
+  // the last one, so an any-match rule would wave exactly that case through. Lines
+  // with no `$` at all are legitimate: the honest "ran this chat on <model> — no
+  // routing saving to claim." emission makes no money claim and needs no amount.
+  return (s.match(/\$/g) || []).length === (s.match(AMOUNT) || []).length;
+}
+
+// `r` is a spawnSync result. Anything other than a clean, well-formed run yields ''.
+function acceptTagline(r) {
+  if (!r || r.error || r.signal || r.status !== 0) return '';
+  const out = String(r.stdout == null ? '' : r.stdout).trim();
+  if (!out) return '';
+  // The CLI prints exactly one line; take the last non-empty one defensively so a
+  // stray notice ahead of it can never be published in its place.
+  const lines = out.split('\n').map((s) => s.trim()).filter(Boolean);
+  const line = lines.length ? lines[lines.length - 1] : '';
+  return looksLikeTagline(line) ? line : '';
+}
+
 // Render the line for this chat. Markdown so "Cheaper.app" and "See logs" stay live
 // links in the chat UI — this is the exact string the user ends up seeing.
 function taglineFor(transcript) {
@@ -69,11 +137,7 @@ function taglineFor(transcript) {
       ? spawnSync(process.execPath, [bin, ...args], opts)
       : spawnSync('cheaper', args, opts);
   } catch { return ''; }
-  const out = ((r && r.stdout) || '').trim();
-  // The CLI prints exactly one line; take the last non-empty one defensively so a
-  // stray notice could never be pasted into the user's reply as if it were the line.
-  const lines = out.split('\n').map((s) => s.trim()).filter(Boolean);
-  return lines.length ? lines[lines.length - 1] : '';
+  return acceptTagline(r);
 }
 
 let ev = {};

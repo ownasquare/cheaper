@@ -29,11 +29,14 @@ Pure stdlib. No dollar figure is ever stored; dollars are derived per row, here.
 
 from __future__ import annotations
 
+import errno
+import gzip
 import hashlib
 import json
 import math
 import os
 import re
+import zlib
 from datetime import datetime, timezone
 
 import periods
@@ -52,6 +55,9 @@ REASON_SERVED_UNPRICEABLE = "served_not_in_catalog"
 REASON_BASE_UNPRICEABLE = "baseline_not_in_catalog"
 REASON_NO_BASE = "no_baseline"
 REASON_COST_NULL = "cost_unavailable"
+# The counterfactual arm's PROMPT-CACHE STATE is not recoverable from the record.
+# See cache_state_indeterminate below -- this is a withholding, not a zero.
+REASON_CACHE_INDETERMINATE = "cache_state_indeterminate"
 
 REASONS = {
     "NON_2XX": REASON_NON_2XX,
@@ -60,6 +66,7 @@ REASONS = {
     "BASE_UNPRICEABLE": REASON_BASE_UNPRICEABLE,
     "NO_BASE": REASON_NO_BASE,
     "COST_NULL": REASON_COST_NULL,
+    "CACHE_INDETERMINATE": REASON_CACHE_INDETERMINATE,
 }
 
 # The full stored row schema (cli/src/peek/emit.js). Listed so a reader can see what a
@@ -161,6 +168,15 @@ def list_segments(directory: str | None = None) -> list:
     folder produce ``2026-08.9a41c0d7.cli (conflicted copy).jsonl``; a reader that looks
     up an exact filename never opens it and silently loses a month. Globbing folds the
     conflicted copy through dedupe instead.
+
+    ``.jsonl.gz`` -- a month SEALED by ``cheaper compact`` -- is listed too, exactly as
+    ``listSegments`` in events.js lists it. It was not, and that was a whole-month
+    omission on this side alone: the CLI reads a sealed month and the gateway did not,
+    so the same store answered two different lifetime totals depending only on which
+    surface asked, and the gap opened silently the first time a user ran ``compact``.
+    Retention keeps raw events forever, gzipped, because an audit log that discards its
+    evidence to save a few megabytes is not an audit log -- and a reader that cannot
+    open that evidence is the same failure one layer up.
     """
     d = directory or events_dir()
     try:
@@ -169,7 +185,9 @@ def list_segments(directory: str | None = None) -> list:
         return []
     out = []
     for n in names:
-        if not n.lower().endswith(".jsonl"):
+        low = n.lower()
+        gz = low.endswith(".jsonl.gz")
+        if not gz and not low.endswith(".jsonl"):
             continue
         try:
             st = os.stat(os.path.join(d, n))
@@ -182,9 +200,14 @@ def list_segments(directory: str | None = None) -> list:
             "ym": m.group(1) if m else None,
             "size": st.st_size,
             "mtime": st.st_mtime * 1000.0,
-            # Filename is YYYY-MM.<install>.<writer>.jsonl; anything not ending
-            # `.gw.jsonl` was written by the Node CLI.
-            "writer": "gw" if n.lower().endswith(".gw.jsonl") else "cli",
+            "gz": gz,
+            # Filename is YYYY-MM.<install>.<writer>.jsonl[.gz]; anything not ending
+            # `.gw.jsonl` (sealed or not) was written by the Node CLI. The `.gz` half of
+            # this test mirrors `/\.gw\.jsonl(\.gz)?$/i` in events.js -- without it a
+            # sealed gateway month would be attributed to the CLI writer, which is the
+            # field `fold`'s stale-writer quarantine keys on.
+            "writer": ("gw" if (low.endswith(".gw.jsonl") or low.endswith(".gw.jsonl.gz"))
+                       else "cli"),
         })
     out.sort(key=lambda s: (s["ym"] or "", s["mtime"]), reverse=True)
     return out
@@ -198,13 +221,52 @@ def read_segment(file: str, on_row) -> dict:
     non-empty it is a partial record -- skip it AND count it as ``partial_tail``. This
     is an explicit, tested path rather than an incidental try/except: a silently
     dropped tail is indistinguishable from "there was no activity".
+
+    A segment whose BYTES cannot be obtained is LABELLED, never returned as an empty
+    one. The old single ``except OSError: return stats`` answered "0 rows" -- while
+    ``read_all`` still counted the segment -- so "1 segment read, 0 rows" meant either
+    "a genuinely quiet month" or "a segment this process could not open", with nothing
+    on the surface able to tell them apart. That is the same class of silence as a
+    dropped tail, so it gets the same treatment: two named counters, mirroring
+    ``events.js::readSegment`` field-for-field.
+
+      ``unreadable``  the file could not be read AT ALL -- a restore that lost the mode
+                      bits, a hostile umask, a half-synced file, a name that is now a
+                      directory.
+      ``corrupt``     the bytes were read but the gzip did not inflate. A sealed month
+                      is written whole and verified before its sources are unlinked, so
+                      it is never torn -- but a truncated ``.gz`` must still not raise
+                      here, and must not be indistinguishable from a sealed month that
+                      happened to hold nothing.
+
+    Neither is a new dollar figure; both are the label that stops a truncated read from
+    passing for a complete one (invariant 7).
+
+    Bytes are decoded with ``errors="replace"``, matching JS ``Buffer.toString('utf8')``
+    -- which substitutes U+FFFD rather than throwing. Reading in TEXT mode raised
+    ``UnicodeDecodeError`` (a ``ValueError``, NOT an ``OSError``) on a single bad byte,
+    so it escaped the guard entirely and took ``read_all`` -- and the whole reporting
+    endpoint -- down with it, where the CLI merely mangled one line.
     """
-    stats = {"rows": 0, "bad": 0, "partial_tail": 0, "future_schema": 0, "bytes": 0}
+    stats = {"rows": 0, "bad": 0, "partial_tail": 0, "future_schema": 0, "bytes": 0,
+             "unreadable": 0, "corrupt": 0}
     try:
-        with open(file, encoding="utf-8") as fh:
-            raw = fh.read()
+        with open(file, "rb") as fh:
+            data = fh.read()
     except OSError:
+        stats["unreadable"] = 1
         return stats
+    if file.lower().endswith(".gz"):
+        # gzip raises BadGzipFile (an OSError) on a bad header, EOFError on a truncated
+        # member and zlib.error on a corrupt payload. All three are the SAME claim --
+        # "these bytes are not an inflatable segment" -- and all three are `corrupt`,
+        # never a quiet month.
+        try:
+            data = gzip.decompress(data)
+        except (OSError, EOFError, zlib.error, ValueError):
+            stats["corrupt"] = 1
+            return stats
+    raw = data.decode("utf-8", "replace")
     stats["bytes"] = len(raw.encode("utf-8"))
     parts = raw.split("\n")
     tail = parts.pop()                      # '' when the file ends in \n
@@ -260,7 +322,7 @@ def read_all(directory: str | None = None, since_ms: int | float | None = None) 
     segs = list_segments(d)
     rows: list = []
     stats = {"segments": 0, "rows": 0, "bad": 0, "partial_tail": 0,
-             "future_schema": 0, "bytes": 0}
+             "future_schema": 0, "bytes": 0, "unreadable": 0, "corrupt": 0}
     for seg in segs:
         if since_ms and seg["ym"]:
             try:
@@ -276,7 +338,12 @@ def read_all(directory: str | None = None, since_ms: int | float | None = None) 
             rows.append(o)
 
         s = read_segment(seg["file"], _collect)
-        for k in ("rows", "bad", "partial_tail", "future_schema", "bytes"):
+        # `unreadable` and `corrupt` are PROPAGATED, not absorbed: `stats["segments"]`
+        # was already incremented above, so without these a segment nobody could open
+        # reported as a segment that simply held no rows. Same list as
+        # `events.js::readAll`, and the same reason.
+        for k in ("rows", "bad", "partial_tail", "future_schema", "bytes",
+                  "unreadable", "corrupt"):
             stats[k] += s[k]
     return {"rows": rows, "stats": stats}
 
@@ -301,6 +368,144 @@ def total_tokens(r: dict) -> int:
     r = r or {}
     return (_num0(r.get("in")) + _num0(r.get("out")) + _num0(r.get("cr"))
             + _num0(r.get("c5")) + _num0(r.get("c1")) + _num0(r.get("cu")))
+
+
+def cache_created(r: dict) -> int:
+    """Every cache WRITE on the row, whatever its TTL.
+
+    ``cu`` is an unknown-TTL write; all three bill at a write rate, and it is the
+    write/read distinction -- not the TTL -- that the counterfactual turns on. Mirror of
+    ``cli/src/peek/derive.js::cacheCreated``.
+    """
+    r = r or {}
+    return _num0(r.get("c5")) + _num0(r.get("c1")) + _num0(r.get("cu"))
+
+
+# ---- the counterfactual arm's PROMPT-CACHE STATE ------------------------------------
+#
+# A prompt cache is keyed on (model, exact prefix), so CHANGING MODEL INVALIDATES IT.
+# The served model starts cold and pays a cache CREATE for a prefix the un-switched
+# baseline model would still have held and merely READ.
+#
+# Both arms in ``derive_row`` are priced off ONE token split -- the SERVED arm's -- so
+# the baseline leg is charged CREATE for those tokens too. Every entry in the catalog
+# prices a write at or above a read (75/75 verified; Anthropic writes at 1.25x input
+# against 0.1x to read, a 12.5x spread -- a 200k-token prefix is $0.10 to read and $1.25
+# to rewrite on claude-opus-5). The substitution can therefore only ever move the
+# baseline UP, and the claimed saving with it. The error is ONE-DIRECTIONAL: it never
+# understates.
+#
+# It is NOT always present, and re-pricing every switched row would be the mirror-image
+# fabrication. Two shapes have to be told apart:
+#
+#   * SERVED ARM WARM (cache_read > 0). Its prefix was already resident, so the CREATE on
+#     this call is NEW content appended since the previous turn -- content the baseline
+#     model would have had to create too. Both arms pay CREATE, the served split IS the
+#     counterfactual split, and the existing pricing is exactly right. In a 22,481-row
+#     snapshot of the author's store (2026-08-07), 3,301 of the 3,380 switched
+#     cache-bearing rows were this shape, carrying $156.03 of correctly-priced credit.
+#     They are left alone.
+#
+#   * SERVED ARM COLD (cache_read == 0) WITH A CREATE. The prefix was written from
+#     scratch, and two different histories produce that byte-identical row:
+#       (a) the prefix is new to this session, so the baseline model was cold as well and
+#           would also have paid CREATE          -> the current figure is right;
+#       (b) the prefix was resident on the baseline model and the SWITCH is what forced
+#           the rewrite                          -> the current figure is overstated by
+#                                                   the whole (write - read) spread.
+#     Nothing in the event schema separates them. There is no prefix hash, no cache
+#     lineage, no per-block provenance -- providers report ONE scalar create count per
+#     call -- so (b) cannot be corrected and (a) cannot be detected.
+#
+# The honest counterfactual for a cold-start switched row is therefore an INTERVAL, and
+# in that same snapshot ALL 79 such rows had an interval that STRADDLES ZERO: $14.13 was
+# published as a confident saving on rows whose SIGN the evidence cannot settle.
+#
+# INVARIANT 4. The row makes no claim and says so. Publishing the cold end keeps a number
+# known to be biased upward; publishing the warm end asserts a cache history that is
+# exactly as unevidenced, biased downward. A LABELLED WITHHOLDING is the only one of the
+# three that is true, and ``fold_rows`` already counts it, so the exclusion is visible
+# instead of arriving as a shrunken total.
+#
+# A SESSION THAT NEVER SWITCHES IS UNTOUCHED TO THE CENT. ``served == base`` means both
+# arms are the same model on the same split, so baseline == spent and delta == 0 under
+# every cache assumption; requiring a switch means such a row can never enter this
+# branch. 14,902 of the author's 18,285 eligible rows are in that state and none moved.
+#
+# Ids are compared exactly as ``metrics.py`` compares them for ``changed``. Two ALIASES
+# of one model would read as a switch here and withhold a row whose delta is zero anyway
+# -- conservative, bounded, and not observed on any real or fixture row.
+#
+# THIS IS THE THIRD READER of the question. ``cli/src/peek/derive.js::
+# cacheStateIndeterminate`` reads the same log for the CLI and
+# ``gateway/app/metrics.py::_cache_state_indeterminate`` reads the gateway's SQLite
+# ledger; this one reads the EVENT STORE. While this reader lacked the rule the CLI
+# withheld rows that ``reporting.py`` still published -- the two runtimes disagreeing
+# about money, which is strictly worse than both being wrong the same way, because each
+# surface stays internally consistent and the gap opens silently. MUST stay
+# behaviourally identical to both; ``tests/test_store_parity.py`` executes this one and
+# derive.js over ``cli/test/fixtures/golden-events.json`` and diffs the results byte for
+# byte, and the fixture carries a cold-start-after-switch row and a warm switched row so
+# BOTH branches are exercised rather than the gate passing on absent coverage.
+#
+# The two token arguments go through ``_num0`` -- the module's ``x || 0`` coercion --
+# because the JS predicate compares RAW values with ``>``, where a string coerces
+# numerically and a non-numeric one becomes NaN (false). Python's ``>`` raises on a
+# string instead. Coercing first reproduces the JS answer for every input rather than
+# only for the ints ``derive_row`` happens to pass, and is idempotent at that call site.
+def cache_state_indeterminate(served, base, cache_read, cache_create) -> bool:
+    if not served or not base:
+        return False                            # no counterfactual to bias
+    if str(served) == str(base):
+        return False                            # NO SWITCH -> nothing invalidated
+    if not _num0(cache_create) > 0:
+        return False                            # nothing was written
+    return not _num0(cache_read) > 0            # ...and the served arm was COLD
+
+
+# ---- the representable calendar day, as ONE rule -----------------------------------
+#
+# ``pday`` is the row's frozen local calendar day. It is what ``derive_row`` prices at,
+# and it is also what ``reporting._placement`` places an instant-less row on the time
+# axis by. Those two readings have to agree about which strings name a day, or a row is
+# priced by one and undatable to the other.
+#
+# They did not. ``derive_row`` only tested that ``pday`` was TRUTHY, so a hand-edited,
+# corrupted or third-party-written segment carrying ``pday: "2026-13-45"`` -- or a numeric
+# 20260410 that stringifies to eight characters -- was PRICED, while ``_placement``
+# answered ``unplaceable`` and every window, bounded or not, excluded it. Its dollars then
+# appeared in ``fold_rows`` and in NO window, NO group, NO bucket and NO exclusion
+# counter: ``fold_rows`` over [good, malformed] reported 0.10 while ``lifetime_window``
+# over the same two rows reported 0.06, and nothing anywhere named the missing 0.04.
+# ``read_segment`` validates only that a line is a JSON dict at or below ``SCHEMA_V``, so
+# that row reaches this path from any file a user or a third-party tool can write.
+#
+# Refusing to date it here collapses that state into the ordinary ``undated`` one, where
+# every surface counts it and shows it -- rather than teaching three more call sites to
+# count a fourth state.
+#
+# MUST stay behaviourally identical to ``cli/src/peek/derive.js::isoDayMs``;
+# ``cli/scripts/check-period-parity.js`` executes both over the malformed fixtures.
+
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def iso_day_ms(pday):
+    """UTC midnight of the calendar day ``pday`` names, in epoch-ms -- or None if it
+    names none. TOTAL: it never raises, for any input of any type."""
+    if isinstance(pday, str):
+        s = pday
+    elif not pday:
+        s = ""
+    else:
+        s = str(pday)
+    if not _ISO_DAY.match(s):
+        return None
+    try:
+        return int(datetime(int(s[:4]), int(s[5:7]), int(s[8:10]),
+                            tzinfo=timezone.utc).timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def _priceable_at(model, at) -> bool:
@@ -357,7 +562,9 @@ def derive_row(r: dict) -> dict:
     out = {"priceable": False, "reason": "", "spent": None, "baseline": None,
            "delta": None, "tokens": tokens, "pday": r.get("pday")}
 
-    if not r.get("pday"):
+    # NOT `not r.get("pday")`. A truthy `pday` that names no representable calendar day
+    # is refused here rather than priced -- see iso_day_ms above.
+    if iso_day_ms(r.get("pday")) is None:
         out["reason"] = REASON_NO_TS
         return out
 
@@ -394,6 +601,23 @@ def derive_row(r: dict) -> dict:
         out["reason"] = REASON_BASE_UNPRICEABLE
         return out
 
+    # A cold-start call on a SWITCHED model has no recoverable counterfactual cache
+    # state, so it has no honest baseline -- see cache_state_indeterminate above.
+    # Withheld HERE, beside the other "one leg of the subtraction cannot be formed"
+    # cases, so the row contributes to no accumulator and `spent` still covers exactly
+    # the priceable rows.
+    #
+    # The POSITION is load-bearing, not cosmetic: derive.js applies this test after the
+    # baseline-priceability test and before pricing the baseline. A row that is BOTH a
+    # cold switch and priced against a baseline missing from the catalog must report
+    # `baseline_not_in_catalog` on both runtimes, and the parity gate compares the
+    # reason STRING, so moving this block up would diverge the two readers on exactly
+    # the rows where they are hardest to tell apart.
+    if cache_state_indeterminate(r.get("served"), r.get("base"),
+                                 _num0(r.get("cr")), cache_created(r)):
+        out["reason"] = REASON_CACHE_INDETERMINATE
+        return out
+
     # SAME call, SAME date, SAME SKU -- the only variable is the model, because the
     # model is the only thing Cheaper controls, and therefore the only thing it may
     # claim credit for.
@@ -424,18 +648,33 @@ def fold_rows(rows) -> dict:
     within one basis. Legacy chat-grain rows do not enter this function at all.
     """
     acc = {"measured": _mk_acc(), "estimated": _mk_acc()}
+    # Rows SEEN per basis -- counted BEFORE priceability, so a row whose dollars could not
+    # be derived is still counted here. `acc[basis]["calls"]` counts only PRICED rows and
+    # keeps that meaning, because the dollar-bearing logic and every existing consumer of
+    # `calls` depends on it; `seen` is added ALONGSIDE it, never in place of it.
+    #
+    # Mirror of `cli/src/peek/derive.js::foldRows`'s own `seen` counter, which has counted
+    # rows-seen since it was written. Reporting `calls` as the `events` field made the
+    # gateway's `events` mean ROWS PRICED while the CLI's meant ROWS SEEN -- one field
+    # name, two meanings, published under the same key to the same consumers by
+    # `cheaper reports --json` depending only on whether the gateway happened to answer.
+    # It also made a window render "Events (measured) = 0" directly above its own note
+    # saying "1 of 1 call(s) in this window ... Call and token counts are exact."
+    seen = {"measured": 0, "estimated": 0}
     unpriced: dict = {}
     unpriced_tokens = 0
     total_tokens_seen = 0
 
     for r in (rows or []):
         d = derive_row(r)
+        basis = "measured" if (r or {}).get("conf") == "measured" else "estimated"
+        seen[basis] += 1
         total_tokens_seen += d["tokens"]
         if not d["priceable"]:
             unpriced[d["reason"]] = unpriced.get(d["reason"], 0) + 1
             unpriced_tokens += d["tokens"]
             continue
-        a = acc["measured"] if (r or {}).get("conf") == "measured" else acc["estimated"]
+        a = acc[basis]
         a["calls"] += 1
         a["tokens"] += d["tokens"]
         a["spent"] += d["spent"] or 0
@@ -453,6 +692,13 @@ def fold_rows(rows) -> dict:
     return {
         "measured": acc["measured"],
         "estimated": acc["estimated"],
+        # Every row seen, split by basis, INCLUDING the ones whose dollars could not be
+        # derived. The accumulators above only count PRICEABLE rows, so reporting their
+        # `calls` as "events" made a window read "0 events" directly above a note saying
+        # "1 of 1 call in this window is not in the price catalog". The money is withheld;
+        # the count is not in doubt. Byte-identical in shape and meaning to
+        # `derive.js::foldRows().events`.
+        "events": {"measured": seen["measured"], "estimated": seen["estimated"]},
         "unpriced": unpriced,
         "unpriced_calls": sum(unpriced.values()),
         "unpriced_tokens": unpriced_tokens,
@@ -698,20 +944,67 @@ def state_path() -> str:
     return os.path.join(events_dir(), "state.json")
 
 
+def _empty_state() -> dict:
+    return {"v": STATE_V, "coverage": [], "tombstones": [], "ingested_files": []}
+
+
 def load_state() -> dict:
+    """THREE dispositions of a state file, kept DISTINCT.
+
+    Mirror of ``cli/src/peek/store.js::loadState``. They used to collapse into one
+    ``except (OSError, ValueError)`` that returned an empty document, and "there is no
+    state file", "the state file could not be read" and "the state file is from the
+    future" are different claims with opposite consequences:
+
+      ABSENT      benign, and the ONLY benign one. A store that never declared coverage
+                  has nothing to lose, and ``implied_coverage()`` still speaks for the
+                  events themselves -- which is why a first run reports normally.
+      UNREADABLE  a permission or I/O error, a truncated document, a non-JSON document,
+                  or a JSON value that is not an object (``null`` and ``[]`` both parse).
+                  That file may hold TOMBSTONES -- the record that a user asked for a
+                  chat to be excluded from every total -- so reading it as "no
+                  tombstones" SILENTLY RE-ADMITS data the user deleted, with the totals
+                  simply going back up and nothing anywhere saying why.
+                  It is a labelled refusal, never an empty state (invariant 7: a "report
+                  nothing" case returns a LABEL, never a number).
+      TOO NEW     written by a Cheaper that knows fields this one does not. Already a
+                  visible refusal here, and kept so all three sit in one place.
+
+    ``unreadable`` carries the REASON (an errno NAME, or which parse step refused)
+    because "state.json is corrupt" and "state.json is not readable by this user" need
+    different answers from the person holding the terminal.
+    ``reporting.report_window`` turns both non-benign dispositions into a suppressed
+    window with a stated label, exactly as ``reportWindow`` does in the CLI.
+    """
     try:
-        with open(state_path(), encoding="utf-8") as fh:
-            j = json.load(fh)
-    except (OSError, ValueError):
-        return {"v": STATE_V, "coverage": [], "tombstones": [], "ingested_files": []}
+        with open(state_path(), "rb") as fh:
+            # Decoded with `errors="replace"`, matching `fs.readFileSync(p, 'utf8')`,
+            # which substitutes U+FFFD rather than throwing. In TEXT mode a single
+            # non-UTF-8 byte raised UnicodeDecodeError -- a ValueError, so it escaped the
+            # OSError guard entirely and propagated out of a read the CLI completes -- and
+            # it would also have minted a FOURTH `unreadable` reason ("undecodable") that
+            # the JS twin cannot produce. Replacement lands it in `unparseable` on both
+            # sides, which is the same claim reached the same way.
+            raw = fh.read().decode("utf-8", "replace")
+    except OSError as e:
+        code = errno.errorcode.get(e.errno, "read_failed") if e.errno else "read_failed"
+        # ENOENT: no file. ENOTDIR: the events dir itself does not exist yet -- the same
+        # "nothing has been written here" claim, reached one level up.
+        if code in ("ENOENT", "ENOTDIR"):
+            return _empty_state()
+        return dict(_empty_state(), unreadable=code)
+    try:
+        j = json.loads(raw)
+    except ValueError:
+        return dict(_empty_state(), unreadable="unparseable")
     if not isinstance(j, dict):
-        return {"v": STATE_V, "coverage": [], "tombstones": [], "ingested_files": []}
+        return dict(_empty_state(), unreadable="not_an_object")
     v = _js_number(j.get("v"))
     if v is not None and v > STATE_V:
         # A state file from a NEWER writer is a VISIBLE REFUSAL, never a silent reset.
         return {"v": j.get("v"), "too_new": True, "coverage": [], "tombstones": [],
                 "ingested_files": []}
-    base = {"v": STATE_V, "coverage": [], "tombstones": [], "ingested_files": []}
+    base = _empty_state()
     base.update(j)
     return base
 
@@ -883,7 +1176,7 @@ def pday_of(ts_ms, tzo_minutes):
 __all__ = [
     "SCHEMA_V", "STATE_V", "REASONS", "ROW_FIELDS",
     "num0", "events_dir", "is_strong_key", "list_segments", "read_segment", "read_all",
-    "tokens_of", "total_tokens", "derive_row", "fold_rows",
+    "tokens_of", "total_tokens", "iso_day_ms", "derive_row", "fold_rows",
     "TOKEN", "GW_ONLY", "TX_ONLY", "FIELDS", "SRC_TX", "SRC_GW", "SRC_LEGACY",
     "mask_of", "rank", "elect_owner", "merge", "fold",
     "state_path", "load_state", "coverage_for", "implied_coverage", "IMPLIED_PAD_MS",

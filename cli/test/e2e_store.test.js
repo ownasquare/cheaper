@@ -81,6 +81,20 @@ function cli(home, args) {
   return { code: r.status, out: r.stdout || '', err: r.stderr || '' };
 }
 
+// A moment guaranteed to land in "today"'s ladder row in the machine's OWN local
+// timezone, regardless of what real wall-clock instant the suite happens to run at.
+// `Date.now() - 3600000` ("an hour ago") is NOT that: it reads as today only if local
+// midnight did not fall within the last hour, which is false close to a third of the
+// time at TZ=Asia/Kolkata (+05:30) and TZ=Asia/Kathmandu (+05:45) relative to a
+// UTC-anchored CI schedule, and is exactly the flake this helper closes. Local NOON of
+// the current calendar day is maximally far from either midnight edge, so the fixture's
+// timestamp and the CLI subprocess's own "today" bucket boundary -- both derived from
+// the SAME real moment via the SAME inherited TZ env var -- agree by construction.
+function localNoonToday() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0, 0).getTime();
+}
+
 test('E2E: a transcript becomes per-call events, and the savings land on the day the '
    + 'CALLS happened — not the day the tagline ran', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cheaper-e2e-'));
@@ -218,7 +232,10 @@ test('E2E: `cheaper import --dry-run` previews without writing, then the real ru
 test('E2E: `cheaper forget` drops a session WITH a stated reason', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cheaper-e2e5-'));
   const sessionId = 'dddddddd-1111-2222-3333-888888888888';
-  const transcript = writeFixture(home, sessionId, Date.now() - 3600000);
+  // Pinned to local noon today (not `Date.now() - 3600000`) so the fixture lands in
+  // "today"'s ladder row -- and the assertion below agrees with it -- in every
+  // timezone. See `localNoonToday()`.
+  const transcript = writeFixture(home, sessionId, localNoonToday());
   cli(home, ['peek', '--tagline', '--transcript', transcript, '--format', 'plain', '--json']);
 
   const t = JSON.parse(cli(home, ['forget', '--session', sessionId, '--json']).out);

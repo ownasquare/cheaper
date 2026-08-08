@@ -70,8 +70,68 @@ const HELP = `
     cheaper monitor
 `;
 
+// Per-subcommand help, SLICED OUT OF `HELP` rather than duplicated.
+//
+// `cheaper <cmd> --help` used to fall straight through to the subcommand, which at
+// best ignored the flag and at worst acted on it: `cheaper install --help` dropped
+// into the interactive component picker and sat there waiting for a keystroke, so
+// the single most reflexive way to ask a CLI what it does was the one way to hang it.
+//
+// The text is EXTRACTED from the same string `cheaper --help` prints, deliberately.
+// A second hand-maintained copy is a guaranteed future drift — the help would then
+// disagree with itself depending on which way you asked.
+//
+// An entry in the Commands block starts at exactly 4 spaces; its continuation lines
+// are indented deeper. The entry's "head" is everything before the first run of 2+
+// spaces — that gap is what separates a name from its description in this layout.
+//
+// A head containing `|` is an ALIAS LIST and every branch of it is a command name
+// (`dashboard | reports | logs | monitor` → all four). Otherwise only the FIRST token
+// names the command, and the rest is argument syntax: `import --since D` declares
+// `import`, `install [skill …]` declares `install`, and `gateway start` declares
+// `gateway` — not `start`, and not `status` for `gateway status`, which would
+// otherwise have made `cheaper status --help` print an unrelated second entry.
+function commandHelp(cmd) {
+  const lines = HELP.split('\n');
+  const from = lines.findIndex((l) => l.includes('Commands'));
+  if (from === -1) return null;
+  let to = lines.findIndex((l, i) => i > from && l.includes('Quickstart'));
+  if (to === -1) to = lines.length;
+
+  const namesOf = (entry) => {
+    const head = entry.slice(4).split(/ {2,}/)[0];
+    const toks = head.split(/[\s|,]+/).filter(Boolean).map((t) => t.toLowerCase());
+    return head.includes('|') ? toks : toks.slice(0, 1);
+  };
+
+  const out = [];
+  let capturing = false;
+  for (const line of lines.slice(from + 1, to)) {
+    if (/^ {4}\S/.test(line)) capturing = namesOf(line).includes(cmd);
+    else if (!/^ {5,}\S/.test(line)) capturing = false;   // blank or dedented → entry over
+    if (capturing) out.push(line);
+  }
+  return out.length ? out.join('\n') : null;
+}
+
 async function main() {
   const [, , cmd, ...rest] = process.argv;
+
+  // Intercept BEFORE dispatch. Only the exact flags — a bare `help` is left alone in
+  // case a subcommand ever takes it as a positional argument.
+  if (cmd && (rest.includes('--help') || rest.includes('-h'))) {
+    const section = commandHelp(cmd);
+    if (section) {
+      console.log('\n  ' + c.bold('cheaper ' + cmd) + '\n');
+      console.log(section);
+      console.log('');
+    } else {
+      // No entry of its own (an alias like `launch`/`init`, or an unknown command):
+      // show everything rather than nothing.
+      console.log(HELP);
+    }
+    return;
+  }
 
   switch (cmd) {
     case 'install':

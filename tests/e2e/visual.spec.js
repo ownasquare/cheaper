@@ -19,37 +19,117 @@ const TABS = ['dashboard', 'reports', 'logs', 'monitor'];
 //   #trendWrap    bucketed on each call's own local DAY, and the fixture is seeded
 //                 relative to `now`, so the day labels shift every run
 //   #recentBody / #sessions   live feeds carrying wall-clock times
+//   #provenance   "catalog dated 2026-08-06 (N days ago)" — N is recomputed against the
+//                 wall clock, so this string changes ON ITS OWN with no code change at
+//                 all. It cost a real debugging detour: every tablet #dashboard baseline
+//                 started failing mid-session with identical 810x1080 dimensions and a
+//                 pixel diff confined to the footer, which reads exactly like a UI
+//                 regression — the catalog had simply aged from "1 day ago" to "2 days
+//                 ago" (the age is derived in UTC, so it ticks over at 17:00 local, not
+//                 at local midnight, which is why it landed mid-afternoon).
+//                 Masking it drops the only coverage this line had, so the rendering test
+//                 now asserts its TEXT directly — a stronger check than the pixels were,
+//                 because it survives every re-baseline.
+//                 NOT fixed by masking: past dashboard.html's STALE_DAYS threshold this
+//                 element grows an extra warning sentence, and a taller footer reflows
+//                 the page below it. Expect a one-off re-baseline on that day; it is a
+//                 real content change, not flake.
 //
 // Masked, not loosened: raising maxDiffPixelRatio to swallow these would also swallow a
 // real regression anywhere else on the page. Everything outside these boxes is compared
 // strictly, and the LAYOUT of the masked regions is still asserted by the overflow,
 // clipping and collapsed-box checks above.
 function volatileRegions(page) {
-  return ['#statusText', '#sparkWrap', '#trendWrap', '#recentBody', '#sessions', '.sago']
+  return ['#statusText', '#sparkWrap', '#trendWrap', '#recentBody', '#sessions', '.sago',
+          '#provenance']
     .map((sel) => page.locator(sel));
 }
 
-// A page must never scroll sideways. Horizontal overflow is the single most common
+// The provenance line states the BASIS of every dollar on the page. It is masked out of
+// the pixel comparison above (its "N days ago" moves on its own), so assert it here or
+// the product's central honesty disclaimer would have no test at all.
+async function expectProvenanceStated(page, where) {
+  const el = page.locator('#provenance');
+  await expect(el, `${where}: the pricing-basis line is missing`).toBeVisible();
+  const txt = (await el.innerText()).trim();
+  // Either the real basis statement, or the explicit "we could not price this" fallback —
+  // never a blank line, and never a bare figure with no stated basis.
+  if (/Pricing module unavailable/i.test(txt)) {
+    expect(txt, `${where}: the unpriced fallback must say the figures are not dollars`)
+      .toMatch(/not real dollars/i);
+    return;
+  }
+  expect(txt, `${where}: provenance must name the catalog it priced from`)
+    .toMatch(/published list prices from the catalog dated \d{4}-\d{2}-\d{2}/);
+  // The limits of the claim, which is the part a reader acts on.
+  expect(txt, `${where}: provenance must disclaim negotiated rates`)
+    .toMatch(/negotiated discounts, credits and flat-rate plans are not modelled/);
+}
+
+// A page must never spill sideways. Horizontal overflow is the single most common
 // responsive defect and it is invisible in a full-page screenshot.
+//
+// This USED to be `documentElement.scrollWidth <= window.innerWidth + 1`, and that
+// assertion could not fail. dashboard.html sets `html,body{overflow-x:hidden}` (line 27),
+// which CLIPS the overflow, and a clipped scroll container reports
+// `scrollWidth === clientWidth` by definition — so the number being compared was the
+// viewport width measured twice. The per-element `worst` offender below was already
+// being computed, purely to decorate a message that could never be printed.
+//
+// The clipping is exactly what makes it worth asserting: content past the right edge is
+// not scrollable-to on a touch device, it is simply GONE, with no scrollbar to hint that
+// anything is missing. The tablet `#reports` capture was 821px of content in an 810px
+// viewport — 11px silently cut — while this function reported the page clean.
+//
+// So measure the elements instead of asking the (clipped) scroller. Anything inside a
+// container that scrolls ON PURPOSE is exempt: `.table-wrap` and `.trend-scroll` are
+// `overflow-x:auto` precisely so a phone user can swipe to the hidden columns, and their
+// contents are deliberately wider than the viewport. Everything else must fit.
 async function expectNoHorizontalOverflow(page, where) {
-  const o = await page.evaluate(() => ({
-    doc: document.documentElement.scrollWidth,
-    win: window.innerWidth,
-    // The widest offender, so the failure names the element instead of a number.
-    worst: (() => {
-      let worst = null; let max = 0;
-      for (const el of document.querySelectorAll('body *')) {
-        const r = el.getBoundingClientRect();
-        if (r.width === 0) continue;
-        const over = r.right - document.documentElement.clientWidth;
-        if (over > max) { max = over; worst = el.tagName + (el.id ? '#' + el.id : '') + '.' + String(el.className || '').split(' ')[0]; }
+  const o = await page.evaluate(() => {
+    const vw = document.documentElement.clientWidth;
+    const inScroller = (el) => {
+      for (let n = el.parentElement; n && n !== document.documentElement; n = n.parentElement) {
+        const ox = getComputedStyle(n).overflowX;
+        if (ox === 'auto' || ox === 'scroll') return true;
       }
-      return { worst, over: Math.round(max) };
-    })(),
-  }));
-  // Elements inside an .table-wrap scroll on purpose; the DOCUMENT must not.
-  expect(o.doc, `${where}: the page scrolls horizontally (worst: ${o.worst.worst} by ${o.worst.over}px)`)
-    .toBeLessThanOrEqual(o.win + 1);
+      return false;
+    };
+    const offenders = [];
+    for (const el of document.querySelectorAll('body *')) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      // A fixed/sticky decoration positioned off-canvas (an off-screen drawer) is not
+      // page overflow; only in-flow content counts.
+      if (cs.position === 'fixed') continue;
+      if (inScroller(el)) continue;
+      const over = Math.max(r.right - vw, -r.left);
+      if (over > 1) {
+        const name = (n) => n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') +
+          (n.className ? '.' + String(n.className).split(' ')[0] : '');
+        // The ancestor chain, because "SPAN.unpriced is 11px too wide" does not say
+        // WHICH container failed to contain it — and the fix is almost always on a
+        // parent (a fixed grid track, a nowrap cell), not on the offender itself.
+        const path = [];
+        for (let n = el; n && n !== document.body && path.length < 5; n = n.parentElement) {
+          path.unshift(name(n));
+        }
+        offenders.push({
+          sel: name(el), over: Math.round(over), path: path.join(' > '),
+          text: (el.textContent || '').trim().slice(0, 30),
+        });
+      }
+    }
+    offenders.sort((a, b) => b.over - a.over);
+    return { vw, worst: offenders[0] || null, count: offenders.length,
+             top: offenders.slice(0, 6) };
+  });
+  expect(o.worst ? o.worst.over : 0,
+    `${where}: content spills past the ${o.vw}px viewport and is CLIPPED (html has ` +
+    `overflow-x:hidden, so there is no scrollbar and no way to reach it). ` +
+    `${o.count} element(s); widest: ${JSON.stringify(o.top)}`).toBeLessThanOrEqual(1);
 }
 
 // Text that is cut off by its own box. `truncate` + ellipsis is fine (the CSS says so);
@@ -79,6 +159,7 @@ test.describe('rendering', () => {
 
       await expectNoHorizontalOverflow(page, `${testInfo.project.name} #${tab}`);
       await expectNoClippedText(page, `${testInfo.project.name} #${tab}`);
+      await expectProvenanceStated(page, `${testInfo.project.name} #${tab}`);
 
       // Nothing may sit outside the viewport on the left, and nothing may collapse to
       // zero height — both render as "a section is missing" rather than as an error.

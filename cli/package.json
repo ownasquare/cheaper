@@ -6,9 +6,10 @@
     "cheaper": "bin/cheaper.js"
   },
   "scripts": {
-    "test": "node scripts/sync-prices.js --check && node scripts/check-period-parity.js --check && node --test test/ && node bin/cheaper.js --help",
+    "test": "node scripts/sync-prices.js --check && node scripts/check-period-parity.js --check && node --test test/ && node bin/cheaper.js --help && node scripts/check-policy-parity.js --check",
     "sync:prices": "node scripts/sync-prices.js",
-    "check:periods": "node scripts/check-period-parity.js --check"
+    "check:periods": "node scripts/check-period-parity.js --check",
+    "check:policy": "node scripts/check-policy-parity.js --check"
   },
   "files": [
     "bin",

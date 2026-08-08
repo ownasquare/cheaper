@@ -1,5 +1,93 @@
 # Changelog
 
+## Unreleased — the gateway's dashboard figures get smaller, and the old ones were wrong
+
+**Read this first: `Spent` and `Savings %` on `/metrics` and the dashboard will drop for
+some users, `vs all-frontier` can now show a negative, and a period that used to read
+`$0.00` may now read as an overspend.** Every one of those is a correction, not a
+regression, and each one made the product look better than the invoice does.
+
+### A call we could not price was still booked as spend — at TODAY's rates
+
+When either leg of a routed call was absent from the price catalog, the gateway's
+aggregate fell back to `estimate_call(original_model, …)` and added its result to
+`dollars.spent`. Three things were wrong with that one line:
+
+- **It priced at today, not at the call's own day.** Neither `estimate_call` nor
+  `is_priceable` accepts a date, so both resolved at today's UTC date. A call made on
+  2026-09-05 was valued at the `claude-sonnet-5` August promo — **$12.00 against a true
+  $18.00, a 33% understatement** — and that figure *moves on its own* when a promotional
+  window opens or shuts, with no code and no data change.
+- **An unpriceable served model inherited the requested model's rate.** `/metrics` made a
+  confident dollar claim about a call that `/logs` reported as `actual_cost: null,
+  unpriced_reason: model_not_in_catalog` and `/api/v1/*` reported as `priceable: false`.
+  Two surfaces of one product, two different answers about the same call.
+- **The row was counted as excluded and then included anyway.** It incremented
+  `counts.unpriced.model_not_in_catalog` and was subtracted from `counts.priced`, yet its
+  dollars stayed inside `dollars.spent` *and* inside the `savings_pct` denominator.
+
+Such a row now claims **nothing**: no dollar accumulator, no per-tool, per-source,
+per-period or timeseries row — only the exclusion counter. `dollars.spent` therefore
+covers exactly the rows in `counts.priced`, and the two reconcile. **What you will see:
+`Spent` falls by whatever those rows were contributing, `Savings %` shifts because its
+denominator shrank, and `counts.unpriced` finally matches what was actually left out.**
+
+### `vs all-frontier` keeps its sign
+
+`baselines.highest_tier` was `max(0.0, billed_top − spent)`. A period in which Cheaper
+spent **more** than the all-frontier baseline read as an honest, measured `$0.00` — a
+suppression performed in the arithmetic, which is the one place it must never happen. The
+difference is now signed; a negative is a real result and is rendered as one.
+
+The same baseline is also priced at each row's own day rather than at today. It went
+through `pricing.cost_of()`, which takes no date. That was right only by luck: no *top*
+representative in `model_prices.json` currently carries a dated window. The first promo
+transcribed onto one would have silently restated every historical row. Rows for which no
+top-tier rate exists on their own day are now counted in `counts.billed_top_missing`
+instead of quietly shrinking the baseline.
+
+### A row with an unusable timestamp no longer takes down the audit log
+
+`periods.pday_of` called `datetime.utcfromtimestamp` unguarded. `metrics.db` stores
+**seconds** while the event store and `periods.js` use **milliseconds**, so a single row
+written with the wrong unit lands in year 55840 — and raised straight out of
+`Metrics.logs`, `Metrics.summary` and `reporting.gateway_row_to_event`, returning 500 for
+`/logs`, `/metrics`, `/api/v1/logs`, `/api/v1/reports/*` and `/api/v1/export`. One bad
+row, the entire ledger unreadable.
+
+`pday_of` is now total on both runtimes and returns a labelled non-answer for anything it
+cannot represent. Such a row is **unpriceable** (pricing it at today would be the exact
+frame substitution `pday` exists to prevent), is counted under the new
+`counts.unpriced.undatable`, appears in `/logs` with `unpriced_reason: "undatable"`, and
+surfaces in the trend series as one trailing, labelled `undated` entry rather than being
+dropped or filed under a fabricated day. `Metrics.record()` now refuses such a timestamp
+at the door — visibly, by raising, and counted in `rejected_ts`.
+
+### A missing timezone offset is reconstructed, never read as UTC
+
+`pday_of` did `int(tzo or 0)` and `pdayOf` did `Number.isFinite(Number(tzo))` — and
+`Number(null)` is `0`. So an offset recorded as **absent** (a legacy row, or a row whose
+sources disagreed and whose `tzo` `store.merge` therefore nulled) silently became UTC on
+both runtimes, while an *undefined* one reconstructed on one of them. `2025-09-01` in
+Python against `2025-08-31` in JS at a UTC-7 machine: across the `claude-sonnet-5` promo
+boundary that is the same 50% split the frozen-offset column was added to close,
+reintroduced one layer down. Both runtimes now reconstruct, an explicit `0` is still
+honoured as the real value it is, and `scripts/check-period-parity.js` diffs
+`pdayOf`/`tzOffsetAt` against `pday_of`/`local_offset_minutes` across 9 zones × 16
+instants × 11 offsets — the same gate that already protects the calendar bounds.
+
+### Tests that could not fail
+
+Three tests guarding the frozen-offset behaviour passed against the reverted, buggy
+implementation on any host whose zone is UTC — the default for most CI runners — because
+each read its own expectation from `periods.local_offset_minutes()` on the host, where
+"reconstructed" and "silently read as UTC" are both `0`. They now pin the process
+timezone and assert against literal offsets, and the DST assertion that used to
+self-disable on a fixed-offset host is unconditional. A fourth test hard-failed on any
+host at UTC+05:30; it now pins the zone instead of assuming it.
+
+---
+
 ## 0.3.0 — the savings store: per-call, event-time, and honest about what it doesn't know
 
 **Read this first: some periods that used to show a dollar figure now show a label

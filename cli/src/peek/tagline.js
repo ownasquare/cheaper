@@ -35,6 +35,15 @@ const { tokens: fmtTokens } = require('./render');
 const { pdayOf } = require('./periods');
 const ledger = require('./ledger');
 const events = require('./events');
+// Whether a call's COUNTERFACTUAL arm has a recoverable prompt-cache state. The rule
+// itself lives in derive.js (see the long note there); counterfactual.js adapts it from
+// the stored row's field vocabulary (cr/c5/c1/cu, canonical served/base) to the
+// transcript record's (cacheRead/cacheCreate5m/cacheCreate1h/cacheCreate, raw model), so
+// ONE implementation decides for both the append-only store and the line printed at the
+// end of the chat. Adopting it here is what stops those two from publishing different
+// money for the same chat. No require cycle: neither derive.js nor counterfactual.js
+// imports this module.
+const { recordCacheStateIndeterminate } = require('./counterfactual');
 
 // The smallest saving we'll claim. Set at a full cent so an exact figure is never a
 // rounded-UP sub-cent value (e.g. $0.006 shown as an exact "$0.01").
@@ -167,6 +176,11 @@ function realizedFromRecords(records) {
   let net = 0, gross = 0, extraCost = 0, wouldHave = 0;
   let tokensCredited = 0, creditedCalls = 0, offsetCalls = 0;
   let totalSpent = 0, totalTokens = 0, anyEstimated = false;
+  // Eligible rows whose counterfactual was WITHHELD, not measured. Counted so the
+  // rendered line can state the exclusion instead of quietly shipping a smaller total
+  // (invariants 4 and 7: a "report nothing" case returns a labelled non-number, and the
+  // label has to reach the reader).
+  let withheldCalls = 0, withheldTokens = 0;
 
   for (const r of priced) {
     if (r.estimated) anyEstimated = true;
@@ -177,6 +191,33 @@ function realizedFromRecords(records) {
   for (const r of eligible) {
     const id = idOf(r);
     if (id === ceilingModel) continue;             // ran AT the baseline
+    // A COLD-START call on a SWITCHED model has no recoverable counterfactual cache
+    // state, and therefore no honest baseline. A prompt cache is keyed on (model, exact
+    // prefix), so switching model invalidates it: the served arm paid a cache CREATE for
+    // a prefix the un-switched baseline may well have merely READ, and the single `bk`
+    // below prices BOTH legs off the served split — charging the baseline CREATE too.
+    // Every catalog entry writes at or above its read rate, so that substitution can only
+    // move the baseline UP and the claimed saving with it. Nothing in the record separates
+    // "the prefix was new to the session" (figure correct) from "the switch forced the
+    // rewrite" (figure overstated by the whole write-read spread), so the honest
+    // counterfactual is an interval that straddles zero — see derive.js.
+    //
+    // WITHHELD, never zeroed. Booking it as 0 asserts the saving was nothing; skipping it
+    // says the saving is unknowable, and those are different sentences. The row makes no
+    // claim, contributes to NO dollar or token accumulator, and is counted below so
+    // populationNote can say what was left out.
+    //
+    // A row that did not switch cannot reach this branch (served === base returns false),
+    // so a chat with no model switch is unchanged to the cent. A WARM switched row
+    // (cacheRead > 0) also returns false and KEEPS its credit: its CREATE is content
+    // appended since the previous turn, which the baseline model would have had to write
+    // as well, so the served split IS the counterfactual split there. Over-correcting
+    // those is the mirror-image fabrication.
+    if (recordCacheStateIndeterminate(r, id, ceilingModel)) {
+      withheldCalls++;
+      withheldTokens += (r.inTokens || 0) + (r.outTokens || 0);
+      continue;
+    }
     const bk = tokenBreakdown(r), ctx = billingCtx(r);
     const spent = costOfModel(r.model, bk, ctx) || 0;
     // SAME call, SAME date, SAME SKU — the only variable is the model, because the
@@ -195,10 +236,23 @@ function realizedFromRecords(records) {
     else if (d < 0) { extraCost += -d; offsetCalls++; extraByModel[id] = (extraByModel[id] || 0) + 1; }
   }
 
+  // Both halves of spendSentence are accumulated over `priced` above, so they agree with
+  // each other — but the records dropped by the isPriceable filter are real calls the
+  // session made, and a sentence that says "this session ran N tokens" while N excludes
+  // them is understating the session. Publish the coverage so it can be stated.
+  const examined = (records || []).length;
   return { ceilingModel, topModel, dollarsSaved: net, gross, extraCost, wouldHave,
            savedPct: wouldHave > 0 ? Math.round((net / wouldHave) * 100) : 0,
            tokensCredited, creditedCalls, offsetCalls, savedByModel, extraByModel,
            totalSpent, totalTokens, calls: priced.length,
+           // `withheld` is deliberately NOT folded into `unpriced`. These rows ARE
+           // priceable and their SPENT leg is a fact that still counts toward totalSpent —
+           // it is only their counterfactual that was declined. Merging the two counts
+           // would tell the reader their spend figure excludes rows it actually includes.
+           population: { tokensFrom: 'priced', examined, priced: priced.length,
+                         unpriced: examined - priced.length, total: examined,
+                         truncated: false,
+                         withheld: withheldCalls, withheldTokens },
            estimatedTokens: anyEstimated, exact: false };
 }
 
@@ -218,7 +272,29 @@ function fromGateway(summary) {
   for (const t of Object.keys(byTier)) {
     totalTokens += (byTier[t].in_tokens || 0) + (byTier[t].out_tokens || 0);
   }
+  // WHICH ROWS EACH FIGURE COVERS. `by_tier` is an unbounded GROUP BY over every row in
+  // the session; `dollars.spent` covers only counts.priced of them. Carrying the counts
+  // here is what lets spendSentence label a sentence whose two halves are populations of
+  // different sizes instead of silently juxtaposing them (see populationNote).
+  const cts = summary.counts || {};
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const population = {
+    tokensFrom: 'all',            // by_tier counts every row, priced or not
+    examined: num(cts.examined),
+    priced: num(cts.priced),
+    unpriced: num(cts.unpriced_total),
+    total: num(summary.total),
+    truncated: !!cts.truncated,
+    // The SAME withholding the transcript path applies, read from the per-reason
+    // breakdown metrics.py already publishes (`counts.unpriced.cache_state_indeterminate`).
+    // Here these rows sit INSIDE counts.unpriced_total — the gateway declines their spent
+    // leg too — so the note names the reason without re-counting them as a second
+    // exclusion. A gateway too old to publish the key yields null and prints nothing,
+    // exactly as before.
+    withheld: num((cts.unpriced || {}).cache_state_indeterminate),
+  };
   return {
+    population,
     ceilingModel: summary.baseline_model,
     topModel: summary.top_model || summary.baseline_model,
     dollarsSaved: dol.saved || 0,
@@ -328,11 +404,61 @@ function logsSuffix(format, url) {
 // as a broken estimator rather than as the metered value of the work. What the number
 // honestly measures is the metered value of the tokens at published list rates, which
 // is the right basis whether the user is billed per-token or on a subscription.
+//
+// COVERAGE TRAVELS WITH THE SENTENCE. The two halves of this sentence do not always
+// describe the same rows, and pairing them without saying so is invariant 1 (never
+// combine figures from two populations — a reader reconciles "N tokens" against "$X" and
+// gets a per-token rate that is true of neither).
+//   - GATEWAY path: `totalTokens` is summed from summary.by_tier, which metrics.py builds
+//     with an unbounded `GROUP BY tier` over EVERY row in the session, while
+//     `totalSpent` is dollars.spent, which covers only rows whose BOTH legs priced
+//     (2xx, datable, catalogued). So the token half can legitimately be larger.
+//   - TRANSCRIPT path: both halves are computed over the priceable subset, so they agree
+//     with each other — but they then UNDER-state a session that contained uncatalogued
+//     models, because those records were filtered out before either was accumulated.
+// Either way the honest fix is to state which rows the figures cover; `r.population`
+// carries the counts the summary already publishes (counts.examined / counts.priced /
+// counts.unpriced_total / counts.truncated) and populationNote renders them.
+//
+// COVERAGE ALSO COVERS WHAT WAS DECLINED, not only what could not be read. A cold-start
+// call on a switched model is fully priceable and is still excluded from the saving,
+// because switching model invalidates the prompt cache and leaves the un-switched arm's
+// cache state unrecoverable (derive.js::cacheStateIndeterminate). Shipping a headline
+// quietly reduced by those rows would be the same concealment in the other direction: the
+// reader sees a smaller number and no reason for it. `p.withheld` is that count, and it is
+// a claims statement, not a coverage population — it deliberately says nothing about
+// whether those rows sit inside `priced`, because the two paths differ on that (the
+// transcript path still counts their SPENT leg; the gateway's summary does not).
+function populationNote(r) {
+  const p = r && r.population;
+  if (!p) return '';
+  const ex = Number(p.examined);
+  const un = Number(p.unpriced);
+  const bits = [];
+  if (Number.isFinite(ex) && ex > 0 && Number.isFinite(un) && un > 0) {
+    const priced = ex - un;
+    bits.push(p.tokensFrom === 'all'
+      ? `the token count covers all ${ex} calls, the dollar figure only the ${priced} that could be priced`
+      : `both figures cover only the ${priced} of ${ex} calls that could be priced`);
+  }
+  const wh = Number(p.withheld);
+  if (Number.isFinite(wh) && wh > 0) {
+    bits.push(`${wh} switched call${wh === 1 ? '' : 's'} claim${wh === 1 ? 's' : ''} no saving`
+      + ' — a cold prompt cache leaves the un-switched baseline indeterminate');
+  }
+  const total = Number(p.total);
+  if (p.truncated && Number.isFinite(ex) && Number.isFinite(total) && total > ex) {
+    bits.push(`this is the newest ${ex} of ${total} calls`);
+  }
+  return bits.length ? ` Coverage: ${joinAnd(bits)}.` : '';
+}
+
 function spendSentence(r, format) {
   if (!r || !(r.totalSpent >= SHOW_MIN_USD)) return '';
   const amt = (r.exact ? '' : 'about ') + money(r.totalSpent);
   const toks = fmtTokens(r.totalTokens || 0);
-  return ` This session ran ${toks} tokens, worth ${tint(amt, 'spend', format)} at list API rates.`;
+  return ` This session ran ${toks} tokens, worth ${tint(amt, 'spend', format)} at list API rates.`
+    + populationNote(r);
 }
 
 // "3 calls on claude-haiku-4-5", busiest model first, ties by id so the rendered
@@ -454,7 +580,26 @@ async function computeSavings(opts, preRecords) {
       }
     } else {
       const g = summary && fromGateway(summary);
-      if (g && g.dollarsSaved >= SHOW_MIN_USD) return g; // exact, real — no "about " qualifier
+      // ELECT THE SOURCE ON AVAILABILITY, NEVER ON THE VALUE IT RETURNED.
+      //
+      // This used to be `if (g && g.dollarsSaved >= SHOW_MIN_USD) return g`, which made
+      // the choice of measurement a MAX-SELECTION over two sources with two different
+      // baselines (the gateway compares each call to the model that call requested; the
+      // transcript compares it to the session's priciest top-level model). Any gateway
+      // answer that was not a comfortably positive saving fell through to the transcript
+      // estimate, which normally returns a positive number, so:
+      //   - a measured NEGATIVE (routing genuinely cost more) printed as a saving, and
+      //     buildTagline's anti-saving branch was unreachable from the gateway path;
+      //   - a measured $0.00 with rows present — the commoner case: the gateway watched
+      //     the chat and NOTHING was routed — was replaced by a transcript-estimated
+      //     claim about routing that demonstrably did not happen;
+      //   - run() then wrote that substituted figure into the lifetime ledger, so the
+      //     loss never reached the all-time total either.
+      // Returning unconditionally cannot print an empty-gateway zero: fromGateway()
+      // already requires `dollars` AND `baseline_model` (see its guard), and
+      // baseline_model is only ever set from a PRICED row, so a session-filtered summary
+      // with no rows — or with no priceable rows — yields null and falls through here.
+      if (g) return g; // exact, real, and SIGNED — no "about " qualifier
     }
   }
   const records = preRecords || collectSessionRecords(opts).records;

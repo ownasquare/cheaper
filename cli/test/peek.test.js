@@ -22,8 +22,42 @@ test('classifier mirrors the router tiers', () => {
   assert.equal(contentTier('please refactor the pagination endpoint').tier, 'sonnet');
   assert.equal(contentTier('audit this code for a security vulnerability').tier, 'opus');
   assert.equal(contentTier('fix the race condition in the mutex').tier, 'opus');
-  assert.equal(contentTier('x'.repeat(5000)).tier, 'sonnet'); // long/dense
-  assert.equal(contentTier('do this\n```\ncode\n```').tier, 'sonnet'); // code fence
+});
+
+// The moderate band requires CORROBORATION: >= minModerateSignals (default 2)
+// INDEPENDENT signals, not the first one to match.
+//
+// This test used to assert the opposite — that 5,000 characters of 'x', or a bare code
+// fence, was on its own enough to buy the mid tier. That was first-match-wins, and it was
+// measured ANTI-predictive: the old cascade scored AUC 0.531 at telling hard requests from
+// easy ones, with the sonnet/haiku ordering INVERTED. It also contradicted the product's
+// own rubric, which states "Volume ≠ difficulty" in one document while the classifier
+// escalated on length in another.
+//
+// So the single-signal cases below now assert HAIKU deliberately. A long paste is long; a
+// code fence is a code fence. Neither is evidence of difficulty, and charging the mid tier
+// for one is the overspend this redesign exists to stop. Both directions are pinned, so a
+// regression to first-match-wins fails here and a threshold quietly raised out of reach
+// fails on the corroborated cases.
+test('the moderate band needs corroboration, not one signal', () => {
+  // ONE signal each -> not enough.
+  assert.equal(contentTier('x'.repeat(5000)).tier, 'haiku',
+    'length alone is volume, not difficulty');
+  assert.equal(contentTier('do this\n```\ncode\n```').tier, 'haiku',
+    'a code fence alone is not difficulty');
+
+  // TWO independent signals -> the mid tier is earned. A long request that ALSO carries a
+  // code fence is corroborated by two unrelated observations, which is the whole rule.
+  assert.equal(contentTier('```\n' + 'x'.repeat(5000) + '\n```').tier, 'sonnet',
+    'long AND fenced is two independent signals');
+  assert.equal(contentTier('first, migrate the endpoint and then debug it').tier, 'sonnet',
+    'several mid-tier lexical signals corroborate each other');
+
+  // The threshold is a knob, and driving it must actually change the answer — otherwise a
+  // gateway configured off-default and `peek` would silently disagree, which is the exact
+  // class of drift check-policy-parity.js now gates.
+  assert.equal(contentTier('x'.repeat(5000), { minModerateSignals: 1 }).tier, 'sonnet',
+    'at a threshold of 1 the single signal is sufficient again');
 });
 
 test('model tier comes from the catalog, not from the model name', () => {
@@ -892,4 +926,787 @@ test('streamed turns keep MAX usage, and dedupe spans files', () => {
     for (const m of ['../src/peek/fsutil', '../src/peek/adapters'])
       delete require.cache[require.resolve(m)];
   }
+});
+
+// ---- the source of truth is elected on AVAILABILITY, never on the sign of its answer --
+
+// A throwaway localhost gateway that answers /metrics with one canned summary.
+function fakeGateway(summary) {
+  const httpMod = require('http');
+  return new Promise((resolve) => {
+    const srv = httpMod.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(summary));
+    });
+    srv.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+}
+
+// A fixture chat whose TRANSCRIPT estimate is a confident +$84 on 2.0M tokens: an Opus
+// main turn plus a Haiku sub-agent below it. Every case below asserts what the tagline
+// does when the GATEWAY — the only measurement of what was actually ROUTED — disagrees
+// with that estimate. `summary: null` means "no gateway running".
+async function taglineWithGateway(summary) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-elect-'));
+  const proj = path.join(dir, '.claude', 'projects', 'demo');
+  fs.mkdirSync(proj, { recursive: true });
+  const mk = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+  fs.writeFileSync(path.join(proj, 'sesG.jsonl'), mk([
+    { type: 'user', message: { role: 'user', content: 'rename foo' }, timestamp: '2026-01-01T00:00:00Z' },
+    { type: 'assistant', isSidechain: false, message: { id: 'g1', role: 'assistant', model: 'claude-opus-4',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:01Z' },
+    { type: 'assistant', isSidechain: true, message: { id: 'g2', role: 'assistant', model: 'claude-haiku-4-5',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:02Z' },
+  ]));
+  const srv = summary ? await fakeGateway(summary) : null;
+  const env = ['CHEAPER_PEEK_HOME', 'CHEAPER_LEDGER_FILE', 'CHEAPER_PORT', 'CHEAPER_TOKEN_FILE'];
+  const prev = {}; for (const k of env) prev[k] = process.env[k];
+  process.env.CHEAPER_PEEK_HOME = dir;
+  process.env.CHEAPER_LEDGER_FILE = path.join(dir, 'lifetime.json');
+  // Nothing is listening on 59421, so a null summary exercises the gateway-absent path.
+  process.env.CHEAPER_PORT = srv ? String(srv.address().port) : '59421';
+  // Never read (and therefore never transmit) the real ~/.cheaper/dash.token.
+  process.env.CHEAPER_TOKEN_FILE = path.join(dir, 'no-such.token');
+  const logs = [];
+  const orig = console.log;
+  console.log = (s) => logs.push(String(s));
+  try {
+    for (const m of ['fsutil', 'adapters', 'scan', 'ledger', 'tagline']) {
+      delete require.cache[require.resolve('../src/peek/' + m)];
+    }
+    const tag = require('../src/peek/tagline');
+    await tag.run({ transcript: path.join(proj, 'sesG.jsonl'), json: true });
+    return JSON.parse(logs[logs.length - 1]);
+  } finally {
+    console.log = orig;
+    if (srv) await new Promise((r) => srv.close(r));
+    for (const k of env) {
+      if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k];
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    for (const m of ['fsutil', 'adapters', 'scan', 'ledger', 'tagline']) {
+      delete require.cache[require.resolve('../src/peek/' + m)];
+    }
+  }
+}
+
+// A current-build gateway summary for the fixture chat above. Overrides merge in.
+function gwSummary(over) {
+  return Object.assign({
+    catalog: { priced: true, as_of: '2026-08-06', age_days: 1 },
+    total: 6,
+    baseline_model: 'claude-opus-5',
+    top_model: 'claude-opus-5',
+    by_tier: { opus: { count: 4, in_tokens: 1e6, out_tokens: 5e5 },
+               haiku: { count: 2, in_tokens: 4e5, out_tokens: 1e5 } },
+    dollars: { saved: 0, spent: 5, gross: 0, extra: 0, billed_top: 5, savings_pct: 0 },
+    counts: { models_changed: 0, models_upcharged: 0,
+              examined: 6, priced: 6, unpriced_total: 0, truncated: false },
+    tokens: { downgraded: 0 },
+    downgraded_by_model: {},
+    upcharged_by_model: {},
+  }, over || {});
+}
+
+test('a MEASURED anti-saving is reported as one — the transcript estimate must not overwrite it', async () => {
+  // The gateway watched this chat and measured a NET LOSS: some rows were routed cheaper
+  // ($1.00 of gross saving on 600k tokens) and one was routed to a costlier model
+  // (-$3.00), for a signed net of -$2.00. The old `dollarsSaved >= SHOW_MIN_USD` guard
+  // rejected that answer for being negative and fell through to realizedFromRecords(),
+  // a different source with a different baseline, which reports +$84 for this fixture —
+  // so the sign of the answer chose the measurement, and buildTagline's anti-saving
+  // branch was unreachable from the gateway path.
+  const j = await taglineWithGateway(gwSummary({
+    dollars: { saved: -2, spent: 5, gross: 1, extra: 3, billed_top: 3, savings_pct: -66.7 },
+    counts: { models_changed: 2, models_upcharged: 1,
+              examined: 6, priced: 6, unpriced_total: 0, truncated: false },
+    tokens: { downgraded: 600000 },
+    downgraded_by_model: { 'claude-haiku-4-5': 2 },
+    upcharged_by_model: { 'claude-fable-5': 1 },
+  }));
+  assert.equal(j.source, 'gateway', 'the gateway answered, so it is the source: ' + j.source);
+  assert.equal(j.result.dollarsSaved, -2);
+  assert.match(j.line, /^Cheaper\.app claims no saving on this chat — routed work cost \$2\.00 more than claude-opus-5 would have\./,
+    'the loss must be stated and named: ' + j.line);
+  assert.ok(!/saved/.test(j.line.split('—')[0]), 'no saving may be claimed: ' + j.line);
+  assert.equal(j.result.exact, true, 'an exact figure is never hedged with "about "');
+  // Asserted on `line`, not `full`: `full` carries the See-logs URL and its ephemeral
+  // port number, whose digits can contain "84" by coincidence (they did).
+  assert.ok(!/84/.test(j.line), 'the transcript estimate must not leak in: ' + j.line);
+  // (iv) the LEDGER gets the signed gateway figure, not the estimate's +$84.
+  assert.ok(Math.abs(j.lifetime.usd + 2) < 1e-9, 'lifetime must be -2, got ' + j.lifetime.usd);
+  assert.equal(j.lifetime.exact, true);
+});
+
+test('a MEASURED $0.00 with rows present claims nothing — no estimate is manufactured', async () => {
+  // The commoner form of the same bug: the gateway watched the chat and NOTHING was
+  // routed, so the measured saving is exactly $0.00. That is a measurement, not a
+  // missing answer — but it failed the `>= SHOW_MIN_USD` guard identically, and the
+  // transcript estimator then manufactured an $84 claim about routing the only
+  // instrument watching says did not happen.
+  const j = await taglineWithGateway(gwSummary({}));
+  assert.equal(j.source, 'gateway', 'source=' + j.source);
+  assert.equal(j.result.dollarsSaved, 0);
+  assert.match(j.line, /^Cheaper\.app ran this chat on claude-opus-5 — no routing saving to claim\./, j.line);
+  assert.ok(!/saved/.test(j.line), 'a measured zero must not print a saving: ' + j.line);
+  assert.equal(j.result.exact, true, 'this is a measurement, not an estimate');
+  // See the note above: `full` ends in a URL whose port digits are not ours to assert on.
+  assert.ok(!/84/.test(j.line), 'the transcript estimate must not leak in: ' + j.line);
+  // Nothing was saved, so nothing is added to the lifetime total either.
+  assert.equal(j.lifetime.usd, 0);
+});
+
+test('no gateway → the transcript estimate is still used, and still hedged', async () => {
+  // Election is on AVAILABILITY: absent/stale/unusable gateway → fall back. The estimate
+  // keeps its "about " qualifier because it is not a measurement.
+  const j = await taglineWithGateway(null);
+  assert.equal(j.source, 'estimate', 'source=' + j.source);
+  assert.ok(Math.abs(j.result.dollarsSaved - 84) < 1e-6, 'dollarsSaved=' + j.result.dollarsSaved);
+  assert.match(j.line, /^Cheaper\.app saved 🟢 about \$84\.00 and 2\.0M tokens by running 1 call on claude-haiku-4-5 instead of claude-opus-4/, j.line);
+  assert.ok(Math.abs(j.lifetime.usd - 84) < 1e-6, 'lifetime=' + j.lifetime.usd);
+});
+
+test('a gateway with NO usable rows for the session still falls back (not an empty zero)', async () => {
+  // The safety property the unconditional return depends on: a session-filtered summary
+  // whose rows are all unpriceable leaves baseline_model None, fromGateway returns null,
+  // and the transcript estimate answers instead. Returning the gateway "because it
+  // replied" must never print a $0 assembled from no rows at all.
+  const j = await taglineWithGateway(gwSummary({ baseline_model: null, top_model: null }));
+  assert.equal(j.source, 'estimate', 'unusable gateway shape must fall back: ' + j.source);
+  assert.ok(Math.abs(j.result.dollarsSaved - 84) < 1e-6);
+});
+
+// ---- spendSentence states WHICH rows each of its two halves covers -------------------
+
+test('gateway spend sentence labels its coverage: all-rows tokens vs priced-subset dollars', () => {
+  // metrics.py builds by_tier with an unbounded `GROUP BY tier` over every row in the
+  // session, while dollars.spent covers only counts.priced of them. Pairing the two in
+  // one sentence describes two different populations as if they were one (invariant 1),
+  // and a reader dividing them gets a per-token rate that is true of neither.
+  const g = fromGateway({
+    total: 50, baseline_model: 'claude-opus-5', top_model: 'claude-opus-5',
+    by_tier: { opus: { count: 50, in_tokens: 3e6, out_tokens: 1e6 } },
+    dollars: { saved: 0, spent: 12.5 },
+    counts: { models_changed: 0, examined: 50, priced: 45, unpriced_total: 5, truncated: false },
+    tokens: { downgraded: 0 },
+    downgraded_by_model: {},
+  });
+  const line = buildTagline(g);
+  assert.match(line, /This session ran 4\.0M tokens, worth 🔴 \$12\.50 at list API rates\./, line);
+  assert.match(line, / Coverage: the token count covers all 50 calls, the dollar figure only the 45 that could be priced\.$/, line);
+
+  // Fully-priced session → nothing to disclaim, so no note at all.
+  const clean = fromGateway({
+    total: 50, baseline_model: 'claude-opus-5', top_model: 'claude-opus-5',
+    by_tier: { opus: { count: 50, in_tokens: 3e6, out_tokens: 1e6 } },
+    dollars: { saved: 0, spent: 12.5 },
+    counts: { models_changed: 0, examined: 50, priced: 50, unpriced_total: 0, truncated: false },
+    tokens: { downgraded: 0 }, downgraded_by_model: {},
+  });
+  assert.ok(!/Coverage:/.test(buildTagline(clean)), buildTagline(clean));
+
+  // A truncated ledger is a SAMPLE, and says so.
+  const cut = fromGateway({
+    total: 9000, baseline_model: 'claude-opus-5', top_model: 'claude-opus-5',
+    by_tier: { opus: { count: 5000, in_tokens: 3e6, out_tokens: 1e6 } },
+    dollars: { saved: 0, spent: 12.5 },
+    counts: { models_changed: 0, examined: 5000, priced: 5000, unpriced_total: 0, truncated: true },
+    tokens: { downgraded: 0 }, downgraded_by_model: {},
+  });
+  assert.match(buildTagline(cut), / Coverage: this is the newest 5000 of 9000 calls\.$/, buildTagline(cut));
+});
+
+test('transcript spend sentence admits the calls it could not price', () => {
+  // Here BOTH halves are the priceable subset, so they agree with each other — and both
+  // under-state the session, because the unpriceable record was filtered out before
+  // either was accumulated. "This session ran 2.0M tokens" is false of a session that
+  // ran 4.0M; the coverage note is what makes it true.
+  const r = realizedFromRecords([rec('claude-opus-4', 'user'), rec('llama-4-maverick', 'user')]);
+  const line = buildTagline(r);
+  assert.match(line, / Coverage: both figures cover only the 1 of 2 calls that could be priced\.$/, line);
+  // ...and a session where everything priced says nothing extra.
+  assert.ok(!/Coverage:/.test(buildTagline(realizedFromRecords([
+    rec('claude-opus-4', 'user'), rec('claude-haiku-4-5', 'subagent')]))));
+});
+
+// ---- the counterfactual arm's PROMPT-CACHE STATE, on the tagline --------------------
+//
+// A prompt cache is keyed on (model, exact prefix), so CHANGING MODEL INVALIDATES IT. The
+// served arm starts cold and pays a cache CREATE for a prefix the un-switched baseline
+// would still have held and merely READ. `realizedFromRecords` priced BOTH legs off one
+// `bk = tokenBreakdown(r)`, charging the baseline that CREATE too — and every catalog
+// entry writes at or above its read rate, so the substitution could only move the baseline
+// UP and the claimed saving with it.
+//
+// `derive.js` and `gateway/app/metrics.py` already WITHHOLD those rows. Until this
+// adoption the end-of-chat line — the most-read number in the product — and the lifetime
+// ledger it writes published a different, larger figure for the same chat than the
+// append-only store did.
+
+test('tagline: a COLD switched call is WITHHELD from the saving, counted, and disclosed', () => {
+  const r = realizedFromRecords([
+    // The ceiling: an Opus main-loop turn. 1M fresh in + 1M out = $90.
+    { model: 'claude-opus-4', source: 'user', inTokens: 1e6, inFresh: 1e6, outTokens: 1e6 },
+    // A sub-agent with NO cache traffic at all. Untouched by this rule, and the control
+    // that proves the withholding is targeted rather than blanket: (15+75) - (1+5) = $84.
+    { model: 'claude-haiku-4-5', source: 'subagent', inTokens: 1e6, inFresh: 1e6, outTokens: 1e6 },
+    // COLD + SWITCHED: cacheRead 0 alongside a 1M five-minute WRITE. That write may be an
+    // artefact of the switch itself, or a prefix genuinely new to the session — nothing on
+    // the record separates the two, so the honest counterfactual is an interval, and here
+    // it straddles zero.
+    { model: 'claude-sonnet-4-5', source: 'subagent', inTokens: 1e6, inFresh: 0,
+      cacheCreate5m: 1e6, cacheRead: 0, outTokens: 1e6 },
+  ]);
+  // THE DEFECT: the sonnet leg priced its baseline as an Opus CREATE (1M x $15 x 1.25 =
+  // $18.75, plus $75 out = $93.75) against $18.75 actually spent, booking $75.00 on top of
+  // the honest $84.00 and publishing $159.00.
+  assert.ok(Math.abs(r.dollarsSaved - 84) < 1e-6,
+    'expected $84.00; $159.00 is the cold-switch defect. dollarsSaved=' + r.dollarsSaved);
+  assert.equal(r.creditedCalls, 1);
+  assert.equal(r.tokensCredited, 2e6);                    // the haiku call only
+  assert.deepEqual(r.savedByModel, { 'claude-haiku-4-5': 1 });
+  // SKIPPED, not zeroed. A zeroed row is a claim that the saving was nothing; a skipped
+  // row is a claim that it is unknowable. So the row appears in NO accumulator — not in
+  // the offset half either, and `wouldHave` (the counterfactual total) never saw its
+  // indeterminate leg.
+  assert.equal(r.offsetCalls, 0);
+  assert.deepEqual(r.extraByModel, {});
+  assert.ok(Math.abs(r.wouldHave - 90) < 1e-6, 'wouldHave=' + r.wouldHave);
+  // ...but it IS counted, so the line can state what it left out (invariants 4 and 7).
+  assert.equal(r.population.withheld, 1);
+  assert.equal(r.population.withheldTokens, 2e6);
+  // The SPENT leg is a fact about a call that really happened and is not in doubt — only
+  // the counterfactual was declined — so it still counts: $90 + $6 + $18.75.
+  assert.ok(Math.abs(r.totalSpent - 114.75) < 1e-6, 'totalSpent=' + r.totalSpent);
+  // ...and it is NOT folded into `unpriced`, which would tell the reader the spend figure
+  // excludes a row it actually includes.
+  assert.equal(r.population.unpriced, 0);
+
+  const line = buildTagline(r);
+  assert.match(line, /^Cheaper\.app saved 🟢 about \$84\.00 and 2\.0M tokens /, line);
+  assert.ok(line.includes('by running 1 call on claude-haiku-4-5 instead of claude-opus-4'), line);
+  // money() rounds to whole dollars at/above $100, so $114.75 renders as $115.
+  assert.match(line, / This session ran 6\.0M tokens, worth 🔴 about \$115 at list API rates\./, line);
+  // THE WITHHOLDING REACHES THE READER. A headline quietly reduced by rows the reader
+  // cannot see is the same concealment as one quietly inflated by them.
+  assert.match(line, / Coverage: 1 switched call claims no saving — a cold prompt cache leaves the un-switched baseline indeterminate\.$/, line);
+});
+
+test('tagline: a WARM switched call KEEPS its credit — the rule is not a blanket', () => {
+  // Over-correcting is the failure mode that makes the product useless, so the negative
+  // case is asserted explicitly. cacheRead > 0 means the served arm's prefix was ALREADY
+  // resident, so this call's CREATE is content appended since the previous turn — content
+  // the baseline model would have had to write as well. The served split IS the
+  // counterfactual split here, and the existing pricing is exactly right.
+  const r = realizedFromRecords([
+    { model: 'claude-opus-4', source: 'user', inTokens: 1e6, inFresh: 1e6, outTokens: 1e6 },
+    { model: 'claude-sonnet-4-5', source: 'subagent', inTokens: 2e6, inFresh: 0,
+      cacheRead: 1e6, cacheCreate5m: 1e6, outTokens: 1e6 },
+  ]);
+  // sonnet spent: 1M read x $0.30 + 1M write x $3.75 + 1M out x $15 = $19.05.
+  // opus-4 baseline on the SAME split: $1.50 + $18.75 + $75 = $95.25 → $76.20 credited.
+  assert.ok(Math.abs(r.dollarsSaved - 76.2) < 1e-6, 'dollarsSaved=' + r.dollarsSaved);
+  assert.equal(r.creditedCalls, 1);
+  assert.equal(r.tokensCredited, 3e6);
+  assert.deepEqual(r.savedByModel, { 'claude-sonnet-4-5': 1 });
+  assert.equal(r.population.withheld, 0);
+  const line = buildTagline(r);
+  assert.ok(line.includes('by running 1 call on claude-sonnet-4-5 instead of claude-opus-4'), line);
+  assert.ok(!/claims no saving/.test(line), 'a warm switch must keep its credit: ' + line);
+  assert.ok(!/Coverage:/.test(line), line);
+});
+
+test('tagline: a chat with NO model switch is unchanged TO THE CENT by the cache rule', () => {
+  // The no-op guard. Every row here is cache-bearing and one of them is COLD — the exact
+  // shape a blanket "any cold cache write is indeterminate" rule would swallow — but
+  // nothing SWITCHED model, so both arms are the same model on the same split, the delta
+  // is zero under every cache assumption, and nothing may be withheld or disclosed.
+  const recs = [
+    { model: 'claude-opus-4', source: 'user', inTokens: 3e6, inFresh: 1e6,
+      cacheRead: 1e6, cacheCreate5m: 1e6, outTokens: 1e6 },
+    { model: 'claude-opus-4', source: 'subagent', inTokens: 1e6, inFresh: 0,
+      cacheRead: 0, cacheCreate5m: 1e6, outTokens: 1e6 },
+  ];
+  const r = realizedFromRecords(recs);
+  assert.equal(r.ceilingModel, 'claude-opus-4');
+  assert.equal(r.population.withheld, 0);
+  assert.equal(r.population.withheldTokens, 0);
+  assert.equal(r.creditedCalls, 0);
+  assert.equal(r.dollarsSaved, 0);
+  // $15 fresh + $1.50 read + $18.75 write + $75 out = $110.25; then $18.75 + $75 = $93.75.
+  assert.ok(Math.abs(r.totalSpent - 204) < 1e-6, 'totalSpent=' + r.totalSpent);
+  // ...and the rendered line is byte-for-byte the line this session printed before the
+  // rule existed: no coverage clause, no moved figure.
+  assert.equal(buildTagline(r),
+    'Cheaper.app ran this chat on claude-opus-4 — no routing saving to claim.'
+    + ' This session ran 6.0M tokens, worth 🔴 about $204 at list API rates.');
+
+  // The guard itself, read through the TRANSCRIPT's field vocabulary. In the control flow
+  // above such a row is already `continue`d as "ran AT the baseline", so assert the
+  // predicate directly rather than letting that hide a widened rule.
+  const { recordCacheStateIndeterminate } = require('../src/peek/counterfactual');
+  assert.equal(recordCacheStateIndeterminate(recs[1], 'claude-opus-4', 'claude-opus-4'), false);
+  // ...and the SAME row does trip it once the model differs, which proves the fixture
+  // really is the cold shape and that the switch guard is what did the work above.
+  assert.equal(recordCacheStateIndeterminate(recs[1], 'claude-haiku-4-5', 'claude-opus-4'), true);
+});
+
+test('tagline run: the lifetime ledger receives the WITHHELD-adjusted figure', async () => {
+  // End-to-end through the real transcript adapter, because the ledger is written from
+  // `result.dollarsSaved` / `result.tokensCredited` inside run(). If the withholding stops
+  // at the printed line, the all-time total keeps compounding the overstatement forever —
+  // and an append-only ledger never forgets a wrong number.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-withheld-'));
+  const proj = path.join(dir, '.claude', 'projects', 'demo');
+  fs.mkdirSync(proj, { recursive: true });
+  const mk = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+  fs.writeFileSync(path.join(proj, 'sesW.jsonl'), mk([
+    { type: 'user', message: { role: 'user', content: 'rename foo' }, timestamp: '2026-01-01T00:00:00Z' },
+    // Ceiling: Opus main turn, $90.
+    { type: 'assistant', isSidechain: false, message: { id: 'w1', role: 'assistant', model: 'claude-opus-4',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:01Z' },
+    // A clean Haiku sub-agent: (15+75) - (1+5) = $84 credited.
+    { type: 'assistant', isSidechain: true, message: { id: 'w2', role: 'assistant', model: 'claude-haiku-4-5',
+      content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1e6, output_tokens: 1e6 } }, timestamp: '2026-01-01T00:00:02Z' },
+    // A COLD Haiku sub-agent: the whole 1M input arrived as a 5-minute cache WRITE with no
+    // read. Priced the old way its baseline was an Opus CREATE ($18.75 + $75 = $93.75)
+    // against $6.25 spent — another $87.50, which is what used to reach the ledger.
+    { type: 'assistant', isSidechain: true, message: { id: 'w3', role: 'assistant', model: 'claude-haiku-4-5',
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 0, output_tokens: 1e6, cache_creation_input_tokens: 1e6,
+               cache_read_input_tokens: 0,
+               cache_creation: { ephemeral_5m_input_tokens: 1e6, ephemeral_1h_input_tokens: 0 } } },
+      timestamp: '2026-01-01T00:00:03Z' },
+  ]));
+  const savedHome = process.env.CHEAPER_PEEK_HOME;
+  const savedLedger = process.env.CHEAPER_LEDGER_FILE;
+  const savedEvents = process.env.CHEAPER_EVENTS_DIR;
+  const savedPort = process.env.CHEAPER_PORT;
+  process.env.CHEAPER_PEEK_HOME = dir;
+  process.env.CHEAPER_LEDGER_FILE = path.join(dir, 'lifetime.json');
+  // Read at call time, so the audit append lands in the fixture no matter what the module
+  // cache resolved HOME to when events.js was first loaded by another test.
+  process.env.CHEAPER_EVENTS_DIR = path.join(dir, 'events');
+  process.env.CHEAPER_PORT = '59422';           // nothing listening → forces the estimate path
+  const logs = [];
+  const orig = console.log;
+  console.log = (s) => logs.push(String(s));
+  try {
+    for (const m of ['fsutil', 'adapters', 'scan', 'ledger', 'tagline']) {
+      delete require.cache[require.resolve('../src/peek/' + m)];
+    }
+    const tag = require('../src/peek/tagline');
+    const opts = { transcript: path.join(proj, 'sesW.jsonl') };
+    await tag.run({ ...opts, json: true });
+    var j = JSON.parse(logs[logs.length - 1]);
+    await tag.run({ ...opts, format: 'markdown' });
+    var rendered = logs[logs.length - 1];
+  } finally {
+    console.log = orig;
+    if (savedHome === undefined) delete process.env.CHEAPER_PEEK_HOME; else process.env.CHEAPER_PEEK_HOME = savedHome;
+    if (savedLedger === undefined) delete process.env.CHEAPER_LEDGER_FILE; else process.env.CHEAPER_LEDGER_FILE = savedLedger;
+    if (savedEvents === undefined) delete process.env.CHEAPER_EVENTS_DIR; else process.env.CHEAPER_EVENTS_DIR = savedEvents;
+    if (savedPort === undefined) delete process.env.CHEAPER_PORT; else process.env.CHEAPER_PORT = savedPort;
+    fs.rmSync(dir, { recursive: true, force: true });
+    for (const m of ['fsutil', 'adapters', 'scan', 'ledger', 'tagline']) {
+      delete require.cache[require.resolve('../src/peek/' + m)];
+    }
+  }
+  // The cold sub-agent is withheld, so the ledger takes $84.00 — NOT the $171.50 the
+  // one-breakdown-into-both-legs pricing used to hand it.
+  assert.ok(Math.abs(j.lifetime.usd - 84) < 1e-6,
+    'expected $84.00 in the ledger; $171.50 is the un-withheld figure. usd=' + j.lifetime.usd);
+  // Tokens travel with the dollars — the withheld call's 2M must not be credited either.
+  assert.equal(j.lifetime.tokens, 2e6);
+  assert.equal(j.lifetime.chats, 1);
+  assert.ok(Math.abs(j.result.dollarsSaved - 84) < 1e-6, 'dollarsSaved=' + j.result.dollarsSaved);
+  assert.equal(j.result.population.withheld, 1);
+  // ...and the printed line says what it withheld, in the same sentence as the coverage.
+  assert.match(rendered, / Lifetime savings: 🟢 about \$84\.00 and 2\.0M tokens\./, rendered);
+  assert.match(rendered, / Coverage: 1 switched call claims no saving — a cold prompt cache leaves the un-switched baseline indeterminate\./, rendered);
+});
+
+// ---- peek scan: unpriceable calls are COUNTED, and history prices at its own date ----
+
+test('estimateCall returns a SIGNED delta — a costlier "downgrade" is not clamped to zero', () => {
+  const { estimateCall: ec } = require('../src/peek/pricing');
+  // A tier's route target is not cheaper than every model of the tier above it on every
+  // token mix. The sonnet target gemini-3.5-flash bills input at $1.50/Mtok; the
+  // opus-tier gemini-2.5-pro bills it at $1.25. On an input-heavy call the "downgrade"
+  // costs MORE: 100k in + 10k out is $0.225 on the pro and $0.240 on the flash.
+  // `Math.max(0, ...)` reported that as a flat $0.00 — a suppression performed in the
+  // arithmetic, which erases the loss from every total that follows.
+  const e = ec('gemini-2.5-pro', 1e5, 1e4, 'sonnet');
+  assert.equal(e.priceable, true);
+  assert.equal(e.downgraded, true);
+  assert.equal(e.effTier, 'sonnet');
+  assert.ok(Math.abs(e.actualCost - 0.225) < 1e-9, 'actualCost=' + e.actualCost);
+  assert.ok(Math.abs(e.newCost - 0.24) < 1e-9, 'newCost=' + e.newCost);
+  assert.ok(e.saved < 0, 'the delta must keep its sign, got ' + e.saved);
+  assert.ok(Math.abs(e.saved + 0.015) < 1e-9, 'saved=' + e.saved);
+  // ...and it is separated the way derive.js::foldRows separates it, so a net that has
+  // been reduced by an offset can still be explained.
+  assert.equal(e.gross, 0);
+  assert.ok(Math.abs(e.extra - 0.015) < 1e-9, 'extra=' + e.extra);
+  // A genuine saving still reports positively, with extra at zero.
+  const good = ec('claude-opus-4', 1e6, 1e6, 'haiku');
+  assert.ok(Math.abs(good.saved - 84) < 1e-9);
+  assert.ok(Math.abs(good.gross - 84) < 1e-9);
+  assert.equal(good.extra, 0);
+});
+
+test('estimateCall prices HISTORY at the call\'s own day and the counterfactual at TODAY', () => {
+  const { estimateCall: ec, costOfModel } = require('../src/peek/pricing');
+  const toks = { inFresh: 1e6, outTok: 1e6 };
+  // Sonnet 5 launch pricing is $2/$10 through 2026-08-31, $3/$15 after. The SAME call
+  // must cost what it cost on the day it ran — the figure `peek` prints as "Spent on
+  // record" is a historical fact and may not move when a promo window shuts.
+  // (contentTier 'opus' caps to the model's own tier, so no downgrade muddies this.)
+  const inWin = ec('claude-sonnet-5', 1e6, 1e6, 'opus', { at: '2026-08-10' });
+  const after = ec('claude-sonnet-5', 1e6, 1e6, 'opus', { at: '2026-09-10' });
+  assert.ok(Math.abs(inWin.actualCost - 12) < 1e-9, 'in-window actualCost=' + inWin.actualCost);
+  assert.ok(Math.abs(after.actualCost - 18) < 1e-9, 'after-window actualCost=' + after.actualCost);
+  assert.notEqual(inWin.actualCost, after.actualCost,
+    'both legs resolving at todayUTC() is exactly the defect');
+  // The PROSPECTIVE leg is a different question and legitimately prices at today
+  // (models.js:242-258), so it does NOT move with the row's date.
+  const todayCost = costOfModel('claude-sonnet-5', toks);
+  assert.equal(inWin.baselineCost, todayCost);
+  assert.equal(after.baselineCost, todayCost);
+  // No date supplied → the two collapse, exactly as before this split existed.
+  const undated = ec('claude-sonnet-5', 1e6, 1e6, 'opus');
+  assert.equal(undated.actualCost, undated.baselineCost);
+});
+
+test('peek scan: unpriceable calls are counted, and dated rows price at their own day', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-unpriced-'));
+  const proj = path.join(dir, '.claude', 'projects', 'demo');
+  fs.mkdirSync(proj, { recursive: true });
+  const turn = (id, model, ts, inTok, outTok) => ({
+    type: 'assistant', isSidechain: false,
+    message: { id, role: 'assistant', model, content: [{ type: 'text', text: 'ok' }],
+               usage: { input_tokens: inTok, output_tokens: outTok } },
+    timestamp: ts,
+  });
+  fs.writeFileSync(path.join(proj, 'sesU.jsonl'), [
+    // Same model, same tokens, two different days — one inside Sonnet 5's promotional
+    // window ($2/$10 → $12) and one after it ($3/$15 → $18). Priced at their own days
+    // the pair is $30. Priced at TODAY (the old behaviour) it is 2×$12=$24 or 2×$18=$36,
+    // depending on the day the suite happens to run — never $30.
+    turn('u1', 'claude-sonnet-5', '2026-08-10T12:00:00Z', 1e6, 1e6),
+    turn('u2', 'claude-sonnet-5', '2026-09-10T12:00:00Z', 1e6, 1e6),
+    // Open-weight: a real vendor, no single published list price, so it is UNPRICEABLE.
+    // It contributes 0.0 to every dollar figure — which is only honest while the
+    // exclusion is counted, else 200 uncatalogued calls and 2 catalogued ones render as
+    // one small, confident, complete-looking number.
+    turn('u3', 'llama-4-maverick', '2026-08-10T12:00:00Z', 5e5, 5e5),
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+
+  const saved = process.env.CHEAPER_PEEK_HOME;
+  process.env.CHEAPER_PEEK_HOME = dir;
+  try {
+    for (const m of ['fsutil', 'adapters', 'scan']) delete require.cache[require.resolve('../src/peek/' + m)];
+    const { scan } = require('../src/peek/scan');
+    const rep = scan({ only: 'claude-code' });
+    const h = rep.harnesses.find((x) => x.key === 'claude-code');
+    assert.equal(h.calls, 3);
+    // The exclusion is visible, in calls AND in tokens.
+    assert.equal(h.unpriced, 1, 'the open-weight call must be counted as unpriced');
+    assert.equal(h.unpricedTokens, 1e6);
+    assert.equal(rep.totals.unpriced, 1);
+    assert.equal(rep.totals.unpricedTokens, 1e6);
+    assert.ok(Math.abs(rep.totals.unpricedRatio - 0.2) < 1e-9, 'ratio=' + rep.totals.unpricedRatio);
+    // ...and the historical spend is priced per row at that row's own calendar day.
+    assert.ok(Math.abs(h.dollarsActual - 30) < 1e-6, 'dollarsActual=' + h.dollarsActual);
+  } finally {
+    if (saved === undefined) delete process.env.CHEAPER_PEEK_HOME;
+    else process.env.CHEAPER_PEEK_HOME = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+    for (const m of ['fsutil', 'adapters', 'scan']) delete require.cache[require.resolve('../src/peek/' + m)];
+  }
+});
+
+test('peek scan: an anti-saving survives into the totals instead of being clamped away', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-anti-'));
+  const proj = path.join(dir, '.claude', 'projects', 'demo');
+  fs.mkdirSync(proj, { recursive: true });
+  // A "refactor the pagination endpoint" prompt classifies sonnet, so the opus-tier
+  // gemini-2.5-pro turn below it is judged downgradable to the sonnet route target —
+  // which, on this input-heavy mix, is the MORE expensive model.
+  fs.writeFileSync(path.join(proj, 'sesN.jsonl'), [
+    { type: 'user', message: { role: 'user', content: 'please refactor the pagination endpoint' },
+      timestamp: '2026-08-10T12:00:00Z' },
+    { type: 'assistant', isSidechain: false,
+      message: { id: 'n1', role: 'assistant', model: 'gemini-2.5-pro',
+                 content: [{ type: 'text', text: 'ok' }],
+                 usage: { input_tokens: 1e5, output_tokens: 1e4 } },
+      timestamp: '2026-08-10T12:00:01Z' },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const saved = process.env.CHEAPER_PEEK_HOME;
+  process.env.CHEAPER_PEEK_HOME = dir;
+  try {
+    for (const m of ['fsutil', 'adapters', 'scan']) delete require.cache[require.resolve('../src/peek/' + m)];
+    const { scan } = require('../src/peek/scan');
+    const rep = scan({ only: 'claude-code' });
+    const h = rep.harnesses.find((x) => x.key === 'claude-code');
+    assert.equal(h.downgradable, 1);
+    // The clamp reported this as a flat 0 and the loss left the report entirely.
+    assert.ok(h.dollarsSaved < 0, 'net must stay negative, got ' + h.dollarsSaved);
+    assert.ok(Math.abs(h.dollarsSaved + 0.015) < 1e-9, 'dollarsSaved=' + h.dollarsSaved);
+    assert.equal(h.dollarsGross, 0);
+    assert.ok(Math.abs(h.dollarsExtra - 0.015) < 1e-9, 'dollarsExtra=' + h.dollarsExtra);
+    assert.equal(h.offsetCalls, 1);
+    assert.ok(rep.totals.dollarsSaved < 0, 'totals=' + rep.totals.dollarsSaved);
+    assert.ok(rep.totals.savedPct < 0, 'savedPct must carry the sign: ' + rep.totals.savedPct);
+  } finally {
+    if (saved === undefined) delete process.env.CHEAPER_PEEK_HOME;
+    else process.env.CHEAPER_PEEK_HOME = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+    for (const m of ['fsutil', 'adapters', 'scan']) delete require.cache[require.resolve('../src/peek/' + m)];
+  }
+});
+
+// ---- peek RENDER: the honesty fields have to reach the surface people read -----------
+//
+// scan.js counts `unpriced` / `unpricedTokens` / `unpricedRatio` and decomposes the net
+// into `dollarsGross` / `dollarsExtra` / `offsetCalls`, and every one of them stopped at
+// `peek --json`. The terminal output — the surface almost everyone actually reads —
+// printed a small, confident, fully-covered number over whatever happened to be in the
+// catalog. These tests drive the REAL renderer, never a re-implementation of it.
+
+// ANSI is presentation; the CLAIM is the text underneath, so assertions read the text.
+const plain = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+// The line a label introduces, from the rendered block.
+const lineWith = (out, label) =>
+  plain(out).split('\n').find((l) => l.includes(label)) || '';
+
+// A scan report in exactly the shape scan.js::scan emits. Totals are SUMMED from the
+// harnesses rather than passed in, so a fixture cannot state a total its own rows
+// contradict — the very defect class these tests cover.
+function peekReport(harnesses, opts) {
+  const base = {
+    key: 'h', label: 'claude-code', status: 'supported', installed: true,
+    filesScanned: 1, note: '', calls: 0, downgradable: 0, estimatedCalls: 0,
+    unpriced: 0, unpricedTokens: 0, tokens: 0, tokensOnDowngradable: 0,
+    dollarsActual: 0, dollarsBaseline: 0, dollarsSaved: 0,
+    dollarsGross: 0, dollarsExtra: 0, offsetCalls: 0,
+    bySource: { user: 0, subagent: 0 }, examples: [],
+  };
+  const hs = harnesses.map((h) => Object.assign({}, base, h));
+  const T = { bySource: { user: 0, subagent: 0 } };
+  for (const k of ['calls', 'downgradable', 'estimatedCalls', 'unpriced', 'unpricedTokens',
+                   'tokens', 'tokensOnDowngradable', 'dollarsActual', 'dollarsBaseline',
+                   'dollarsSaved', 'dollarsGross', 'dollarsExtra', 'offsetCalls']) {
+    T[k] = hs.reduce((a, h) => a + (Number(h[k]) || 0), 0);
+  }
+  for (const h of hs) {
+    T.bySource.user += h.bySource.user; T.bySource.subagent += h.bySource.subagent;
+  }
+  T.savedPct = T.dollarsBaseline > 0 ? (T.dollarsSaved / T.dollarsBaseline) * 100 : 0;
+  T.unpricedRatio = T.tokens > 0 ? T.unpricedTokens / T.tokens : 0;
+  T.annualizedSaved = null;
+  return { generatedAt: Date.now(), opts: Object.assign({ sinceDays: 0 }, opts || {}),
+           harnesses: hs, totals: T };
+}
+
+test('peek render: excluded rows are COUNTED and VISIBLE, per harness and on totals', () => {
+  const { render: rdr } = require('../src/peek/render');
+  // 200 uncatalogued calls and 2 catalogued ones. The dollar figures describe 2 rows;
+  // without the coverage line they describe 202 to anyone reading the screen.
+  const out = plain(rdr(peekReport([{
+    calls: 202, downgradable: 1, tokens: 4.1e6, tokensOnDowngradable: 1e5,
+    unpriced: 200, unpricedTokens: 4e6,
+    dollarsActual: 0.5, dollarsBaseline: 0.6, dollarsSaved: 0.2, dollarsGross: 0.2,
+    bySource: { user: 202, subagent: 0 },
+  }])));
+  // Per-harness: the exclusion travels on the row whose money it qualifies.
+  assert.match(out, /200\/202 not priced/, out);
+  assert.match(out, /4\.0M tok/, out);
+  // Totals: calls, tokens and the ratio, all three.
+  const nl = lineWith(out, 'Not priced');
+  assert.match(nl, /200 of 202 calls/, nl);
+  assert.match(nl, /4\.0M of 4\.1M tokens/, nl);
+  assert.match(nl, /98% of tokens/, nl);
+  assert.match(nl, /excluded from every dollar above/, nl);
+  // One genuine opportunity in 202 calls must not render as "0%" beside the count.
+  assert.match(out, /1 \(<1%\)/, out);
+
+  // A fully-priced scan says so affirmatively — silence cannot distinguish "all covered"
+  // from "this build does not report coverage".
+  const clean = plain(rdr(peekReport([{
+    calls: 10, downgradable: 4, tokens: 5e6, tokensOnDowngradable: 2e6,
+    dollarsActual: 30, dollarsBaseline: 36, dollarsSaved: 24, dollarsGross: 24,
+    bySource: { user: 10, subagent: 0 },
+  }])));
+  assert.match(clean, /Coverage +all 10 calls priced\./, clean);
+  assert.ok(!/Not priced/.test(clean), clean);
+});
+
+test('peek render: a scan that priced NOTHING withholds its dollars — never $0.00', () => {
+  const { render: rdr } = require('../src/peek/render');
+  // Every dollar accumulator still holds its initial 0. That 0 is the initial value, not
+  // a measurement, and printing it as $0.00 is how "we could not price this" becomes
+  // "this cost nothing" (invariant 4, invariant 7).
+  const out = plain(rdr(peekReport([{
+    calls: 200, downgradable: 0, tokens: 4e6, unpriced: 200, unpricedTokens: 4e6,
+    bySource: { user: 200, subagent: 0 },
+  }])));
+  assert.ok(!/\$0\.00/.test(out), 'a vacuous zero must never be printed as money: ' + out);
+  for (const label of ['Spent on record', 'At today’s rates', 'Could have saved',
+                       'You’d still pay']) {
+    assert.match(lineWith(out, label), /withheld/, label + ': ' + lineWith(out, label));
+  }
+  // WITHHELD is decided BEFORE ABSENT: the bare em dash would claim there is nothing
+  // here, about rows the same screen counts.
+  assert.match(out, /200\/200 not priced/, out);
+  assert.match(out, /Dollars withheld/, out);
+
+  // A harness that was never readable is NOT COVERED — a different claim again, and it
+  // must not be dressed up as a withheld figure.
+  const none = plain(rdr(peekReport([{ label: 'codex', status: 'sqlite', calls: 0 }])));
+  assert.match(none, /not covered — /, none);
+  // And with no calls anywhere, every money line is a labelled non-number, not a zero.
+  assert.ok(!/\$0\.00/.test(none), none);
+  assert.match(lineWith(none, 'Could have saved'), /—/, none);
+});
+
+test('peek render: "you’d still pay" stays in ONE frame and is never clamped', () => {
+  const { render: rdr } = require('../src/peek/render');
+  // dollarsActual is HISTORICAL (each row at its own pday); dollarsSaved is TODAY-frame
+  // (both of estimateCall's legs price at today). `dollarsActual - dollarsSaved` mixes
+  // them. Here a session recorded inside Sonnet 5's $2/$10 promo window ($12) is read
+  // after it closed ($18 at today's rates), and routing saves $6 of the today figure:
+  //   correct  = dollarsBaseline - dollarsSaved = 18 - 6 = $12.00
+  //   the bug  = dollarsActual   - dollarsSaved = 12 - 6 = $6.00
+  const out = plain(rdr(peekReport([{
+    calls: 2, downgradable: 1, tokens: 4e6, tokensOnDowngradable: 2e6,
+    dollarsActual: 12, dollarsBaseline: 18, dollarsSaved: 6, dollarsGross: 6,
+    bySource: { user: 2, subagent: 0 },
+  }])));
+  const pay = lineWith(out, 'You’d still pay');
+  assert.match(pay, /\$12\.00/, 'today-frame partner expected: ' + pay);
+  assert.ok(!/\$6\.00/.test(pay), 'the cross-frame subtraction must be gone: ' + pay);
+  // Both frames are still reported, each labelled, so the reader can see they differ.
+  assert.match(lineWith(out, 'Spent on record'), /\$12\.00/);
+  assert.match(lineWith(out, 'At today’s rates'), /\$18\.00/);
+  // The per-harness row carries the same corrected figure.
+  assert.match(out, /\$6\.00 \/ \$12\.00/, out);
+
+  // THE CLAMP. When the historical leg is small and the today-frame saving is large,
+  // `Math.max(0, actual - saved)` went negative and was flattened to a confident $0.00 —
+  // "this work will cost you nothing" — for work that will really cost $5.00.
+  const c2 = plain(rdr(peekReport([{
+    calls: 2, downgradable: 1, tokens: 2e6, tokensOnDowngradable: 1e6,
+    dollarsActual: 1, dollarsBaseline: 10, dollarsSaved: 5, dollarsGross: 5,
+    bySource: { user: 2, subagent: 0 },
+  }])));
+  const pay2 = lineWith(c2, 'You’d still pay');
+  assert.match(pay2, /\$5\.00/, 'the clamped figure was really $5.00: ' + pay2);
+  assert.ok(!/\$0\.00/.test(pay2), 'max(0, …) must not conceal it: ' + pay2);
+});
+
+test('peek render: an anti-saving is named, decomposed, and never printed as a saving', () => {
+  const { render: rdr } = require('../src/peek/render');
+  // The gemini-2.5-pro shape from the scan test above: one downgradable row whose route
+  // target is the MORE expensive model on this token mix.
+  const out = plain(rdr(peekReport([{
+    calls: 1, downgradable: 1, tokens: 1.1e5, tokensOnDowngradable: 1.1e5,
+    dollarsActual: 0.225, dollarsBaseline: 0.225, dollarsSaved: -0.015,
+    dollarsGross: 0, dollarsExtra: 0.015, offsetCalls: 1,
+    bySource: { user: 1, subagent: 0 },
+    examples: [{ from: 'opus', to: 'sonnet', saved: -0.015, source: 'user', text: 'refactor' }],
+  }])));
+  // A negative net is not a saving and is not labelled as one.
+  assert.ok(!/Could have saved/.test(out), 'a loss must not be headed "saved": ' + out);
+  assert.match(lineWith(out, 'Would cost MORE'), /-\$0\.02/, out);
+  // The sign leads the amount; "$-0.02" buries the minus inside the figure.
+  assert.ok(!/\$-/.test(out), 'sign must precede the $: ' + out);
+  // The decomposition is what lets a reduced net be explained rather than guessed at.
+  const off = lineWith(out, 'Offsets');
+  assert.match(off, /1 call\(s\) routed to a COSTLIER model/, off);
+  assert.match(off, /gross \$0\.00 less extra \$0\.02/, off);
+  // ...and the example row keeps its sign too.
+  assert.match(out, /-\$0\.02 +opus→sonnet/, out);
+});
+
+// ---- the reader's own refusals must reach `savings` and `logs` -----------------------
+
+// A synthetic event store whose segments the reader CANNOT account for.
+//   - a directory named like a live segment  -> readFileSync throws EISDIR -> `unreadable`
+//   - a .jsonl.gz holding non-gzip bytes     -> gunzipSync throws          -> `corrupt`
+// Both are deterministic and need no permission games (a suite running as root can read
+// a chmod-000 file, which would make that variant silently pass).
+function brokenEventStore() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-holes-'));
+  fs.mkdirSync(path.join(dir, '2026-07.cli.jsonl'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '2026-06.cli.jsonl.gz'), 'this is not gzip');
+  return dir;
+}
+
+test('cheaper savings: an unaccounted segment is published AND printed, not absorbed', () => {
+  const dir = brokenEventStore();
+  const prev = { d: process.env.CHEAPER_EVENTS_DIR, l: process.env.CHEAPER_LEGACY_FILE };
+  process.env.CHEAPER_EVENTS_DIR = dir;
+  process.env.CHEAPER_LEGACY_FILE = path.join(dir, 'no-such-legacy.json');
+  const out = [];
+  const orig = console.log;
+  console.log = (s) => out.push(plain(String(s)));
+  try {
+    const savings = require('../src/savings');
+    const b = savings.compute();
+    // `readAll` increments `segments` BEFORE attempting the read, so without these two
+    // counters "2 segments, 0 events" is indistinguishable from two quiet months.
+    assert.equal(b.store.segments, 2, JSON.stringify(b.store));
+    assert.equal(b.store.rows, 0);
+    assert.equal(b.store.unreadable, 1, 'unreadable must be published: ' + JSON.stringify(b.store));
+    assert.equal(b.store.corrupt, 1, 'corrupt must be published: ' + JSON.stringify(b.store));
+    savings.run([]);
+  } finally {
+    console.log = orig;
+    for (const [k, v] of [['CHEAPER_EVENTS_DIR', prev.d], ['CHEAPER_LEGACY_FILE', prev.l]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const txt = out.join('\n');
+  assert.match(txt, /1 segment\(s\) could NOT BE READ/, txt);
+  assert.match(txt, /1 sealed segment\(s\) are CORRUPT/, txt);
+  // "No per-call events recorded yet" is an affirmative claim about the user's history,
+  // and an unaccounted segment is precisely the evidence that would refute it.
+  assert.ok(!/No per-call events recorded yet/.test(txt),
+    'a broken store must not read as an empty one: ' + txt);
+  assert.match(txt, /No readable per-call events across 2 segment\(s\)/, txt);
+});
+
+test('cheaper logs: an unaccounted segment is printed, and caps the "showing N of M"', () => {
+  const dir = brokenEventStore();
+  const prev = { d: process.env.CHEAPER_EVENTS_DIR, l: process.env.CHEAPER_LEGACY_FILE };
+  process.env.CHEAPER_EVENTS_DIR = dir;
+  process.env.CHEAPER_LEGACY_FILE = path.join(dir, 'no-such-legacy.json');
+  const out = [];
+  const orig = console.log;
+  console.log = (s) => out.push(plain(String(s)));
+  try {
+    const logsMod = require('../src/logs');
+    const data = logsMod.localRows({ limit: 50 });
+    // The whole readStats travels — the register's job is to account for every row, so
+    // the reader's own refusals are part of the answer.
+    assert.equal(data.store.readStats.unreadable, 1, JSON.stringify(data.store.readStats));
+    assert.equal(data.store.readStats.corrupt, 1, JSON.stringify(data.store.readStats));
+    assert.deepEqual(logsMod.storeHoles({}), [],
+      'gateway rows report nothing about a store we never read');
+    logsMod.renderTable(data);
+  } finally {
+    console.log = orig;
+    for (const [k, v] of [['CHEAPER_EVENTS_DIR', prev.d], ['CHEAPER_LEGACY_FILE', prev.l]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const txt = out.join('\n');
+  assert.match(txt, /1 segment\(s\) could NOT BE READ/, txt);
+  assert.match(txt, /1 sealed segment\(s\) are CORRUPT/, txt);
+  assert.ok(!/^ *No events in this range\.$/m.test(txt),
+    'an unaccounted segment must not render as a clean empty range: ' + txt);
+  assert.match(txt, /No READABLE events in this range/, txt);
 });

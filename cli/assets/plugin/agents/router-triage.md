@@ -1,27 +1,41 @@
 ---
 name: router-triage
 description: |-
-  Cheapest-tier triage agent for the adaptive model router. Use this FIRST to
-  classify an incoming request or subtask — it either answers a genuinely simple
-  task itself or returns an escalation verdict naming the tier to hand off to. Use
-  whenever you need a cheap "is this simple, or does it need a bigger model?"
-  decision.
+  Cheapest-tier classifier and mechanical worker for the adaptive model router. It
+  either answers a genuinely simple task itself or returns an escalation verdict
+  naming the tier to hand off to.
+
+  Use it when deciding the tier would require READING material you don't already
+  have, or for mechanical fan-out legs. Do NOT use it to classify a request that is
+  already in your context: dispatching costs the session model's OUTPUT rate to
+  re-emit the request plus its INPUT rate to read the verdict back, which is 22x this
+  agent's own bill and 1.76x simply answering the request. Classify in-loop instead —
+  see the cost arithmetic in the adaptive-model-router skill.
 
   <example>
-  Context: A new request has arrived and the router should decide the tier cheaply.
-  user: "Rephrase this sentence to sound more formal."
-  assistant: "I'll run router-triage first; this is likely simple enough to handle at the cheapest tier."
+  Context: The tier depends on material the orchestrator has not read.
+  user: "Have a look at the files under src/sync/ and tell me how hard this refactor is."
+  assistant: "Deciding needs a survey of files I don't have in context, so I'll send router-triage to read them and come back with a verdict."
   <commentary>
-  Triage is the always-first, lowest-cost step; simple tasks get answered here with no escalation.
+  The reading is real churn that never crosses back, so this dispatch clears the break-even bar. Classifying text already in context would not.
   </commentary>
   </example>
 
   <example>
-  Context: A request looks hard and the router wants a cheap, honest tier decision.
-  user: "Prove this lock-free queue is free of the ABA problem."
-  assistant: "Let me use router-triage to classify it — a proof/concurrency task should come back as an escalate-to-opus verdict."
+  Context: A wide, mechanical gathering leg inside a larger job.
+  user: "Pull the error code and timestamp out of each of these 40 log files."
+  assistant: "Forty parallel router-triage agents, one per file, each returning two fields."
   <commentary>
-  Even obvious escalations pass through triage; the verdict keeps the policy honest and cheap.
+  Big private churn, tiny prompt and answer per leg — the shape where delegating to the cheapest tier genuinely saves money.
+  </commentary>
+  </example>
+
+  <example>
+  Context: A request that is obviously correctness-critical.
+  user: "Prove this lock-free queue is free of the ABA problem."
+  assistant: "Concurrency plus a proof is an auto-escalate category, so this goes straight to router-solver-opus — no classification round-trip."
+  <commentary>
+  Routing an obvious escalation through triage first adds a full boundary tax to learn something already known, and gives the weakest tier a chance to answer it instead.
   </commentary>
   </example>
 model: haiku

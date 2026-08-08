@@ -16,14 +16,351 @@
 //   * a legacy chat-grain row, so the third visual state renders
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..', '..');
-const SANDBOX = path.join(REPO, '.playwright-tmp');
+// Resolve symlinks once, at load. Two names for the same checkout must hash to the same
+// sandbox, and the "is this path inside the repo?" guard below must not be defeatable by
+// reaching the repo through a symlink.
+const REPO_REAL = (() => {
+  try { return fs.realpathSync(REPO); } catch { return REPO; }
+})();
 
-function rmrf(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ } }
+// ---------------------------------------------------------------------------------
+// WHERE THE DATA SANDBOX LIVES, AND WHY EVERY STEP OF PICKING THAT PATH IS GUARDED
+// ---------------------------------------------------------------------------------
+// The data sandbox (auth token + metrics DB + event store) lives OUTSIDE the repo, in
+// the OS temp directory — not under REPO. A stray `git clean -fdx`, a deploy automation
+// walking the repo tree, or an over-broad rm in a script must not be able to reach it.
+// (Test ARTIFACTS and the HTML report are a different thing: a human opens those after a
+// run, so they stay under the repo, gitignored — see playwright.config.js `outputDir`
+// and the html reporter's `outputFolder`. Only the DATA sandbox moves here.)
+//
+// Three things make that safe, and none of them is optional:
+//
+//  1. The name is namespaced by OS user AND by CHECKOUT. The user segment stops two
+//     accounts on a shared machine from squatting on each other. The checkout segment is
+//     the one that actually matters day to day: this repo deliberately runs concurrent
+//     agents in git worktrees, and a run that is live in /clone-a must not be wiped by a
+//     second invocation in /clone-b. `CHEAPER_E2E_SEEDED` cannot help there — it is an
+//     env var inherited only inside ONE process tree, so a second `npx playwright test`
+//     (even a bare `--list`) starts with it unset and would re-seed, i.e. recursively
+//     delete the live run's metrics.db, dash.token, event store and seed.json mid-run.
+//     Both segments are module-level constants so the path stays identical across the
+//     config re-evaluation Playwright does in every worker process.
+//
+//  2. os.tmpdir() is CALLER-CONTROLLED (it returns $TMPDIR, then $TMP, $TEMP, then /tmp,
+//     verbatim). A guard that recomputes its "is this under the temp dir?" bound from the
+//     same value proves nothing: with TMPDIR=$HOME the sandbox becomes a directory in the
+//     user's home and the check still passes; with TMPDIR=. it resolves back INSIDE the
+//     repo, reinstating the exact exposure this layout exists to remove. So the temp root
+//     is validated against facts that do NOT come from TMPDIR (the repo path, the home
+//     directory, absoluteness) and a rejected value falls back to the platform default.
+//
+//  3. The root is created FAIL-CLOSED. `mkdirSync(p, {recursive:true, mode:0o700})` on a
+//     directory that already exists silently leaves its mode alone, so on a Linux/CI
+//     world-writable sticky /tmp another local user can pre-create the sandbox 0777 (or
+//     as a symlink), have our delete fail with EPERM, and then read the dashboard token
+//     we write into it — or redirect our writes entirely. So: the wipe is loud, the
+//     mkdir is non-recursive (EEXIST throws), and the result is lstat-verified to be a
+//     real directory owned by us with mode exactly 0700.
+const SANDBOX_OWNER = (() => {
+  try {
+    const info = os.userInfo();
+    // Prefer the numeric uid where the platform has one (POSIX); fall back to username
+    // (e.g. Windows, or a sandboxed uid of -1) so the segment is never empty or generic.
+    if (Number.isInteger(info.uid) && info.uid >= 0) return String(info.uid);
+    if (info.username) return info.username.replace(/[^a-zA-Z0-9_.-]/g, '_');
+  } catch { /* fall through */ }
+  return 'unknown';
+})();
+// Short, stable, collision-resistant id for THIS checkout. Two worktrees of the same repo
+// have different __dirname values and therefore different sandboxes.
+const CHECKOUT_ID = crypto.createHash('sha256').update(REPO_REAL).digest('hex').slice(0, 12);
+const SANDBOX_BASENAME = `cheaper-e2e-${SANDBOX_OWNER}-${CHECKOUT_ID}`;
+
+// `path.relative` says nothing useful about containment on its own — turn it into one.
+function isInside(parent, child) {
+  if (!parent || !child) return false;
+  const rel = path.relative(parent, child);
+  if (rel === '' || path.isAbsolute(rel)) return false;
+  return !rel.split(path.sep).includes('..');
+}
+
+// Home, in every spelling we can cheaply obtain, so a check against it cannot be dodged
+// by handing us the symlinked form.
+const HOME_PATHS = (() => {
+  const out = [];
+  let h;
+  try { h = os.homedir(); } catch { h = null; }
+  if (h && path.isAbsolute(h)) {
+    const resolved = path.resolve(h);
+    if (resolved !== path.parse(resolved).root) out.push(resolved);
+    try {
+      const real = fs.realpathSync(resolved);
+      if (real !== path.parse(real).root && !out.includes(real)) out.push(real);
+    } catch { /* home may not resolve in an exotic sandbox; the literal form still counts */ }
+  }
+  return out;
+})();
+
+function platformDefaultTempRoot() {
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || process.env.SystemRoot || process.env.windir;
+    return base ? path.join(base, 'Temp') : null;
+  }
+  return '/tmp';
+}
+
+// Returns null when `root` is an acceptable temp root, else a human-readable reason.
+// Every rejection reason here is derived from something OTHER than TMPDIR.
+function tempRootProblem(root) {
+  if (typeof root !== 'string' || !root) return 'empty';
+  if (!path.isAbsolute(root)) return `not an absolute path: ${JSON.stringify(root)}`;
+  const resolved = path.resolve(root);
+  let real;
+  try { real = fs.realpathSync(resolved); } catch (e) { return `does not resolve (${e.code || e.message})`; }
+  if (real === path.parse(real).root) return 'is the filesystem root';
+  for (const home of HOME_PATHS) {
+    if (real === home) return `is the home directory (${home})`;
+  }
+  if (real === REPO_REAL) return 'is the repo checkout itself';
+  if (isInside(REPO_REAL, real)) return `is inside the repo checkout (${REPO_REAL})`;
+  let st;
+  try { st = fs.lstatSync(real); } catch (e) { return `cannot be stat'd (${e.code || e.message})`; }
+  if (!st.isDirectory()) return 'is not a directory';
+  return null;
+}
+
+const TMP_ROOT = (() => {
+  const tried = [];
+  const candidates = [];
+  try { candidates.push(os.tmpdir()); } catch { /* os.tmpdir() should not throw, but do not die here */ }
+  const fallback = platformDefaultTempRoot();
+  if (fallback) candidates.push(fallback);
+  for (const cand of candidates) {
+    const problem = tempRootProblem(cand);
+    if (!problem) {
+      if (tried.length) {
+        // Loud on purpose: silently relocating the sandbox is how a hostile TMPDIR turns
+        // into "the tests passed but wrote somewhere nobody expected".
+        console.warn(`[e2e seed] rejected temp root ${tried.join('; ')} — using ${cand} instead`);
+      }
+      return fs.realpathSync(path.resolve(cand));
+    }
+    tried.push(`${JSON.stringify(cand)} (${problem})`);
+  }
+  throw new Error(
+    'e2e sandbox: no usable OS temp root. Rejected: ' + (tried.join('; ') || '<none offered>'));
+})();
+
+const SANDBOX = path.join(TMP_ROOT, SANDBOX_BASENAME);
+// The run lock deliberately sits BESIDE the sandbox, not inside it: it has to survive the
+// recursive wipe it is guarding, and it has to be creatable atomically before the wipe.
+const LOCK_PATH = SANDBOX + '.lock';
+const SEED_INFO_PATH = path.join(SANDBOX, 'seed.json');
+
+// The seeder deletes SANDBOX recursively on every run. A recursive delete driven by a
+// computed path is the single most dangerous line in this file, so the target is proved
+// safe first — and the proof does not lean on the same env-derived value that produced
+// the path. Returns null when `resolved` is safe, else the reason it is not.
+function sandboxPathProblem(resolved) {
+  // The order matters: the SAFETY checks that do not depend on $TMPDIR run FIRST, so a
+  // rejection reason names the real hazard rather than whichever identity check happened
+  // to notice a mismatch on the way past.
+  if (!resolved) return 'empty path';
+  if (!path.isAbsolute(resolved)) return 'not an absolute path';
+  if (resolved === path.parse(resolved).root) return 'is the filesystem root';
+  const parent = path.dirname(resolved);
+  if (parent === resolved) return 'has no parent directory';
+
+  // --- env-INDEPENDENT: never the repo, never inside it, never above it --------------
+  if (resolved === REPO_REAL) return 'is the repo checkout itself';
+  if (isInside(REPO_REAL, resolved)) return `is inside the repo checkout (${REPO_REAL})`;
+  if (isInside(resolved, REPO_REAL)) return `contains the repo checkout (${REPO_REAL})`;
+
+  // --- env-INDEPENDENT: never the home directory, never sitting directly in it -------
+  for (const home of HOME_PATHS) {
+    if (resolved === home) return `is the home directory (${home})`;
+    if (parent === home) return `sits directly in the home directory (${home})`;
+    if (isInside(resolved, home)) return `contains the home directory (${home})`;
+  }
+
+  // --- env-INDEPENDENT: never a top-level directory ---------------------------------
+  if (parent === path.parse(resolved).root) return 'is a top-level directory';
+
+  // --- identity: exactly our namespaced name, exactly one level under the temp root --
+  if (path.basename(resolved) !== SANDBOX_BASENAME) {
+    return `basename is not ${JSON.stringify(SANDBOX_BASENAME)}`;
+  }
+  if (parent !== TMP_ROOT) return `parent is not the validated temp root (${TMP_ROOT})`;
+  return null;
+}
+
+function assertSafeSandboxPath(p) {
+  const resolved = path.resolve(p);
+  const problem = sandboxPathProblem(resolved);
+  if (problem) {
+    throw new Error(`refusing to delete ${JSON.stringify(resolved)}: it ${problem}`);
+  }
+  if (resolved !== SANDBOX) {
+    throw new Error(`refusing to delete a path that is not this run's sandbox: ` +
+      `${JSON.stringify(resolved)} !== ${JSON.stringify(SANDBOX)}`);
+  }
+  return resolved;
+}
+
+// Validate the computed sandbox at LOAD time, so a hostile environment fails before any
+// caller can reach a filesystem operation.
+{
+  const problem = sandboxPathProblem(SANDBOX);
+  if (problem) {
+    throw new Error(`e2e sandbox path ${JSON.stringify(SANDBOX)} is unusable: it ${problem}`);
+  }
+}
+
+// A failed wipe is NOT ignorable. The whole "rebuilt from scratch on each run" invariant —
+// and with it every screenshot baseline — depends on this actually emptying the tree; and
+// an EPERM here is the exact signature of somebody else's directory sitting on our name.
+function rmrf(p) {
+  const safe = assertSafeSandboxPath(p);
+  try {
+    fs.rmSync(safe, { recursive: true, force: true });
+  } catch (e) {
+    throw new Error(
+      `e2e sandbox: failed to wipe ${safe} (${e.code || e.message}). The suite refuses to ` +
+      'seed on top of a tree it could not empty — stale rows would silently rewrite the ' +
+      'screenshot baselines, and a directory we cannot delete is not a directory we own.');
+  }
+  let leftover = null;
+  try { leftover = fs.lstatSync(safe); } catch { /* gone, as intended */ }
+  if (leftover) {
+    throw new Error(`e2e sandbox: ${safe} still exists after the wipe; refusing to continue.`);
+  }
+}
+
+// Create the sandbox root fail-closed. NON-recursive on purpose: `recursive: true` treats
+// a pre-existing directory as success and leaves its mode untouched, which is precisely
+// the hole another local user pre-creating /tmp/<our-name> 0777 walks through.
+function makeSandboxRoot() {
+  fs.mkdirSync(SANDBOX, { mode: 0o700 });   // EEXIST throws — nothing may pre-exist here
+  if (typeof process.getuid === 'function') {
+    // mkdir's mode is masked by umask; an exotic umask must not silently widen this.
+    fs.chmodSync(SANDBOX, 0o700);
+  }
+  assertPrivateDir(SANDBOX);
+}
+
+function assertPrivateDir(p) {
+  let st;
+  try { st = fs.lstatSync(p); } catch (e) {
+    throw new Error(`e2e sandbox: ${p} is missing right after creation (${e.code || e.message})`);
+  }
+  if (st.isSymbolicLink()) throw new Error(`e2e sandbox: ${p} is a symlink; refusing to use it`);
+  if (!st.isDirectory()) throw new Error(`e2e sandbox: ${p} is not a directory`);
+  // POSIX only — process.getuid is undefined on Windows, where ACLs already scope the
+  // per-user temp dir and there is no mode to check.
+  if (typeof process.getuid === 'function') {
+    const uid = process.getuid();
+    if (st.uid !== uid) {
+      throw new Error(`e2e sandbox: ${p} is owned by uid ${st.uid}, not ${uid}; refusing to use it`);
+    }
+    const mode = st.mode & 0o7777;
+    if (mode !== 0o700) {
+      throw new Error(`e2e sandbox: ${p} has mode 0${mode.toString(8)}, expected 0700`);
+    }
+  }
+}
+
+// --- the run lock ------------------------------------------------------------------
+// One exclusive holder per (user, checkout) for the lifetime of the process that seeded.
+// A second invocation now fails LOUDLY instead of recursively deleting a live run's
+// token, database and event store out from under it.
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code === 'EPERM'; }   // alive, just not ours to signal
+}
+
+let lockHeld = false;
+
+function releaseRunLock() {
+  if (!lockHeld) return;
+  lockHeld = false;
+  try {
+    const holder = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+    if (holder.pid !== process.pid) return;   // someone reclaimed it; not ours to remove
+  } catch { return; }
+  try { fs.unlinkSync(LOCK_PATH); } catch { /* best effort on the way out */ }
+}
+
+function acquireRunLock() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // 'wx' is O_CREAT|O_EXCL: atomic, and it refuses an existing path INCLUDING a
+      // dangling symlink, so this cannot be turned into an arbitrary write.
+      const fd = fs.openSync(LOCK_PATH, 'wx', 0o600);
+      try {
+        fs.writeSync(fd, JSON.stringify({
+          pid: process.pid, startedAt: Date.now(), repo: REPO_REAL, sandbox: SANDBOX,
+        }));
+      } finally { fs.closeSync(fd); }
+      lockHeld = true;
+      // 'exit' only — deliberately NO signal handlers. Playwright installs its own
+      // SIGINT handling to tear the uvicorn webServer down, and a handler of ours that
+      // raced it could leave an orphaned gateway holding the port. A lock leaked by
+      // Ctrl-C or SIGKILL is not a wedge: the next run sees the holder pid is dead and
+      // reclaims it (the stale-reclaim path below).
+      process.once('exit', releaseRunLock);
+      return LOCK_PATH;
+    } catch (e) {
+      if (e.code !== 'EEXIST') {
+        throw new Error(`e2e sandbox: cannot create run lock ${LOCK_PATH} (${e.code || e.message})`);
+      }
+    }
+
+    // Occupied. Fail closed unless the holder is PROVABLY gone.
+    let lst;
+    try { lst = fs.lstatSync(LOCK_PATH); } catch { continue; }   // vanished — retry
+    if (!lst.isFile()) {
+      throw new Error(`e2e sandbox: run lock ${LOCK_PATH} is not a regular file. ` +
+        `Refusing to wipe ${SANDBOX}. Inspect and remove it by hand.`);
+    }
+    if (typeof process.getuid === 'function' && lst.uid !== process.getuid()) {
+      throw new Error(`e2e sandbox: run lock ${LOCK_PATH} is owned by uid ${lst.uid}, ` +
+        `not ${process.getuid()}. Refusing to wipe ${SANDBOX}.`);
+    }
+    let holder = null;
+    try { holder = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')); } catch { /* unreadable */ }
+    if (!holder || !Number.isInteger(holder.pid)) {
+      throw new Error(`e2e sandbox: run lock ${LOCK_PATH} is unreadable, so this run cannot ` +
+        `prove nobody else owns ${SANDBOX}. Remove the lock by hand once you are sure.`);
+    }
+    if (holder.pid !== process.pid && pidAlive(holder.pid)) {
+      throw new Error(
+        `e2e sandbox: another Playwright run (pid ${holder.pid}, started ` +
+        `${new Date(holder.startedAt).toISOString()}) already owns ${SANDBOX}. ` +
+        'Seeding starts by recursively deleting that directory, which would destroy the ' +
+        "live run's metrics.db, dash.token and event store mid-run — so this run is " +
+        `stopping instead. Wait for it to finish, or delete ${LOCK_PATH} if you are ` +
+        'certain that process is gone.');
+    }
+    // Provably stale (holder is dead, or it is this very process re-seeding): reclaim.
+    try { fs.unlinkSync(LOCK_PATH); } catch (e) {
+      throw new Error(`e2e sandbox: cannot clear the stale run lock ${LOCK_PATH} (${e.code || e.message})`);
+    }
+  }
+  throw new Error(`e2e sandbox: could not acquire the run lock ${LOCK_PATH}`);
+}
+
+// seed.json carries the dashboard TOKEN, so it is written 0600 and read back through one
+// place — no caller re-derives the path.
+function readSeedInfo() {
+  return JSON.parse(fs.readFileSync(SEED_INFO_PATH, 'utf8'));
+}
 
 function ev(over) {
   const base = {
@@ -125,9 +462,14 @@ function buildEvents(now) {
 
 function seed(opts = {}) {
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  // Claim the (user, checkout) lock BEFORE the recursive delete, not after.
+  acquireRunLock();
   rmrf(SANDBOX);
+  makeSandboxRoot();
   const home = path.join(SANDBOX, 'home');
   const eventsDir = path.join(home, '.cheaper', 'events');
+  // Recursive is fine below the root: makeSandboxRoot() just proved the root is a fresh,
+  // 0700, self-owned directory, so nothing under it can pre-exist.
   fs.mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
 
   // --- the per-call event store ---------------------------------------------------
@@ -218,10 +560,25 @@ print('seeded', m.summary()['total'])
   const token = crypto.randomBytes(32).toString('hex');
   fs.writeFileSync(path.join(home, '.cheaper', 'dash.token'), token, { mode: 0o600 });
 
-  return { sandbox: SANDBOX, home, eventsDir, db, token, now, events: rows.length };
+  const info = {
+    sandbox: SANDBOX, home, eventsDir, db, token, now, events: rows.length, lock: LOCK_PATH,
+  };
+  // Written here rather than by the caller so the 0600 can never be forgotten: this file
+  // contains `token`, the same-machine credential the gateway enforces.
+  fs.writeFileSync(SEED_INFO_PATH, JSON.stringify(info, null, 2), { mode: 0o600 });
+  return info;
 }
 
-module.exports = { seed, SANDBOX, buildEvents };
+module.exports = {
+  seed, buildEvents, readSeedInfo,
+  SANDBOX, SANDBOX_BASENAME, LOCK_PATH, SEED_INFO_PATH, TMP_ROOT, REPO_REAL, CHECKOUT_ID,
+  // Exported for the guard tests only — exercised directly so each rejection can be
+  // proved without needing a hostile filesystem.
+  __guards: {
+    sandboxPathProblem, tempRootProblem, isInside,
+    assertSafeSandboxPath, assertPrivateDir, makeSandboxRoot, rmrf, acquireRunLock,
+  },
+};
 
 if (require.main === module) {
   const out = seed();

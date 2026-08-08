@@ -1,27 +1,52 @@
 <!doctype html>
+<!-- `lang` is not decoration: a screen reader picks its pronunciation rules from it, and
+     without it every model id and dollar figure on this page is read with the wrong
+     phoneme set. axe flags its absence as a serious WCAG 3.1.1 failure. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>Cheaper — savings report</title>
 <style>
-  /* Print-first. The screen view is the print view, so what you see is exactly what
-     the PDF contains — no second layout that can drift from the one people file. */
+  /* Print-first. The screen view IS the print view, so what you see is exactly what the
+     PDF contains — no second layout that can drift from the one people file.
+
+     Colour layering matches dashboard.html:
+       1. :root                         light, the print default
+       2. prefers-color-scheme: dark    follow the OS when nobody has chosen
+       3. :root[data-theme=…]           an explicit host choice, which OVERRIDES the OS
+     `--mut` is #5f5f6b on white (6.3:1) and #9a9aa4 on #0b0b0d (5.6:1). It carries every
+     table header, every unit label and every "no figure is claimed" em dash, so it is
+     held above the WCAG AA 4.5:1 floor in BOTH themes and in print. */
   :root{
     --ink:#16161a; --mut:#5f5f6b; --soft:#3c3c46; --line:#e2e2e8; --bg:#ffffff;
-    --panel:#fafafb; --green:#047857; --red:#b91c1c; --accent:#059669;
+    --panel:#fafafb; --green:#047857; --red:#b91c1c; --accent:#059669; --amber:#8a5a00;
+    --blue:#1d4ed8;
   }
   @media screen and (prefers-color-scheme: dark){
-    :root:not([data-force-light]){
-      --ink:#f2f2f5; --mut:#8b8b95; --soft:#c7c7cf; --line:#232329; --bg:#0b0b0d;
-      --panel:#121216; --green:#34d399; --red:#f87171; --accent:#34d399;
+    :root:not([data-force-light]):not([data-theme="light"]){
+      --ink:#f2f2f5; --mut:#9a9aa4; --soft:#c7c7cf; --line:#232329; --bg:#0b0b0d;
+      --panel:#121216; --green:#34d399; --red:#f87171; --accent:#34d399; --amber:#fbbf24;
+      --blue:#60a5fa;
     }
+  }
+  :root[data-theme="light"]{
+    --ink:#16161a; --mut:#5f5f6b; --soft:#3c3c46; --line:#e2e2e8; --bg:#ffffff;
+    --panel:#fafafb; --green:#047857; --red:#b91c1c; --accent:#059669; --amber:#8a5a00;
+    --blue:#1d4ed8;
+  }
+  :root[data-theme="dark"]{
+    --ink:#f2f2f5; --mut:#9a9aa4; --soft:#c7c7cf; --line:#232329; --bg:#0b0b0d;
+    --panel:#121216; --green:#34d399; --red:#f87171; --accent:#34d399; --amber:#fbbf24;
+    --blue:#60a5fa;
   }
   *{box-sizing:border-box}
   html,body{margin:0;background:var(--bg);color:var(--ink);
     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased;}
-  .sheet{max-width:920px;margin:0 auto;padding:36px 40px 60px;}
+  .sheet{max-width:980px;margin:0 auto;padding:36px 40px 60px;}
+  [hidden]{display:none !important;}
 
   /* ---- masthead ---- */
   .mast{display:flex;align-items:flex-start;gap:16px;border-bottom:2px solid var(--ink);
@@ -32,63 +57,141 @@
   h1{font-size:26px;letter-spacing:-.02em;margin:0 0 2px;font-weight:700;}
   .scope{font-size:13px;color:var(--mut);}
 
+  /* A view that is NOT the redesigned report says so, loudly, at the top of page 1. */
+  .banner{border:1px solid var(--amber);border-left:3px solid var(--amber);border-radius:8px;
+    background:var(--panel);padding:11px 14px;margin:0 0 20px;font-size:12px;line-height:1.6;
+    color:var(--soft);}
+  .banner b{color:var(--ink);}
+
   /* ---- hero figures ---- */
   .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0 26px;}
   .kpi{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--panel);}
   .kpi .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);margin-bottom:5px;}
-  .kpi .v{font-size:25px;font-weight:750;letter-spacing:-.02em;line-height:1.08;}
+  .kpi .v{font-size:23px;font-weight:750;letter-spacing:-.02em;line-height:1.08;}
   .kpi .s{font-size:11.5px;color:var(--mut);margin-top:4px;}
   .v.green{color:var(--green);} .v.red{color:var(--red);}
 
   h2{font-size:14px;font-weight:700;letter-spacing:.01em;margin:26px 0 9px;
      padding-bottom:5px;border-bottom:1px solid var(--line);}
   h2 .h2note{float:right;font-weight:400;font-size:11.5px;color:var(--mut);}
+  .lede{font-size:11.5px;color:var(--mut);margin:0 0 10px;line-height:1.6;}
 
+  /* ---- the basis legend: the two columns that must never be added ---- */
+  .basis-legend{display:flex;flex-wrap:wrap;gap:14px;align-items:center;
+    font-size:11.5px;color:var(--ink);margin:0 0 10px;}
+  .basis-legend i.sw{display:inline-block;width:9px;height:9px;border-radius:2px;
+    margin-right:5px;vertical-align:-1px;}
+  .basis-legend i.sw.measured{background:var(--green);}
+  .basis-legend i.sw.estimated{background:var(--blue);opacity:.65;}
+
+  .scroller{overflow-x:auto;-webkit-overflow-scrolling:touch;}
   table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  caption{caption-side:top;text-align:left;font-size:11.5px;color:var(--mut);
+    padding:0 0 6px;line-height:1.5;}
   th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
-     color:var(--mut);font-weight:600;padding:7px 9px;border-bottom:1px solid var(--line);}
+     color:var(--mut);font-weight:600;padding:7px 9px;border-bottom:1px solid var(--line);
+     vertical-align:bottom;}
   td{padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top;}
   tbody tr:last-child td{border-bottom:none;}
   .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  /* Colour is NEVER the only signal. A costlier route also carries a leading minus sign
+     and its own tooltip, so the distinction survives greyscale print and colour blindness. */
   .pos{color:var(--green);font-weight:650;} .neg{color:var(--red);font-weight:650;}
-  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+    word-break:break-all;}
   tr.total td{border-top:2px solid var(--ink);border-bottom:none;font-weight:750;}
   .muted{color:var(--mut);}
-  .bar{height:5px;border-radius:3px;background:var(--line);overflow:hidden;min-width:70px;}
-  .bar i{display:block;height:100%;background:var(--accent);}
+
+  /* Basis and Grain are NON-HIDEABLE. They are what keeps a per-call measured figure
+     from being read in the same column as a per-chat estimated one. */
+  th.locked{position:relative;white-space:nowrap;}
+  th.locked::after{content:"\1F512";font-size:.62rem;margin-left:4px;opacity:.55;}
+  .grain-pill{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10.5px;
+    border:1px solid var(--line);color:var(--mut);white-space:nowrap;}
+
+  /* An un-reportable cell is a LABEL, never $0.00. Zero is a measured result. */
+  .nodata{color:var(--mut);font-style:italic;}
+  .notcovered{color:var(--mut);}
+  .notcovered::before{content:"";display:inline-block;width:7px;height:7px;border-radius:2px;
+    margin-right:5px;vertical-align:0;
+    background:repeating-linear-gradient(45deg,var(--mut) 0 2px,transparent 2px 4px);}
+  .unpriceable{color:var(--amber);font-weight:650;}
+
+  /* A note belongs to its ROW. Pooled under the table, a reader cannot tell which of six
+     windows a "100% of this window is unpriceable" sentence describes. */
+  tr.rownote td{padding-top:0;color:var(--mut);font-size:11px;line-height:1.55;
+    white-space:normal;}
+  .chip{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;
+    font-weight:650;border:1px solid var(--line);color:var(--mut);margin:2px 4px 0 0;
+    white-space:nowrap;}
+  .chip.warn{border-color:var(--amber);color:var(--amber);}
+  .bounds{font-size:10.5px;color:var(--mut);white-space:nowrap;}
 
   /* ---- provenance ---- */
   .prov{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;
         background:var(--panel);padding:14px 16px;font-size:11.5px;line-height:1.65;color:var(--soft);}
   .prov b{color:var(--ink);}
-  .prov dl{display:grid;grid-template-columns:170px 1fr;gap:3px 12px;margin:0 0 10px;}
+  .prov dl{display:grid;grid-template-columns:190px 1fr;gap:3px 12px;margin:0 0 10px;}
   .prov dt{color:var(--mut);} .prov dd{margin:0;}
+  .prov p{margin:0 0 8px;}
+  .prov p:last-child{margin-bottom:0;}
   .warn{color:var(--red);font-weight:650;}
 
   .empty{color:var(--mut);font-size:12.5px;padding:10px 0;}
   .toolbar{position:sticky;top:0;display:flex;gap:8px;justify-content:flex-end;
     padding:10px 0;background:var(--bg);z-index:5;}
   .btn{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--ink);
-    border-radius:8px;padding:8px 15px;font:600 13px inherit;cursor:pointer;font-family:inherit;}
+    border-radius:8px;padding:8px 15px;font:600 13px inherit;cursor:pointer;font-family:inherit;
+    text-decoration:none;display:inline-flex;align-items:center;min-height:32px;}
   .btn:hover{border-color:var(--mut);}
   .btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink);}
+  /* A scrollable region must be keyboard-reachable, or its off-screen columns are
+     unreachable without a mouse. */
+  .scroller:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+  @media (max-width:820px){
+    .sheet{padding:20px 16px 44px;}
+    .kpis{grid-template-columns:repeat(2,1fr);}
+    table.ladder{min-width:860px;}
+    table.wide{min-width:680px;}
+    .prov dl{grid-template-columns:1fr;}
+  }
 
   /* ---- print ---- */
   @page{ size:letter; margin:14mm 13mm 16mm; }
   @media print{
-    :root{ --ink:#16161a; --mut:#55555f; --soft:#333; --line:#d7d7de; --bg:#fff;
-           --panel:#f7f7f9; --green:#046c4e; --red:#a81919; --accent:#046c4e; }
-    html,body{background:#fff;font-size:10.5pt;}
+    /* The print reset MUST out-specify every theme selector above it, not just `:root`.
+       A media query adds NO specificity, so a bare `:root` here (0-1-0) loses to
+       `:root[data-theme="dark"]` (0-2-0) and an explicit dark host choice would survive
+       into the printed PDF for every token except html/body — leaving the masthead rule,
+       the ladder-total separator and `.prov b` near-white on white, and dropping every
+       `--mut` surface (th, caption, .muted, .bounds, .nodata) to ~2.3:1, under the AA
+       floor this file claims to hold in BOTH themes AND in print. Naming all three
+       selectors makes the reset win in both directions. */
+    :root,
+    :root[data-theme="light"],
+    :root[data-theme="dark"]{
+           --ink:#16161a; --mut:#4f4f59; --soft:#333; --line:#d7d7de; --bg:#fff;
+           --panel:#f7f7f9; --green:#046c4e; --red:#a81919; --accent:#046c4e;
+           --amber:#7a4f00; --blue:#1a3fa8; }
+    html,body{background:#fff !important;color:#16161a !important;font-size:10.5pt;}
     .sheet{max-width:none;margin:0;padding:0;}
     .toolbar{display:none !important;}
-    /* Repeat column headers on every page — a table whose headers vanish on page 2
-       is unreadable as a filed document. */
+    /* Every rendered section prints — not just the ones that fit on page 1. A printed
+       report that silently dropped a section would be worse than no print support. */
+    section.sec:not([hidden]){display:block !important;}
+    /* A horizontal scroller cannot be scrolled on paper, so it must lay out in full. */
+    .scroller{overflow:visible !important;}
+    table.ladder,table.wide{min-width:0 !important;}
+    /* Repeat column headers on every page — a table whose headers vanish on page 2 is
+       unreadable as a filed document. */
     thead{display:table-header-group;}
     tfoot{display:table-footer-group;}
-    tr,.kpi,.prov,.avoid{break-inside:avoid;page-break-inside:avoid;}
+    tr,.kpi,.prov,.banner,.avoid{break-inside:avoid;page-break-inside:avoid;}
     h2{break-after:avoid;page-break-after:avoid;}
     .page-break{break-before:page;page-break-before:always;}
     a{text-decoration:none;color:inherit;}
+    a[href]::after{content:"";}
     .kpis{grid-template-columns:repeat(4,1fr);}
   }
 </style>
@@ -97,8 +200,8 @@
 <div class="sheet">
 
   <div class="toolbar">
-    <button class="btn" onclick="location.href='/dashboard'">&larr; Dashboard</button>
-    <button class="btn primary" onclick="window.print()">Save as PDF&nbsp;/&nbsp;Print</button>
+    <a class="btn" href="/dashboard">&larr; Dashboard</a>
+    <button class="btn primary" type="button" id="printBtn">Save as PDF&nbsp;/&nbsp;Print</button>
   </div>
 
   <div class="mast">
@@ -110,177 +213,1436 @@
     <div class="t" id="stamp">&nbsp;</div>
   </div>
 
+  <!-- Shown ONLY on the legacy /report payload, which carries no `report` block. -->
+  <div class="banner" id="legacyBanner" hidden></div>
+
+  <!-- What the figures below actually cover. app.py builds the ladder with
+       apply_window=False on purpose, so the KPI grid and the ladder are WHOLE-HISTORY
+       figures; saying so here, directly above them, is what keeps the requested period
+       from being read as their scope. -->
+  <p class="lede" id="scopeNote">&nbsp;</p>
+
   <div class="kpis" id="kpis"></div>
 
-  <h2>Savings by period <span class="h2note">windows nest — each is &ldquo;since&rdquo; its start, not disjoint</span></h2>
-  <table id="periods"><thead><tr>
-    <th>Period</th><th class="num">Routed calls</th><th class="num">Metered spend</th>
-    <th class="num">Saved</th><th class="num">Share saved</th>
-  </tr></thead><tbody></tbody></table>
+  <!-- ===================== the DISJOINT ladder (redesigned) ===================== -->
+  <section class="sec" id="secLadder" hidden>
+    <h2>Savings by period
+      <span class="h2note">disjoint windows &mdash; these partition history</span></h2>
+    <div class="basis-legend">
+      <span><i class="sw measured"></i>measured <span class="muted">&mdash; observed by the gateway from provider-reported usage</span></span>
+      <span><i class="sw estimated"></i>estimated <span class="muted">&mdash; reconstructed from local harness transcripts</span></span>
+      <span class="muted">The two bases carry separate totals and are never summed.</span>
+    </div>
+    <div class="scroller" tabindex="0" role="region" aria-label="Savings by period, scrollable">
+      <table class="ladder" id="ladder">
+        <caption>Every window is half-open [from, to) and disjoint from its neighbours, so
+          within ONE basis they may be added. A figure with a leading minus sign is a route
+          that cost more than its baseline; it is subtracted, never dropped.</caption>
+        <thead>
+          <tr>
+            <th scope="col" rowspan="2">Period</th>
+            <th scope="colgroup" colspan="6" class="locked"
+                title="Non-hideable: a measured figure and an estimated one are separate claims and must never be read as one column">Basis</th>
+            <th scope="col" rowspan="2" class="locked"
+                title="Non-hideable: a chat-grain figure and a call-grain figure are never summed">Grain</th>
+            <th scope="col" rowspan="2">Window (local)</th>
+          </tr>
+          <tr>
+            <th scope="col" class="num">Saved (measured)</th>
+            <th scope="col" class="num">Saved (estimated)</th>
+            <th scope="col" class="num">Spent (measured)</th>
+            <th scope="col" class="num">Spent (estimated)</th>
+            <th scope="col" class="num">Events (measured)</th>
+            <th scope="col" class="num">Events (estimated)</th>
+          </tr>
+        </thead>
+        <tbody id="ladderBody"></tbody>
+      </table>
+    </div>
+    <div class="lede" id="ladderFoot"></div>
+  </section>
 
-  <h2>By tool</h2>
-  <div id="byTool"></div>
+  <!-- ===================== the LEGACY nested ladder (fallback) ===================== -->
+  <section class="sec" id="secLegacyPeriods" hidden>
+    <h2>Savings by period
+      <span class="h2note">windows nest &mdash; each is &ldquo;since&rdquo; its start, not disjoint</span></h2>
+    <p class="lede"><b>These rows cannot be added up.</b> &ldquo;This week&rdquo; already
+      contains &ldquo;today&rdquo;, so summing the column counts today up to six times. This
+      legacy view also reports a single blended figure with no basis column: a measured
+      per-call figure and an estimated one land in the same cell, and a window nobody was
+      watching is indistinguishable from a window that genuinely saved nothing.</p>
+    <div class="scroller" tabindex="0" role="region" aria-label="Legacy nested savings by period, scrollable">
+      <table class="wide" id="legacyPeriods">
+        <caption>Legacy nested windows, from the gateway proxy&rsquo;s own aggregate.</caption>
+        <thead><tr>
+          <th scope="col">Period</th><th scope="col" class="num">Routed calls</th>
+          <th scope="col" class="num">Metered spend</th>
+          <th scope="col" class="num">Saved</th><th scope="col" class="num">Share saved</th>
+        </tr></thead>
+        <tbody id="legacyPeriodsBody"></tbody>
+      </table>
+    </div>
+  </section>
 
-  <h2>By capability tier <span class="h2note">tier is capability, never a price rank</span></h2>
-  <div id="byTier"></div>
+  <!-- ===================== composition ===================== -->
+  <section class="sec" id="secBreakdown" hidden>
+    <h2>Composition <span class="h2note">every dimension, split by basis</span></h2>
+    <div id="breakdown"></div>
+  </section>
 
-  <h2>Routing outcomes</h2>
-  <div id="byModel"></div>
+  <!-- ===================== trend ===================== -->
+  <section class="sec" id="secTrend" hidden>
+    <h2>Trend <span class="h2note">bucketed on each call&rsquo;s own local day</span></h2>
+    <div id="trend"></div>
+  </section>
+
+  <!-- ===================== gateway-proxy-only surfaces ===================== -->
+  <section class="sec" id="secTool">
+    <h2>By tool <span class="h2note" id="toolNote">&nbsp;</span></h2>
+    <div id="byTool"></div>
+  </section>
+
+  <section class="sec" id="secTier">
+    <h2>By capability tier <span class="h2note" id="tierNote">&nbsp;</span></h2>
+    <div id="byTier"></div>
+  </section>
+
+  <section class="sec" id="secOutcomes">
+    <h2>Routing outcomes <span class="h2note" id="outcomesNote">&nbsp;</span></h2>
+    <div id="byModel"></div>
+  </section>
 
   <div class="page-break"></div>
-  <h2>Method &amp; provenance</h2>
-  <div class="prov avoid" id="prov"></div>
+  <section class="sec" id="secProv">
+    <h2>Method &amp; provenance</h2>
+    <div class="prov avoid" id="prov"></div>
+  </section>
 
 </div>
 
 <script id="report-data" type="application/json">__REPORT_DATA__</script>
 <script>
 (function(){
+  // The payload is EMBEDDED, never fetched: `webContents.printToPDF` and the browser's
+  // own print dialog both capture whatever is rendered at the instant they fire, so a
+  // page that fetches on load can be captured mid-flight and produce a PDF full of empty
+  // tables. With the JSON inlined there is nothing to race.
   var D = {};
-  try { D = JSON.parse(document.getElementById('report-data').textContent) || {}; } catch (e) {}
+  try {
+    var node = document.getElementById('report-data');
+    D = (node && JSON.parse(node.textContent)) || {};
+  } catch (e) { D = {}; }
 
-  var esc = function(s){ return String(s == null ? '' : s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
-  var num = function(v, d){ v = Number(v); return isFinite(v) ? v : (d || 0); };
-  function money(n){
-    n = num(n, 0);
+  var REP = (D && D.report) || null;          // present on /api/v1/report.html only
+  var META = (REP && REP.meta) || null;
+  var GRAIN = (REP && REP.grain) || 'call';
+  var SIDES = ['measured', 'estimated'];
+  // Declared HERE, beside SIDES, because the Composition coverage it drives is computed
+  // for the lede — which runs long before the Composition section renders. A `var` whose
+  // initializer sits next to renderBreakdown would be `undefined` at that point.
+  var BREAKDOWN_KEYS = ['served', 'base', 'tier', 'harness', 'decision'];
+
+  // ---------------------------------------------------------------------------
+  // escaping + formatting
+  // ---------------------------------------------------------------------------
+  // EVERY value interpolated into HTML goes through esc(). app.py already neutralises
+  // < > & inside the JSON so the payload cannot close this <script> early, but the
+  // payload still carries user-influenced strings — model ids, harness names, routing
+  // reasons, session ids — and those are an injection boundary on OUTPUT too.
+  function esc(s){
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  function el(id){ return document.getElementById(id); }
+  function set(id, html){ var n = el(id); if (n) n.innerHTML = html; }
+  function show(id, on){ var n = el(id); if (n) n.hidden = !on; }
+
+  var NO_CLAIM = 'No figure is claimed for this cell. This is not $0 — ' +
+                 'a measured zero and an absent measurement are different claims.';
+
+  // A cell with no claim is a LABELLED NON-NUMBER carrying its own explanation.
+  function noClaim(why){
+    return '<span class="nodata" title="' + esc(why || NO_CLAIM) + '">&mdash;</span>';
+  }
+
+  // money() NEVER coerces a missing value to zero.
+  //
+  // The old template called `num(n, 0)` here, so an unpriceable model, a suppressed
+  // window and a window nobody was watching all rendered as a confident "$0.00". That is
+  // the single most damaging honesty violation this template can commit: "$0.00" is a
+  // MEASURED result and "no figure is claimed" is not. null / undefined / NaN come back
+  // as a labelled em dash instead, and the SIGN of a real figure is preserved — a
+  // costlier route subtracts and is never floored at zero.
+  function money(v, why){
+    if (v === null || v === undefined) return noClaim(why);
+    var n = Number(v);
+    if (!isFinite(n)) return noClaim(why);
     var neg = n < 0, a = Math.abs(n);
-    var v = a >= 100 ? Math.round(a) : Math.round(a * 100) / 100;
-    return (neg ? '−' : '') + '$' + v.toLocaleString('en-US',
-      { minimumFractionDigits: a >= 100 ? 0 : 2, maximumFractionDigits: 2 });
-  }
-  function int(n){ return num(n, 0).toLocaleString('en-US'); }
-  function signed(n){
-    var v = money(n);
-    return '<span class="' + (num(n,0) < 0 ? 'neg' : 'pos') + '">' + v + '</span>';
+    // ASCII hyphen-minus ("-"), not the Unicode minus sign (U+2212) this used to emit.
+    // dashboard.html's own money renderer and cli/src/reports.js both already use "-" —
+    // U+2212 was the odd one out, and the real cost isn't a grep/diff mismatch across the
+    // two renderers, it's that a reader who copy-pastes a negative figure out of the
+    // printed report into a spreadsheet gets a cell Excel/Sheets/Numbers cannot parse as
+    // a number: U+2212 is not a digit separator or minus sign to any of them, so
+    // "−$12.50" lands as text, silently, with no error to flag the paste.
+    return (neg ? '-' : '') + '$' +
+      a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
-  // ---- masthead -----------------------------------------------------------
-  var gen = new Date();
+  // Signed money for a SAVING. The sign is the primary signal (it survives greyscale
+  // print and colour blindness); the colour only reinforces it.
+  function savedMoney(v, why){
+    if (v === null || v === undefined || !isFinite(Number(v))) return money(v, why);
+    var n = Number(v);
+    var cls = n < 0 ? 'neg' : (n > 0 ? 'pos' : '');
+    var t = n < 0 ? 'Costlier than baseline — subtracted from the total, never dropped'
+                  : (n > 0 ? 'Cheaper than baseline' : 'Exactly baseline');
+    return '<span class="' + cls + '" title="' + esc(t) + '">' + money(n) + '</span>';
+  }
+
+  // The KPI colour must be a function of the SAME value the money renderer inspects, in
+  // the same three states. The old shape — `(v !== null && v < 0) ? 'red' : 'green'` —
+  // fell through to GREEN on null, so the honest "no figure is claimed" em dash was
+  // painted in the success colour; and `(Number(v) < 0) ? 'red' : 'green'` painted a
+  // MISSING value green, because Number(undefined) < 0 is false. Colour is the first
+  // thing a reader takes off a KPI card, so a labelled non-number gets no colour at all.
+  // A measured exact zero is likewise neutral: it is baseline, not a win.
+  function moneyClass(v){
+    if (v === null || v === undefined) return '';
+    var n = Number(v);
+    if (!isFinite(n)) return '';
+    return n < 0 ? 'red' : (n > 0 ? 'green' : '');
+  }
+
+  function int(v, why){
+    if (v === null || v === undefined) return noClaim(why);
+    var n = Number(v);
+    if (!isFinite(n)) return noClaim(why);
+    return n.toLocaleString('en-US');
+  }
+
+  // Only for values that are exact counts by construction and cannot be absent.
+  function count0(v){ var n = Number(v); return isFinite(n) ? n : 0; }
+
+  function fmtLocal(ms){
+    if (ms === null || ms === undefined) return '&mdash;';
+    var d = new Date(count0(ms));
+    if (!isFinite(d.getTime())) return '&mdash;';
+    return esc(d.toLocaleString('en-US', { year:'numeric', month:'2-digit', day:'2-digit',
+                                           hour:'2-digit', minute:'2-digit', hour12:false }));
+  }
+
   var tz = '';
-  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
-  document.getElementById('stamp').innerHTML =
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { tz = ''; }
+
+  // ---------------------------------------------------------------------------
+  // masthead
+  // ---------------------------------------------------------------------------
+  var gen = new Date();
+  set('stamp',
     'Generated ' + esc(gen.toLocaleString()) + '<br>' +
-    esc(tz) + '<br>' +
-    'gateway build <span class="mono">' + esc((D.code_sha || '').slice(0, 12) || 'unknown') + '</span>';
+    esc((META && META.timezone) || tz) + '<br>' +
+    'gateway build <span class="mono">' + esc(String(D.code_sha || '').slice(0, 12) || 'unknown') + '</span>');
+
   var cov = D.coverage || {};
-  document.getElementById('scope').textContent =
-    'Routed traffic observed by the Cheaper gateway' +
-    (cov.first ? ' · ' + new Date(cov.first * 1000).toLocaleDateString()
-                 + ' – ' + new Date(cov.last * 1000).toLocaleDateString() : '');
 
-  // ---- KPIs ---------------------------------------------------------------
-  var dol = D.dollars || {}, cnt = D.counts || {};
-  var kpis = [
-    ['Saved', money(dol.saved), (dol.savings_pct != null ? dol.savings_pct + '% of the baseline' : ''),
-     num(dol.saved, 0) < 0 ? 'red' : 'green'],
-    ['Metered spend', money(dol.spent), 'at published list rates', ''],
-    ['Calls routed cheaper', int(cnt.models_changed),
-     'of ' + int(cnt.intercepted) + ' intercepted', ''],
-    ['Costlier routes', money(dol.extra || 0),
-     int(cnt.models_upcharged || 0) + ' call(s), subtracted above',
-     num(dol.extra, 0) > 0 ? 'red' : ''],
-  ];
-  document.getElementById('kpis').innerHTML = kpis.map(function(k){
-    return '<div class="kpi"><div class="k">' + esc(k[0]) + '</div>' +
-           '<div class="v ' + k[3] + '">' + k[1] + '</div>' +
-           '<div class="s">' + esc(k[2]) + '</div></div>';
-  }).join('');
+  // The masthead must NEVER name a window the figures beneath it do not honour.
+  //
+  // app.py builds the ladder rows with `apply_window=False` — deliberately, because the
+  // disjoint ladder PARTITIONS history and a partition of a filtered slice partitions
+  // nothing. The KPI grid is summed from those same rows. So both are WHOLE-HISTORY
+  // figures, and captioning them "today · 2026-08-07 00:00 → 2026-08-08 00:00" put a
+  // one-day heading over a whole-history number — the hero card read 5× the stated day.
+  // The requested period is recorded verbatim in Method & provenance instead, labelled
+  // as a REQUEST rather than as the scope of these figures.
+  //
+  // `period_bounds_label` is also not always real: reporting.parse_filters never converts
+  // a NAMED period into bounds, so `?period=week` yields the unbounded "— → —" form. A
+  // named period over unbounded data is not a period, and nothing may be asserted about
+  // the inclusivity of bounds that do not exist.
+  var DASH = '—', ARROW = '→';
+  function boundsAreReal(label){
+    if (!label) return false;
+    var parts = String(label).split(ARROW);
+    if (parts.length < 2) return false;
+    var a = parts[0].trim(), b = parts[1].trim();
+    return a.charAt(0) !== DASH && b.charAt(0) !== DASH;
+  }
 
-  // ---- periods ------------------------------------------------------------
-  var ORDER = [['today','Today'],['week','This week'],['month','This month'],
-               ['quarter','This quarter'],['year','This year'],['all','All-time']];
-  var P = D.periods || {};
-  document.querySelector('#periods tbody').innerHTML = ORDER.map(function(o){
-    var v = P[o[0]] || {};
-    var saved = num(v.saved, 0), spent = num(v.spent, 0);
-    var base = saved + spent;
-    var pct = base > 0 ? (saved / base * 100) : 0;
-    return '<tr><td>' + esc(o[1]) + '</td>' +
-      '<td class="num">' + int(v.calls) + '</td>' +
-      '<td class="num">' + money(spent) + '</td>' +
-      '<td class="num">' + signed(saved) + '</td>' +
-      '<td class="num">' + (base > 0 ? pct.toFixed(1) + '%' : '<span class="muted">—</span>') + '</td></tr>';
-  }).join('');
+  // The OBSERVED extent — the extent of the DATA, taken from META.coverage_label, which is
+  // the only extent on this payload derived from what was actually recorded.
+  //
+  // The masthead used to derive its extent from the LADDER BUCKETS instead: low bound off
+  // the last row, high bound off the first. periods.disjoint_ladder ALWAYS ends with a
+  // left-unbounded "before" bucket and ALWAYS begins with "today", whose upper bound is
+  // TOMORROW 00:00 — so the masthead stated a low bound of "—" and a high bound up to a
+  // full day in the FUTURE and called that "all recorded history". A bucket span is not a
+  // data extent, and an em dash is not a bound: three em dashes in one sentence (unbounded
+  // low side, sentence separator) also made the line unreadable.
+  //
+  // Any label that is not a clean interval list — the declared-nothing prose, or an
+  // interval with a non-bound on either side — SUPPRESSES the clause entirely. The honest
+  // figure is still printed in full in the ladder footer and in provenance; nothing is
+  // lost by declining to put a misleading one in the more prominent place.
+  //
+  // THE SENTINEL IS A BLANK, NOT AN EM DASH. reporting.coverage_label joins its intervals
+  // with " ; " and renders each one as "<kind> <from> → <to>" through reporting._iso,
+  // which returns the EMPTY STRING for an absent bound — _offset_iso is the only producer
+  // of an em dash and coverage_label does not use it. A guard that tested only for an em
+  // dash therefore let the real absent-bound shape straight through: `cheaper import` can
+  // write a coverage interval with null bounds, and the masthead rendered
+  // "All recorded history (backfilled  → )" — a stated extent with no bound on either
+  // side — and "observed  → 2026-08-07T14:22:00Z" for the single-sided case. A blank reads
+  // as a rendering glitch rather than as "unbounded", which is worse than the em dash it
+  // replaced. So EVERY interval must carry a real instant on BOTH sides, and both
+  // sentinels are rejected. (_iso's "" contract is handled here rather than changed at the
+  // source: reporting.py is not this template's to edit.)
+  function observedExtent(m){
+    var lab = (m && m.coverage_label) ? String(m.coverage_label) : '';
+    if (lab.indexOf(ARROW) < 0) return '';   // prose, not an interval list
+    var parts = lab.split(';');
+    for (var i = 0; i < parts.length; i++){
+      var seg = parts[i].trim();
+      if (!seg) return '';
+      var halves = seg.split(ARROW);
+      if (halves.length !== 2) return '';
+      // The low half still carries the leading kind word ("observed", "backfilled", …).
+      var lo = halves[0].trim().replace(/^\S+\s*/, '').trim();
+      var hi = halves[1].trim();
+      if (!lo || !hi) return '';                                  // a blank is not a bound
+      if (lo.charAt(0) === DASH || hi.charAt(0) === DASH) return '';  // nor is an em dash
+    }
+    return lab;
+  }
 
-  // ---- helper: a simple table ---------------------------------------------
-  function table(el, cols, rows, emptyMsg){
-    var t = document.getElementById(el);
-    if (!rows.length) { t.innerHTML = '<div class="empty">' + esc(emptyMsg) + '</div>'; return; }
-    // A short table split across a page break reads as two unrelated fragments, and
-    // the second one has no heading. Long tables must be allowed to flow (their
-    // headers repeat via thead), so only keep the small ones whole.
-    var whole = rows.length <= 10 ? ' class="avoid"' : '';
-    t.innerHTML = '<div' + whole + '><table><thead><tr>' +
-      cols.map(function(c){ return '<th' + (c[1] ? ' class="num"' : '') + '>' + esc(c[0]) + '</th>'; }).join('') +
+  // The NARROWING filters — every filter that is NOT the time window.
+  //
+  // app.py calls reporting.filtered_rows(u["rows"], f, apply_window=False), and
+  // apply_window=False suppresses ONLY the in_window time check: the `_match(row_view(r), f)`
+  // test on the very next line still runs, so basis, grain, served, base, harness,
+  // decision, session, q and min_abs_usd ALL still narrow the ladder AND the hero figures.
+  // A hard-coded "not narrowed by the request" sentence is simply FALSE whenever one of
+  // them is set — the page printed it beside a provenance chip proving the opposite — so
+  // the scope wording is a FUNCTION of the filters actually applied, never a constant.
+  var NARROWING_FILTERS = ['basis', 'grain', 'served', 'base', 'harness', 'decision',
+                           'session', 'q', 'min_abs_usd'];
+
+  function narrowingFilters(m){
+    var f = (m && m.filters) || {};
+    var out = [];
+    NARROWING_FILTERS.forEach(function(k){
+      var v = f[k];
+      if (v === null || v === undefined || v === '' || v === false) return;
+      out.push(k + '=' + v);
+    });
+    return out;
+  }
+
+  // Computed ONCE and reused by the masthead, the lede and the Requested-period row, so a
+  // later edit cannot qualify one of the three and leave the other two making the
+  // unqualified claim.
+  var NARROW = REP ? narrowingFilters(META) : [];
+  var SCOPE_PLAIN = NARROW.length
+        ? 'All recorded history, restricted to ' + NARROW.join(', ')
+        : 'All recorded history';
+  var SCOPE_HTML = NARROW.length
+        ? 'all recorded history, <b>restricted to ' + esc(NARROW.join(', ')) + '</b>'
+        : '<b>all recorded history</b>';
+
+  var scopeText;
+  if (REP) {
+    var ext = observedExtent(META);
+    scopeText = SCOPE_PLAIN + (ext ? ' (' + ext + ')' : '') + '. ' +
+      'The period ladder below partitions every event in that set, so the requested ' +
+      'period narrows neither it nor the hero figures' +
+      (NARROW.length ? ' — but the filters named above narrow both.' : '.') +
+      ' The requested period and the full filter set are recorded under ' +
+      'Method & provenance.';
+  } else {
+    scopeText = 'Routed traffic observed by the Cheaper gateway' +
+      (cov.first ? ' · ' + new Date(cov.first * 1000).toLocaleDateString() +
+                   ' – ' + new Date(cov.last * 1000).toLocaleDateString() : '');
+  }
+  var scopeEl = el('scope');
+  if (scopeEl) scopeEl.textContent = scopeText;
+
+  // The ladder event totals per basis. Computed HERE — before the lede — because the
+  // lede's reconciliation clause is a function of them. (It used to be initialised to an
+  // empty ladder here and only filled in at render time, far below this point.)
+  var LADDER_EVENTS = ladderEventTotals((REP && REP.periods) || []);
+
+  // Said again immediately above the KPI grid, because a masthead line is read as
+  // decoration and a lede directly over the numbers is read as their caption.
+  //
+  // This lede used to state "Only the row export named under Method & provenance honours
+  // the requested filter" while app.py built Composition and Trend WITH the requested
+  // window (report_breakdown(rows, d, f["from"], f["to"]) / report_trend(rows, "day",
+  // f["from"], f["to"])), both of which skip rows via in_window. A reader reconciling
+  // Composition against the ladder saw a gap the page had affirmatively told them could
+  // not exist. app.py now passes NO window to either, so the whole document is
+  // consistently whole-history — and the Composition/Trend reconciliation below states
+  // any shortfall that survives, rather than trusting the handler to stay fixed.
+  set('scopeNote', REP
+    ? 'The hero figures and the period ladder below cover ' + SCOPE_HTML + '. ' +
+      'The ladder partitions that set, so it is built without the requested period filter ' +
+      '— a partition of a filtered slice would not partition anything. ' +
+      reconcileClause() +
+      'The three gateway-proxy tables near the end are separate all-time aggregates that ' +
+      'honour no filter at all. Only the row export named under Method &amp; provenance ' +
+      'is narrowed by the requested period' +
+      (NARROW.length
+        ? '; the non-period filters named above narrow every other figure on this page ' +
+          'except those three proxy tables.'
+        : '.')
+    : 'Every figure on this page is the gateway proxy’s own blended lifetime aggregate. ' +
+      'The period windows below <b>nest</b> and cannot be added together.');
+
+  // ---------------------------------------------------------------------------
+  // KPIs
+  // ---------------------------------------------------------------------------
+  function paintKpis(cards){
+    set('kpis', cards.map(function(k){
+      return '<div class="kpi"><div class="k">' + esc(k.k) + '</div>' +
+             '<div class="v ' + (k.cls || '') + '">' + k.v + '</div>' +
+             '<div class="s">' + esc(k.s || '') + '</div></div>';
+    }).join(''));
+  }
+
+  // ---------------------------------------------------------------------------
+  // period-window cells (redesigned ladder, breakdown, trend)
+  // ---------------------------------------------------------------------------
+  var LABEL_TEXT = {
+    not_covered: 'Cheaper was not watching during this period. That is not the same as saving $0.',
+    partial_coverage: 'Only part of this period is covered; the figures describe the covered sub-window only.',
+    dollars_suppressed: 'More than a fifth of this window’s tokens are unpriceable, so no dollar figure is claimed. Call and token counts are exact.',
+    tombstoned: 'Sessions deleted with `cheaper forget` are excluded from these totals.',
+    incomplete: 'Some events have no usable timestamp and are excluded from every bucket.',
+    provisional: 'A session in this window is still open; these figures are provisional.',
+    store_newer_than_reader: 'This savings store was written by a newer Cheaper; it refuses to guess at its contents.'
+  };
+
+  function chips(labels){
+    labels = labels || [];
+    if (!labels.length) return '';
+    return '<div>' + labels.map(function(l){
+      var warn = (l === 'not_covered' || l === 'dollars_suppressed' ||
+                  l === 'store_newer_than_reader') ? ' warn' : '';
+      return '<span class="chip' + warn + '" title="' + esc(LABEL_TEXT[l] || l) + '">' +
+             esc(String(l).replace(/_/g, ' ')) + '</span>';
+    }).join('') + '</div>';
+  }
+
+  // The exact event count for ONE basis of ONE window, or NULL when that count is not
+  // knowable. ONE function, read by the ladder cell, by the ladder total, by the per-basis
+  // footer tally, by the KPI subtitle and by the Composition/Trend reconciliation — so a
+  // cell that declines to state a count can never be silently totalled as a confident 0 by
+  // the row beneath it.
+  //
+  // reporting.report_window() emits NO `events` key at all on a not_covered window and on
+  // a too_new (`suppressed`) store, and nulls both accumulators. The old total read
+  // `evw[side]`, then `acc.calls`, found neither, left its zero-initialised counter alone
+  // and printed THAT — so six rows each reading "not covered" sat above a total row
+  // reading "0", and the hero card read "— / 0 call event(s)". A MEASURED zero and an
+  // ABSENT measurement are different claims, and the dollar columns were the only ones
+  // that had been taught the difference.
+  function windowEvents(w, side){
+    if (!w) return null;
+    // The cell renders "not covered" here, so the total may not count it as anything.
+    if (w.status === 'not_covered') return null;
+    var evw = w.events || {};
+    if (evw[side] !== undefined && evw[side] !== null){
+      var e = Number(evw[side]);
+      return isFinite(e) ? e : null;
+    }
+    var acc = w[side];
+    if (acc){
+      // A zero-filled accumulator from store.py::_mk_acc() carries a REAL, measured
+      // calls: 0 for a covered window with no rows on this basis. That is a measurement.
+      var c = Number(acc.calls);
+      if (isFinite(c)) return c;
+    }
+    return null;
+  }
+
+  // Ladder event totals per basis, as a PURE function of the payload. The
+  // Composition/Trend reconciliation reads this rather than re-deriving the ladder, so the
+  // two can never disagree about what the ladder covered.
+  function ladderEventTotals(rows){
+    var out = { measured: { n: 0, known: false, unknown: 0 },
+                estimated: { n: 0, known: false, unknown: 0 } };
+    (rows || []).forEach(function(w){
+      SIDES.forEach(function(side){
+        var ev = windowEvents(w, side);
+        if (ev === null){ out[side].unknown += 1; return; }
+        out[side].n += ev;
+        out[side].known = true;
+      });
+    });
+    return out;
+  }
+
+  // (LADDER_EVENTS is computed above, beside the lede that reads it.)
+
+  // ===== THE SHARED CLAIM PREDICATE ==================================================
+  // ONE copy per render surface — this file, dashboard.html and cli/src/reports.js — kept
+  // TEXTUALLY IDENTICAL and pinned as such by cli/test/html.test.js. cli/src/savings.js
+  // imports the reports.js copy rather than keeping a fourth. An HTML page cannot import,
+  // so the copies are the price of the rule; the test is what stops them drifting again.
+  //
+  // Three claims a cell can make, and the project rules forbid collapsing any into another:
+  //   'not_covered' — Cheaper was not watching. No rows exist because none were recorded.
+  //   'withheld'    — Cheaper WAS watching, rows exist, and their dollars are deliberately
+  //                   not claimed (over a fifth of the window's tokens are unpriceable).
+  //   'absent'      — no rows of that basis in this window at all.
+  //   'value'       — a real figure, sign and all. A measured zero lives here.
+  //
+  // Every surface used to decide between them by testing `acc.calls` — ROWS PRICED. The
+  // `events` field means ROWS SEEN. A window that is 100% unpriceable therefore has
+  // acc.calls === 0 on BOTH bases, hit the ABSENT branch, and printed "No measured rows in
+  // this window" directly above its own note saying rows were seen and deliberately not
+  // priced — an affirmative falsehood, on the same screen, in the same row.
+  //
+  // So the decision is made from the WINDOW / POINT / GROUP, never from acc.calls, and
+  // WITHHELD is tested BEFORE ABSENT. That ordering is most of the fix.
+  //
+  // Rows-seen is PER BASIS. `unpriced_calls` is a SUBSET counter of `events`, never an
+  // addend to it, so a KNOWN zero on this basis admits no unpriced row of this basis
+  // either; the unpriced count only stands in for rows-seen when rows-seen itself could not
+  // be reported. Both spellings are read — `unpricedCalls` from cli/src/peek/store.js,
+  // `unpriced_calls` from gateway/app/reporting.py — because both runtimes feed all four
+  // surfaces.
+  //
+  // `priced <= 0` is the third way a figure can fail to be a claim, and it is why reading
+  // `acc.calls` was seductive: foldRows initialises `saved` to 0, so a basis that priced
+  // NOTHING still carries a 0. That 0 is vacuous — it is the initial value, not a
+  // measurement — and rendering it as $0.00 would be the mirror defect of rendering it as
+  // an em dash. It is a real claim only when at least one row was actually priced. So
+  // zero-priced becomes WITHHELD when rows were seen and ABSENT when none were, and a
+  // MEASURED zero (priced rows that netted to nothing) still renders $0.00.
+  function claimState(o, side, v){
+    if (!o) return 'absent';
+    if (o.status === 'not_covered') return 'not_covered';
+    var acc = o[side];
+    var ev = o.events || {};
+    var e = ev[side];
+    var seen = (e !== undefined && e !== null && isFinite(Number(e)))
+      ? Number(e)
+      : ((acc && isFinite(Number(acc.calls))) ? Number(acc.calls) : null);
+    var raw = (o.unpricedCalls === undefined || o.unpricedCalls === null)
+      ? o.unpriced_calls : o.unpricedCalls;
+    var up = (raw === undefined || raw === null || !isFinite(Number(raw))) ? 0 : Number(raw);
+    var priced = (acc && isFinite(Number(acc.calls))) ? Number(acc.calls) : 0;
+    var sawRows = (seen === null) ? (up > 0) : (seen > 0);
+    var declined = (o.dollars_suppressed === true || o.status === 'suppressed'
+                    || v === null || v === undefined || !isFinite(Number(v))
+                    || priced <= 0);
+    if (sawRows && declined) return 'withheld';
+    if (!sawRows) return 'absent';
+    if (!acc) return 'absent';
+    return 'value';
+  }
+
+  // ONE copy per render surface — this file, gateway/app/dashboard.html and
+  // cli/src/reports.js — kept TEXTUALLY IDENTICAL and pinned as such by
+  // cli/test/html.test.js, exactly like claimState() above.
+  //
+  // A withheld window's `notes` array carries ONE generic sentence from the store —
+  // "N of M call(s) in this window (P% of its tokens) are not in the price catalog" — which
+  // is TRUE for every withholding reason except one. `cache_state_indeterminate` withholds a
+  // row whose SERVED model is fully catalogued: switching models invalidates the caller's
+  // prompt cache, so the served arm can pay a cache CREATE exactly where the un-switched
+  // baseline would have paid a cache READ (or vice versa), and nothing recorded says which —
+  // the counterfactual is unknown, not the price. Repeating "not in the price catalog" for
+  // that row is not imprecise, it is false, and it is the kind of false claim this product
+  // exists to refuse to make.
+  //
+  // `w.unpriced` is the reason -> count breakdown both runtimes publish alongside `notes`
+  // (gateway/app/reporting.py, cli/src/peek/store.js). Reading it lets the note be reworded
+  // for the reason that actually applies, rather than trusting a single sentence to describe
+  // every row it was generated for.
+  function suppressionNotes(w) {
+    var raw = (w && w.notes) || [];
+    var by = (w && w.unpriced) || {};
+    var indet = Number(by.cache_state_indeterminate) || 0;
+    if (!indet) return raw;                       // nothing to reword
+    var total = 0;
+    for (var k in by) {
+      if (Object.prototype.hasOwnProperty.call(by, k)) total += Number(by[k]) || 0;
+    }
+    var plural = indet === 1 ? '' : 's';
+    var indetNote = indet + ' call' + plural + ' in this window switched the served model '
+      + 'with no recorded cache read: the model IS in the price catalog, but switching '
+      + 'models invalidates the prompt cache, so the counterfactual could have paid a cache '
+      + 'READ or a cache CREATE and nothing recorded says which. No dollar figure is claimed '
+      + 'for ' + (indet === 1 ? 'it' : 'them') + '.';
+    // Wholly cache-state-indeterminate: the catalog sentence is not merely imprecise here,
+    // it is FALSE (the model is catalogued), so it is replaced rather than kept alongside.
+    if (indet >= total) return [indetNote];
+    // Mixed: some rows in the same window really are uncatalogued, so the raw sentence stays
+    // true of THAT subset and is kept; the cache-state subset gets its own sentence instead
+    // of being folded into a catalog claim it would make false.
+    return raw.concat([indetNote]);
+  }
+
+  // A cell that cannot be reported honestly renders a LABEL, never $0.00.
+  function basisCell(w, side, field){
+    if (!w) return '<td class="num nodata">' + noClaim(NO_CLAIM) + '</td>';
+    if (w.status === 'not_covered'){
+      // "$0" and "we weren't watching" are different claims. Only one is a measurement.
+      return '<td class="num notcovered" title="' + esc(LABEL_TEXT.not_covered) +
+             '">not covered</td>';
+    }
+    var acc = w[side];
+    var note = suppressionNotes(w).join(' ') || NO_CLAIM;
+
+    // EVENTS and TOKENS survive dollar suppression. When more than a fifth of a window's
+    // tokens are unpriceable the DOLLARS are withheld — but the call counts are exactly
+    // known and are not in doubt, and blanking them would understate what actually
+    // happened on top of declining to price it.
+    if (field === 'calls'){
+      var n = windowEvents(w, side);
+      if (n === null) return '<td class="num nodata">' + noClaim(NO_CLAIM) + '</td>';
+      var up = count0(w.unpriced_calls);
+      return '<td class="num"' +
+        (up ? ' title="' + esc(up + ' call(s) in this window could not be priced') + '"' : '') +
+        '>' + n.toLocaleString('en-US') + '</td>';
+    }
+
+    // A previous sweep declared this template clean. That conclusion was right about the
+    // unpriced_calls addend question and WRONG about the ABSENT test: `!acc.calls` is ROWS
+    // PRICED, so a 100%-unpriceable window printed "No measured rows in this window" in the
+    // same row whose events cell read 2. The ladder TOTAL two functions down had already
+    // been taught to test suppression first (`admits`, below); only the cell had not, so
+    // the footer excluded a window the cell claimed was empty.
+    var v = acc ? (field === 'saved' ? acc.saved : acc.spent) : null;
+    var st = claimState(w, side, v);
+    if (st === 'withheld'){
+      // The dollars were deliberately WITHHELD, which is a different statement from
+      // "there was nothing here" — so it gets its own label, not the generic em dash.
+      return '<td class="num unpriceable" title="' + esc(note) + '">withheld</td>';
+    }
+    if (st === 'absent'){
+      return '<td class="num nodata">' +
+        noClaim('No ' + side + ' rows in this window. ' + NO_CLAIM) + '</td>';
+    }
+    return '<td class="num">' +
+      (field === 'saved' ? savedMoney(v) : money(v)) + '</td>';
+  }
+
+  // ---------------------------------------------------------------------------
+  // the DISJOINT ladder
+  // ---------------------------------------------------------------------------
+  var LADDER_COLS = 9;
+
+  function renderLadder(rows){
+    var body = el('ladderBody');
+    if (!body) return;
+    if (!rows.length){
+      body.innerHTML = '<tr><td colspan="' + LADDER_COLS + '" class="muted">' +
+        'No period data yet. Events appear after an end-of-chat tagline runs.</td></tr>';
+      set('ladderFoot', '');
+      return;
+    }
+
+    // Per-basis totals. The two bases accumulate SEPARATELY and are never read into one
+    // expression; a window whose dollars are withheld or whose period was never covered
+    // is EXCLUDED from the dollar total and the exclusion is counted and printed.
+    //
+    // The contribution counters are PER BASIS. A single global counted/excluded pair is
+    // basis-BLIND: it is derived from `status` alone, so a window that contributed nothing
+    // to the measured column still counted as a measured contributor, and the caption
+    // under an all-em-dash measured column read "1 of 1 window(s) contributed dollars".
+    // The sentence has to describe the column it annotates.
+    //
+    // The EVENT counters carry their own admission test, for exactly the same reason the
+    // dollars do. `events` is set only when a window actually supplied a count;
+    // `eventsUnknown` counts the windows that could not, so the event denominator is never
+    // silently short. The excluded tally is split BY REASON — a window excluded from the
+    // dollars may or may not still be in the event column, and the footer used to assert a
+    // blanket "every excluded window still contributes its exact event count", which is
+    // true ONLY of a dollars_suppressed exclusion (where _withhold_dollars nulls the
+    // dollars and leaves the counts intact) and FALSE of every not_covered or null-basis
+    // one — the common case.
+    var tot = { measured:  { saved:0, spent:0, calls:0, dollars:false,
+                             events:false, eventsUnknown:0, contributed:0, excluded:0,
+                             exclWithEvents:0, exclEventsUnknown:0 },
+                estimated: { saved:0, spent:0, calls:0, dollars:false,
+                             events:false, eventsUnknown:0, contributed:0, excluded:0,
+                             exclWithEvents:0, exclEventsUnknown:0 } };
+
+    var html = '';
+    rows.forEach(function(w){
+      SIDES.forEach(function(side){
+        var acc = w[side];
+        var ev = windowEvents(w, side);
+        if (ev === null) tot[side].eventsUnknown += 1;
+        else { tot[side].calls += ev; tot[side].events = true; }
+
+        function excludeThisWindow(){
+          tot[side].excluded += 1;
+          if (ev === null) tot[side].exclEventsUnknown += 1;
+          else tot[side].exclWithEvents += 1;
+        }
+
+        // THE ADMISSION TEST — identical to the one basisCell() applies to the cell
+        // directly above this total. store.py::_mk_acc() ALWAYS returns a zero-filled
+        // accumulator for a basis that had no rows; it never returns null, and
+        // reporting.report_window() ships that object on every window. A bare `!acc`
+        // guard lets that truthy object through, `Number(0)` is finite, and
+        // `tot[side].dollars` is set true by a window that contributed NOTHING — so the
+        // total printed a confident "$0.00 · exactly baseline" beneath six cells that had
+        // each declined to claim a figure. That is the default rendering for any
+        // single-basis install (gateway-only, or transcript-only), i.e. the common case.
+        // Routed through the SHARED predicate rather than re-stating the test, so the
+        // footer's contributed/excluded counts and the cell directly above them are decided
+        // by one function. This local test was already suppression-first — it is the one
+        // place in this file that had the ordering right — and basisCell() was not, so the
+        // footer excluded windows the cells were calling empty.
+        var admits = claimState(w, side, acc ? acc.saved : null) === 'value';
+        if (!admits){ excludeThisWindow(); return; }
+        var sv = Number(acc.saved), sp = Number(acc.spent);
+        if (isFinite(sv) && isFinite(sp)){
+          tot[side].saved += sv;
+          tot[side].spent += sp;
+          tot[side].dollars = true;
+          tot[side].contributed += 1;
+        } else {
+          excludeThisWindow();
+        }
+      });
+
+      html += '<tr data-key="' + esc(w.key || '') + '">' +
+        '<td>' + esc(w.label || w.key || '') +
+          '<div class="bounds">' + esc(w.bounds_label || '') + '</div>' +
+          chips(w.labels) + '</td>' +
+        basisCell(w, 'measured', 'saved') + basisCell(w, 'estimated', 'saved') +
+        basisCell(w, 'measured', 'spent') + basisCell(w, 'estimated', 'spent') +
+        basisCell(w, 'measured', 'calls') + basisCell(w, 'estimated', 'calls') +
+        '<td><span class="grain-pill">' + esc(w.grain || GRAIN) + '</span></td>' +
+        '<td class="bounds">' + esc(w.bounds_label || '') + '</td>' +
+        '</tr>';
+
+      // Notes belong to their ROW. Pooled under the table, a reader cannot tell which of
+      // six windows a "100% of this window is unpriceable" sentence describes.
+      var wNotes = suppressionNotes(w);
+      if (wNotes.length){
+        html += '<tr class="rownote"><td colspan="' + LADDER_COLS + '">' +
+          wNotes.map(function(n){ return '&#8627; ' + esc(n); }).join('<br>') +
+          '</td></tr>';
+      }
+    });
+
+    // The total row. Legitimate arithmetic: the windows are DISJOINT and partition
+    // history, and each column stays inside one basis.
+    function totCell(side, field){
+      if (!tot[side].dollars){
+        return '<td class="num nodata">' + noClaim(
+          'No window contributed a priced ' + side + ' figure. ' + NO_CLAIM) + '</td>';
+      }
+      var v = field === 'saved' ? tot[side].saved : tot[side].spent;
+      return '<td class="num">' + (field === 'saved' ? savedMoney(v) : money(v)) + '</td>';
+    }
+
+    // The event total gets the SAME treatment as totCell(). A zero-initialised counter
+    // printed unconditionally is an affirmative claim of a measured zero, and it was the
+    // one the not_covered / too_new ladders made — beneath a full column of cells that had
+    // each declined to state a count.
+    function totEvents(side){
+      var t = tot[side];
+      if (!t.events){
+        return '<td class="num nodata">' + noClaim(
+          'No window supplied an event count for the ' + side + ' basis. ' +
+          NO_CLAIM) + '</td>';
+      }
+      var title = t.eventsUnknown
+        ? t.eventsUnknown + ' window(s) could not supply an event count for the ' + side +
+          ' basis and are NOT included in this total'
+        : '';
+      return '<td class="num"' + (title ? ' title="' + esc(title) + '"' : '') + '>' +
+        t.calls.toLocaleString('en-US') + '</td>';
+    }
+    html += '<tr class="total"><td>Ladder total' +
+      '<div class="bounds">' + esc(rows.length + ' window(s) — each basis states its own ' +
+        'contribution count below the table') +
+      '</div></td>' +
+      totCell('measured', 'saved') + totCell('estimated', 'saved') +
+      totCell('measured', 'spent') + totCell('estimated', 'spent') +
+      totEvents('measured') + totEvents('estimated') +
+      '<td><span class="grain-pill">' + esc(GRAIN) + '</span></td>' +
+      '<td class="bounds">all rows above</td></tr>';
+
+    body.innerHTML = html;
+
+    // ONE SENTENCE PER BASIS. Exclusions are counted and visible, and each count
+    // describes the column it annotates rather than the window's overall status.
+    var foot = 'Every figure above is per-<b>' + esc(GRAIN) + '</b>. The measured and ' +
+      'estimated columns are separate claims and are never added to each other.';
+    //
+    // The excluded tally is split BY REASON rather than described by a blanket property.
+    // "Every excluded window still contributes its exact event count" was FALSE for every
+    // not_covered and every null-basis exclusion — it holds only for a dollars_suppressed
+    // one — so the page denied an exclusion it was making, in the same sentence that
+    // counted it. The event denominator is stated too, so a short event total is visible
+    // rather than inferred.
+    SIDES.forEach(function(side){
+      var t = tot[side];
+      foot += '<br><b>' + esc(side) + ':</b> ' + t.contributed + ' of ' + rows.length +
+        ' window(s) contributed dollars; ' + t.excluded + ' withheld, not covered, or ' +
+        'carried no ' + esc(side) + ' rows — of those, ' + t.exclWithEvents +
+        ' still contribute an exact event count to the ' + esc(side) + ' event column and ' +
+        t.exclEventsUnknown + ' could not report one, so their events are NOT in it. The ' +
+        esc(side) + ' event total covers ' + (rows.length - t.eventsUnknown) + ' of ' +
+        rows.length + ' window(s).';
+    });
+    if (META && META.coverage_label) foot += '<br>Coverage: ' + esc(META.coverage_label);
+    set('ladderFoot', foot);
+  }
+
+  // ---------------------------------------------------------------------------
+  // composition + trend
+  // ---------------------------------------------------------------------------
+  var DIM_LABEL = { served: 'By served model', base: 'By baseline model', tier: 'By tier',
+                    harness: 'By harness', decision: 'By routing decision' };
+
+  // The same predicate, same order. This one also renders the TREND rows, so a
+  // 100%-unpriceable bucket used to print "No measured rows in this group. This is not $0 —
+  // a measured zero and an absent measurement are different claims." beside an events cell
+  // reading 2, in the same printed row.
+  function groupCell(g, side, field){
+    var acc = (g && g[side]) || null;
+    var v = acc ? (field === 'saved' ? acc.saved : acc.spent) : null;
+    var st = claimState(g, side, v);
+    if (st === 'not_covered'){
+      return '<td class="num notcovered" title="' + esc(LABEL_TEXT.not_covered) +
+             '">not covered</td>';
+    }
+    if (st === 'withheld'){
+      return '<td class="num unpriceable" title="' +
+        esc('No dollar figure is claimed for this group.') + '">withheld</td>';
+    }
+    if (st === 'absent'){
+      return '<td class="num nodata">' +
+        noClaim('No ' + side + ' rows in this group. ' + NO_CLAIM) + '</td>';
+    }
+    return '<td class="num">' + (field === 'saved' ? savedMoney(v) : money(v)) + '</td>';
+  }
+
+  function eventsCell(g, side){
+    var ev = g.events || {};
+    if (ev[side] === undefined || ev[side] === null){
+      return '<td class="num nodata">' + noClaim(NO_CLAIM) + '</td>';
+    }
+    return '<td class="num">' + count0(ev[side]).toLocaleString('en-US') + '</td>';
+  }
+
+  function groupTable(caption, keyHead, rows){
+    if (!rows || !rows.length){
+      return '<div class="empty">' + esc('No rows for ' + caption + '.') + '</div>';
+    }
+    var body = rows.map(function(g){
+      var up = count0(g.unpriced_calls);
+      var whys = Object.keys(g.unpriced || {});
+      return '<tr>' +
+        '<td class="mono">' + esc(g.key) + '</td>' +
+        groupCell(g, 'measured', 'saved') + groupCell(g, 'estimated', 'saved') +
+        groupCell(g, 'measured', 'spent') + groupCell(g, 'estimated', 'spent') +
+        eventsCell(g, 'measured') + eventsCell(g, 'estimated') +
+        '<td class="num"' + (whys.length ? ' title="' + esc(whys.join(', ')) + '"' : '') +
+          '>' + up.toLocaleString('en-US') + '</td>' +
+        '<td><span class="grain-pill">' + esc(g.grain || GRAIN) + '</span></td>' +
+        '</tr>';
+    }).join('');
+    return '<div class="scroller" tabindex="0" role="region" aria-label="' +
+        esc(caption + ', scrollable') + '">' +
+      '<table class="wide"><caption>' + esc(caption) +
+        ' — measured and estimated are separate claims and are never summed. ' +
+        '&ldquo;Not priced&rdquo; rows entered NEITHER basis and are counted here so the ' +
+        'exclusion is visible.</caption>' +
+      '<thead><tr>' +
+        '<th scope="col">' + esc(keyHead) + '</th>' +
+        '<th scope="col" class="num">Saved (measured)</th>' +
+        '<th scope="col" class="num">Saved (estimated)</th>' +
+        '<th scope="col" class="num">Spent (measured)</th>' +
+        '<th scope="col" class="num">Spent (estimated)</th>' +
+        '<th scope="col" class="num">Events (measured)</th>' +
+        '<th scope="col" class="num">Events (estimated)</th>' +
+        '<th scope="col" class="num">Not priced</th>' +
+        '<th scope="col" class="locked" ' +
+          'title="Non-hideable: a chat-grain figure and a call-grain figure are never summed">Grain</th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table></div>';
+  }
+
+  // ---------------------------------------------------------------------------
+  // RECONCILIATION against the ladder — a check, not a decoration.
+  //
+  // app.py builds Composition and Trend from the SAME whole-history row set the ladder
+  // partitions (no window is passed to report_breakdown / report_trend), so their event
+  // counts must agree with the ladder's. A handler that re-narrows either of them — which
+  // is what this page shipped with: report_breakdown(rows, d, f["from"], f["to"]) and
+  // report_trend(rows, "day", f["from"], f["to"]), both of which skip rows via in_window —
+  // produces a section covering FEWER events than the hero figures above it, with no
+  // statement anywhere that the two are different sets. The shortfall is COUNTED and
+  // PRINTED here instead, so the page can never again assert a consistency it does not
+  // have. Only a shortfall is reported: a section covering MORE than the ladder means the
+  // ladder itself declined to count something, which its own footer already states.
+  function sumGroupEvents(groups, side){
+    // An EMPTY section is a TOTAL shortfall, not an unknown one.
+    //
+    // `known` used to be set only INSIDE the loop, so an empty array returned
+    // {n:0, known:false} and reconcileNote() bailed out early on it — silent in precisely
+    // the 100%-shortfall case a re-narrowing regression produces. Executed proof: with the
+    // window reintroduced in app.py, 3 of 3 events went missing from BOTH sections, no
+    // shortfall was printed anywhere, the lede kept its affirmative reconciliation claim,
+    // and Trend rendered "No dated events yet." on a page whose ladder listed 3 dated
+    // events directly above it. The ladder's OWN `known` flag still gates the comparison,
+    // so an empty section under a ladder that cannot report a count still says nothing.
+    groups = groups || [];
+    if (!groups.length) return { n: 0, known: true };
+    var known = false, n = 0;
+    groups.forEach(function(g){
+      var ev = (g && g.events) || {};
+      if (ev[side] === undefined || ev[side] === null) return;
+      var v = Number(ev[side]);
+      if (!isFinite(v)) return;
+      known = true;
+      n += v;
+    });
+    return { n: n, known: known };
+  }
+
+  // Each dimension groups the SAME rows, so their event totals are equal by construction;
+  // the widest known one is what Composition actually covers. A PURE function of the
+  // payload, so the lede's clause and the section's own note can never disagree.
+  function breakdownPer(bd){
+    var per = { measured: { n: 0, known: false }, estimated: { n: 0, known: false } };
+    SIDES.forEach(function(side){
+      BREAKDOWN_KEYS.forEach(function(k){
+        var s = sumGroupEvents((bd && bd[k]) || [], side);
+        if (!s.known) return;
+        if (!per[side].known || s.n > per[side].n){ per[side].n = s.n; per[side].known = true; }
+      });
+    });
+    return per;
+  }
+  function trendPer(rows){
+    return { measured: sumGroupEvents(rows || [], 'measured'),
+             estimated: sumGroupEvents(rows || [], 'estimated') };
+  }
+
+  // The per-basis shortfall, as lines. ONE producer, read by the section note AND by the
+  // lede, so the prominent sentence and the buried correction are the same computation.
+  function shortfallLines(perSide){
+    var lines = [];
+    SIDES.forEach(function(side){
+      var lad = LADDER_EVENTS[side], got = perSide && perSide[side];
+      if (!lad || !lad.known || !got || !got.known) return;
+      if (got.n >= lad.n) return;
+      lines.push(esc(side) + ' — this section covers ' + got.n.toLocaleString('en-US') +
+        ' of the ladder’s ' + lad.n.toLocaleString('en-US') + ' event(s); ' +
+        (lad.n - got.n).toLocaleString('en-US') + ' event(s) are in the period ladder and ' +
+        'NOT here');
+    });
+    return lines;
+  }
+
+  // The lede's reconciliation clause — a FUNCTION of the reconciliation RESULT, exactly as
+  // the narrowing wording is a function of the filters actually applied.
+  //
+  // The lede used to assert, unconditionally and directly above the KPI grid, that
+  // "Composition and Trend are built from the same whole-history rows and reconcile with
+  // the ladder" — while reconcileNote() below could print, much further down, that they do
+  // not and cannot. Both strings rendered in ONE document on the ordinary six-window
+  // payload (ladder 6 measured / 2 estimated; sections 3 / 0), with the false claim in the
+  // more prominent position and the correction buried. Substantiating the WRONG claim is
+  // worse than saying nothing, so the affirmative sentence is emitted only when no
+  // shortfall exists; when one does, the counted statement replaces it.
+  function reconcileClause(){
+    var bad = [];
+    if (shortfallLines(breakdownPer((REP && REP.breakdown) || {})).length) bad.push('Composition');
+    if (shortfallLines(trendPer((REP && REP.trend) || [])).length) bad.push('Trend');
+    if (!bad.length){
+      return 'Composition and Trend are built from the same whole-history rows and ' +
+             'reconcile with the ladder. ';
+    }
+    return '<b>' + bad.join(' and ') + (bad.length === 1 ? ' covers' : ' cover') +
+      ' FEWER events than that ladder and cannot be reconciled with it</b> — each of those ' +
+      'sections states its own shortfall, counted, where it is rendered. ';
+  }
+
+  function reconcileNote(sectionName, perSide){
+    var lines = shortfallLines(perSide);
+    if (!lines.length) return '';
+    return '<p class="lede"><b>Scope divergence.</b> ' + esc(sectionName) + ' does not ' +
+      'cover everything the period ladder and the hero figures cover, so the two cannot ' +
+      'be reconciled: ' + lines.join('; ') + '. Read the figures in this section as the ' +
+      'narrower set they are.</p>';
+  }
+
+  function renderBreakdown(bd){
+    var keys = BREAKDOWN_KEYS;
+    var out = reconcileNote('Composition', breakdownPer(bd));
+    keys.forEach(function(k){
+      var rows = (bd && bd[k]) || [];
+      out += '<h2 style="font-size:12.5px;border-bottom:none;margin:18px 0 6px">' +
+        esc(DIM_LABEL[k] || k) + '</h2>' +
+        groupTable(DIM_LABEL[k] || k, k === 'decision' ? 'Decision' : 'Key', rows);
+    });
+    set('breakdown', out);
+  }
+
+  function renderTrend(rows){
+    rows = rows || [];
+    // The note is computed BEFORE the empty-section early return. The old ordering
+    // returned first, so the one case where the shortfall is TOTAL — no buckets at all
+    // under a ladder full of dated events — was the one case that printed nothing.
+    var per = trendPer(rows);
+    var lines = shortfallLines(per);
+    var note = reconcileNote('Trend', per);
+    if (!rows.length){
+      // …and the empty-state SENTENCE is a function of that SAME shortfall, not a constant.
+      //
+      // Fixing the ORDER was not enough. "No dated events yet." is an affirmative claim
+      // about the whole report, and a non-empty `lines` is the proof it is FALSE: the note
+      // directly above has just COUNTED events that are dated and are in the ladder. The
+      // page therefore contradicted itself one DOM node later — the same rule the lede
+      // enforces by REPLACING its false reconciliation sentence rather than annotating it,
+      // given the opposite treatment two sections down. So it is replaced here too, with a
+      // sentence scoped to what is actually true: this SECTION has no buckets.
+      //
+      // The original wording survives on the lines.length === 0 branch and only there —
+      // where the ladder genuinely has nothing dated to show, or (ALL_NOT_COVERED) cannot
+      // report a count at all and nothing is KNOWN to be missing. Making the empty state
+      // unconditional in either direction is wrong: one direction prints a falsehood, the
+      // other cries divergence on a report that simply has no data yet.
+      set('trend', note + '<div class="empty">' +
+        (lines.length
+          ? 'No dated events in this section. The period ladder above does carry dated ' +
+            'events — this section covers none of them, as counted directly above.'
+          : 'No dated events yet.') +
+        '</div>');
+      return;
+    }
+    var body = rows.map(function(r){
+      return '<tr>' +
+        '<td class="mono">' + esc(r.bucket) + '</td>' +
+        groupCell(r, 'measured', 'saved') + groupCell(r, 'estimated', 'saved') +
+        eventsCell(r, 'measured') + eventsCell(r, 'estimated') +
+        '<td class="num">' + count0(r.unpriced_calls).toLocaleString('en-US') + '</td>' +
+        '<td><span class="grain-pill">' + esc(r.grain || GRAIN) + '</span></td>' +
+        '</tr>';
+    }).join('');
+    set('trend', note +
+      '<div class="scroller" tabindex="0" role="region" aria-label="Savings trend, scrollable">' +
+      '<table class="wide"><caption>Bucketed on each call&rsquo;s own local calendar day ' +
+        '(<span class="mono">pday</span>), never on ingest time. ' + rows.length +
+        ' bucket(s).</caption>' +
+      '<thead><tr><th scope="col">Bucket</th>' +
+        '<th scope="col" class="num">Saved (measured)</th>' +
+        '<th scope="col" class="num">Saved (estimated)</th>' +
+        '<th scope="col" class="num">Events (measured)</th>' +
+        '<th scope="col" class="num">Events (estimated)</th>' +
+        '<th scope="col" class="num">Not priced</th>' +
+        '<th scope="col" class="locked" ' +
+          'title="Non-hideable: a chat-grain figure and a call-grain figure are never summed">Grain</th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table></div>');
+  }
+
+  // ---------------------------------------------------------------------------
+  // gateway-proxy-only surfaces (present in BOTH payloads)
+  // ---------------------------------------------------------------------------
+  function simpleTable(id, caption, cols, rows, emptyMsg){
+    var t = el(id);
+    if (!t) return;
+    if (!rows.length){ t.innerHTML = '<div class="empty">' + esc(emptyMsg) + '</div>'; return; }
+    // A short table split across a page break reads as two unrelated fragments and the
+    // second one has no heading. Long tables must be allowed to flow (their headers
+    // repeat via thead), so only keep the small ones whole.
+    var whole = rows.length <= 10 ? ' avoid' : '';
+    t.innerHTML = '<div class="scroller' + whole + '" tabindex="0" role="region" aria-label="' +
+      esc(caption + ', scrollable') + '"><table class="wide"><caption>' + esc(caption) +
+      '</caption><thead><tr>' +
+      cols.map(function(c){
+        return '<th scope="col"' + (c[1] ? ' class="num"' : '') + '>' + esc(c[0]) + '</th>';
+      }).join('') +
       '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
   }
 
-  // ---- by tool ------------------------------------------------------------
-  var tools = (D.by_tool || []).slice();
-  var maxSaved = tools.reduce(function(m, r){ return Math.max(m, Math.abs(num(r.saved, 0))); }, 0) || 1;
-  table('byTool',
-    [['Tool', 0], ['Calls', 1], ['Spend', 1], ['Saved', 1], ['Downgraded', 1], ['', 0]],
-    tools.map(function(r){
-      var w = Math.min(100, Math.abs(num(r.saved, 0)) / maxSaved * 100);
-      return '<tr><td>' + esc(r.tool) + '</td>' +
-        '<td class="num">' + int(r.calls) + '</td>' +
-        '<td class="num">' + money(r.spent) + '</td>' +
-        '<td class="num">' + signed(r.saved) + '</td>' +
-        '<td class="num">' + num(r.downgrade_rate, 0).toFixed(0) + '%</td>' +
-        '<td><div class="bar"><i style="width:' + w.toFixed(1) + '%"></i></div></td></tr>';
-    }), 'No routed traffic recorded yet.');
+  // These three tables read D.by_tool / D.by_tier / D.downgraded_by_model straight off the
+  // UNFILTERED Metrics.summary(). They are LIFETIME aggregates on a page whose provenance
+  // block echoes a set of applied filters, so the divergence must be stated — and stated
+  // as a different TIME SCOPE, which "a different row set" does not say. ONE constant,
+  // used for all three headings and all three captions, so a later edit cannot caveat two
+  // of them and forget the third.
+  var PROXY_SCOPE = 'all time, from the gateway proxy’s own aggregate; the period filter ' +
+    'above does not apply to this table';
 
-  // ---- by tier ------------------------------------------------------------
-  var bt = D.by_tier || {};
-  table('byTier',
-    [['Tier', 0], ['Calls', 1], ['Input tokens', 1], ['Output tokens', 1]],
-    Object.keys(bt).map(function(k){
-      var v = bt[k] || {};
-      return '<tr><td>' + esc(k) + '</td><td class="num">' + int(v.count) + '</td>' +
-        '<td class="num">' + int(v.in_tokens) + '</td>' +
-        '<td class="num">' + int(v.out_tokens) + '</td></tr>';
-    }), 'No tier data.');
+  function renderProxySurfaces(){
+    ['toolNote', 'tierNote', 'outcomesNote'].forEach(function(id){
+      var n = el(id);
+      if (n) n.textContent = PROXY_SCOPE;
+    });
 
-  // ---- routing outcomes ---------------------------------------------------
-  var dn = D.downgraded_by_model || {}, up = D.upcharged_by_model || {};
-  var rows = Object.keys(dn).map(function(m){
-    return '<tr><td class="mono">' + esc(m) + '</td><td>routed cheaper</td>' +
-           '<td class="num">' + int(dn[m]) + '</td></tr>';
-  }).concat(Object.keys(up).map(function(m){
-    return '<tr><td class="mono">' + esc(m) + '</td><td class="neg">cost more than baseline</td>' +
-           '<td class="num">' + int(up[m]) + '</td></tr>';
-  }));
-  table('byModel', [['Served model', 0], ['Outcome', 0], ['Calls', 1]], rows,
-        'No routing decisions recorded yet.');
+    var tools = (D.by_tool || []).slice();
+    simpleTable('byTool',
+      'Savings by tool. Blended basis: this surface does not separate measured from ' +
+        'estimated. Scope: ' + PROXY_SCOPE + '.',
+      [['Tool', 0], ['Calls', 1], ['Spend', 1], ['Saved', 1], ['Downgraded', 1]],
+      tools.map(function(r){
+        return '<tr><td>' + esc(r.tool) + '</td>' +
+          '<td class="num">' + int(r.calls) + '</td>' +
+          '<td class="num">' + money(r.spent) + '</td>' +
+          '<td class="num">' + savedMoney(r.saved) + '</td>' +
+          '<td class="num">' + (r.downgrade_rate === null || r.downgrade_rate === undefined
+            ? noClaim(NO_CLAIM)
+            : esc(Number(r.downgrade_rate).toFixed(0) + '%')) + '</td></tr>';
+      }), 'No routed traffic recorded yet.');
 
-  // ---- provenance ---------------------------------------------------------
-  var cat = D.catalog || {};
-  var stale = num(cat.age_days, 0) > 45;
-  document.getElementById('prov').innerHTML =
-    '<dl>' +
-    '<dt>Price catalog</dt><dd>as of <b>' + esc(cat.as_of || 'unknown') + '</b>' +
-      (cat.age_days != null ? ' (' + int(cat.age_days) + ' days old)' : '') +
-      (stale ? ' <span class="warn">— over 45 days old; re-verify before relying on these figures</span>' : '') +
-      '</dd>' +
-    '<dt>Basis</dt><dd><b>Measured.</b> Every row was observed by the Cheaper gateway, which saw both the model requested and the model served.</dd>' +
-    '<dt>Baseline</dt><dd>' + esc(D.baseline_model || 'the model each request asked for') +
-      ' — the same work priced at the model the caller originally requested.</dd>' +
-    '<dt>Period basis</dt><dd>The timestamp of the call itself. Windows are local-time calendar boundaries and <b>nest</b>: &ldquo;this week&rdquo; includes &ldquo;today&rdquo;.</dd>' +
-    '<dt>Reporting timezone</dt><dd>' + esc(tz || 'system local') + '</dd>' +
-    '</dl>' +
-    '<p style="margin:0 0 8px"><b>How each figure is computed.</b> Each call is priced twice at published ' +
-    'list rates, using that call’s own tokens, its own billing SKU and the rates in force on its own date: ' +
-    'once on the model actually served, once on the baseline model. The difference is the saving, and it is ' +
-    '<b>signed</b> — a call that cost more than its baseline is subtracted, never dropped. Prompt-cache reads ' +
-    'and 5-minute / 1-hour cache writes are priced at their own separate rates. A model absent from the ' +
-    'catalog is <b>unpriceable</b>: it contributes nothing and is never given a guessed rate.</p>' +
-    '<p style="margin:0 0 8px"><b>This is not an invoice.</b> Figures are list-price <i>metered value</i> — ' +
-    'an estimate of what this usage would list for. Negotiated discounts, committed-spend rates, credits, ' +
-    'free tiers, flat-rate subscription plans and taxes are not modelled. Reconcile against your provider ' +
-    'invoice before any accounting, reimbursement or tax use.</p>' +
-    '<p style="margin:0"><b>Scope.</b> This report covers traffic that passed through the Cheaper gateway. ' +
-    'Sessions run without the gateway are not included here.</p>';
+    var bt = D.by_tier || {};
+    simpleTable('byTier',
+      'Calls and tokens by capability tier. Tier is capability, never a price rank. ' +
+        'Scope: ' + PROXY_SCOPE + '.',
+      [['Tier', 0], ['Calls', 1], ['Input tokens', 1], ['Output tokens', 1]],
+      Object.keys(bt).map(function(k){
+        var v = bt[k] || {};
+        return '<tr><td>' + esc(k) + '</td><td class="num">' + int(v.count) + '</td>' +
+          '<td class="num">' + int(v.in_tokens) + '</td>' +
+          '<td class="num">' + int(v.out_tokens) + '</td></tr>';
+      }), 'No tier data.');
+
+    var dn = D.downgraded_by_model || {}, up = D.upcharged_by_model || {};
+    var outcomes = Object.keys(dn).map(function(m){
+      return '<tr><td class="mono">' + esc(m) + '</td><td>routed cheaper</td>' +
+             '<td class="num">' + int(dn[m]) + '</td></tr>';
+    }).concat(Object.keys(up).map(function(m){
+      return '<tr><td class="mono">' + esc(m) + '</td>' +
+             '<td class="neg">cost more than baseline</td>' +
+             '<td class="num">' + int(up[m]) + '</td></tr>';
+    }));
+    simpleTable('byModel',
+      'Routing outcomes. A costlier route is listed, not hidden, and its dollars are ' +
+        'subtracted from every total in this report. Scope: ' + PROXY_SCOPE + '.',
+      [['Served model', 0], ['Outcome', 0], ['Calls', 1]], outcomes,
+      'No routing decisions recorded yet.');
+  }
+
+  // ---------------------------------------------------------------------------
+  // provenance
+  // ---------------------------------------------------------------------------
+  var STALE_DAYS = 45;
+
+  function dl(pairs){
+    var body = pairs.filter(function(p){ return p[1]; }).map(function(p){
+      return '<dt>' + esc(p[0]) + '</dt><dd>' + p[1] + '</dd>';
+    }).join('');
+    return body ? '<dl>' + body + '</dl>' : '';
+  }
+
+  function renderProvenanceFromMeta(m){
+    var pp = m.price_provenance || {};
+    var age = (pp.age_days === null || pp.age_days === undefined) ? null : Number(pp.age_days);
+    var stale = age !== null && isFinite(age) && age > STALE_DAYS;
+    var integ = m.integrity || {};
+    var tombs = integ.tombstone_detail || [];
+    var f = m.filters || {};
+
+    var filterBits = Object.keys(f).map(function(k){
+      var v = f[k];
+      if (v === null || v === undefined || v === '' || v === false) return null;
+      return '<span class="chip">' + esc(k + '=' + v) + '</span>';
+    }).filter(Boolean).join('');
+
+    var html = dl([
+      // REQUESTED, not "Report period". The ladder and the KPI grid are built over all
+      // history (app.py passes apply_window=False), so this row describes what was asked
+      // for, not what the figures above cover — and the inclusive/exclusive sentence is
+      // only asserted when there are real bounds to assert it about. `?period=week`
+      // renders "— → —" because parse_filters never converts a named period into bounds.
+      ['Requested period', esc(m.period || '') +
+        (m.period_bounds_label ? '<br><span class="mono">' + esc(m.period_bounds_label) + '</span>' : '') +
+        (boundsAreReal(m.period_bounds_label)
+          ? '<br><span class="muted">start is INCLUSIVE, end is EXCLUSIVE</span>'
+          : '<br><span class="muted">Unbounded on at least one side — no inclusive or ' +
+            'exclusive claim is made about bounds that do not exist.</span>') +
+        // NOT a categorical "not narrowed by it": apply_window=False suppresses only the
+        // TIME check, and `_match()` on the next line still applies basis / served / base /
+        // harness / decision / session / q / min_abs_usd to the ladder AND the hero
+        // figures. This dd used to print "are not narrowed by it" beside a chip in the very
+        // same block proving they were. Same single source as the masthead and the lede.
+        '<br><span class="muted">This is the period that was REQUESTED. The hero figures ' +
+        'and the period ladder cover ' +
+        (narrowingFilters(m).length
+          ? 'all recorded history, <b>restricted to ' +
+            esc(narrowingFilters(m).join(', ')) + '</b>. The requested period does not ' +
+            'narrow them; the other filters listed under “Filters applied” do.'
+          : 'all recorded history and are not narrowed by it.') + '</span>'],
+      ['Timezone', esc(m.timezone || '') +
+        (m.week_anchor ? ' · ' + esc(m.week_anchor) : '')],
+      ['Generated', esc(m.generated_at_local || m.generated_at || '') +
+        (m.generated_by ? '<br>' + esc(m.generated_by) : '')],
+      ['Rows', esc(String(m.rows_exported)) + ' rendered of ' + esc(String(m.rows_matching)) +
+        ' matching' + (m.truncated ? ' <span class="warn">— TRUNCATED</span>' : '')],
+      ['Price catalog', 'as of <b>' + esc(pp.as_of || 'unknown') + '</b>' +
+        (age !== null && isFinite(age) ? ' (' + esc(String(age)) + ' days old)' : '') +
+        (stale ? ' <span class="warn">— over ' + STALE_DAYS + ' days old; re-verify ' +
+                 'provider pricing before relying on these figures</span>' : '') +
+        (pp.digest ? '<br>digest <span class="mono">' + esc(pp.digest) + '</span>' : '') +
+        (pp.note ? '<br><span class="muted">' + esc(pp.note) + '</span>' : '')],
+      ['Measurement basis', esc(m.measurement_basis || '')],
+      ['Period basis', esc(m.period_basis || '')],
+      ['Classifier', esc(m.classifier || '')],
+      ['Coverage', esc(m.coverage_label || '')],
+      ['Row digest', integ.row_digest
+        ? '<span class="mono">' + esc(integ.row_digest) + '</span>' +
+          (integ.row_digest_method ? '<br><span class="muted">' +
+            esc(integ.row_digest_method) + '</span>' : '')
+        : '<span class="nodata">not computed for this rendering</span>'],
+      ['Tombstones', esc(integ.tombstones || 'none in this window') +
+        (tombs.length
+          ? '<br>' + tombs.map(function(t){
+              return '<span class="mono">' + esc(typeof t === 'object'
+                ? JSON.stringify(t) : String(t)) + '</span>';
+            }).join('<br>')
+          : '')],
+      ['Guard mode', esc(integ.guard_mode || '') +
+        (integ.guard_note ? '<br><span class="muted">' + esc(integ.guard_note) + '</span>' : '')],
+      ['Filters applied', filterBits || '<span class="muted">none</span>'],
+      ['Reproduce', m.reproduce ? '<span class="mono">' + esc(m.reproduce) + '</span>' : '']
+    ]);
+
+    html += '<p><b>How each figure is computed.</b> ' + esc(m.method || '') + '</p>';
+    html += '<p><b>This is not an invoice.</b> ' + esc(m.not_an_invoice || '') + '</p>';
+    html += '<p><b>Scope.</b> This report covers the rows Cheaper recorded — gateway ' +
+      'traffic and, where transcripts were imported, locally reconstructed calls. Sessions ' +
+      'run with neither are not represented here, and a period nobody was watching is ' +
+      'labelled <i>not covered</i> rather than reported as zero.</p>';
+    set('prov', html);
+  }
+
+  function renderProvenanceFallback(){
+    // NO unconditional "Basis: Measured" here. The legacy summary blends gateway rows
+    // whose usage the provider reported with gateway rows whose usage it did not, and
+    // claiming every row was measured is simply false.
+    var cat = D.catalog || {};
+    var age = (cat.age_days === null || cat.age_days === undefined) ? null : Number(cat.age_days);
+    var stale = age !== null && isFinite(age) && age > STALE_DAYS;
+    var html = dl([
+      ['Price catalog', 'as of <b>' + esc(cat.as_of || 'unknown') + '</b>' +
+        (age !== null && isFinite(age) ? ' (' + esc(String(age)) + ' days old)' : '') +
+        (stale ? ' <span class="warn">— over ' + STALE_DAYS + ' days old; re-verify ' +
+                 'before relying on these figures</span>' : '')],
+      ['Basis', '<b>Mixed, and not separated on this view.</b> The gateway observed every ' +
+        'row below, but only the rows whose usage the provider actually reported are ' +
+        '<i>measured</i>; rows whose usage was never reported are <i>estimated</i>. This ' +
+        'legacy view reports one blended figure and cannot tell you which is which. The ' +
+        'basis-split report is served at <span class="mono">/api/v1/report.html</span>.'],
+      ['Grain', 'call — per-chat legacy aggregates are a different grain and are not ' +
+        'included on this view.'],
+      ['Baseline', esc(D.baseline_model || 'the model each request asked for') +
+        ' — the same work priced at the model the caller originally requested.'],
+      ['Period basis', 'The timestamp of the call itself. Windows are local-time calendar ' +
+        'boundaries and <b>nest</b>: &ldquo;this week&rdquo; includes &ldquo;today&rdquo;, ' +
+        'so the period rows above cannot be added together.'],
+      ['Reporting timezone', esc(tz || 'system local')]
+    ]);
+    html += '<p><b>How each figure is computed.</b> Each call is priced twice at published ' +
+      'list rates, using that call’s own tokens, its own billing SKU and the rates in ' +
+      'force on its own date: once on the model actually served, once on the baseline ' +
+      'model. The difference is the saving, and it is <b>signed</b> — a call that cost ' +
+      'more than its baseline is subtracted, never dropped. Prompt-cache reads and ' +
+      '5-minute / 1-hour cache writes are priced at their own separate rates. A model ' +
+      'absent from the catalog is <b>unpriceable</b>: it contributes nothing and is never ' +
+      'given a guessed rate.</p>';
+    html += '<p><b>This is not an invoice.</b> Figures are list-price <i>metered value</i> ' +
+      '— an estimate of what this usage would list for. Negotiated discounts, ' +
+      'committed-spend rates, credits, free tiers, flat-rate subscription plans and taxes ' +
+      'are not modelled. Reconcile against your provider invoice before any accounting, ' +
+      'reimbursement or tax use.</p>';
+    html += '<p><b>Scope.</b> This report covers traffic that passed through the Cheaper ' +
+      'gateway. Sessions run without the gateway are not included here.</p>';
+    set('prov', html);
+  }
+
+  // ---------------------------------------------------------------------------
+  // wire it up — ONE file, TWO payloads
+  // ---------------------------------------------------------------------------
+  if (REP){
+    show('legacyBanner', false);
+    show('secLadder', true);
+    show('secLegacyPeriods', false);
+    show('secBreakdown', true);
+    show('secTrend', true);
+
+    var periods = REP.periods || [];
+    // LADDER_EVENTS is already computed from these same rows, up beside the lede — the
+    // lede's reconciliation clause is stated against it, and that runs long before this
+    // point. Re-deriving it here would be a second source of truth for the same number.
+    renderLadder(periods);
+    renderBreakdown(REP.breakdown || {});
+    renderTrend(REP.trend || []);
+
+    // KPIs, split by basis. Eight small cards beat four blended ones: a single "Saved"
+    // hero figure is exactly the cross-basis sum this report exists to refuse.
+    var k = { measured: { saved:null, spent:null, calls:0, events:false, eventsUnknown:0 },
+              estimated: { saved:null, spent:null, calls:0, events:false, eventsUnknown:0 } };
+    var withheld = 0, notCovered = 0;
+    var unpriced = 0, unpricedKnown = false, unpricedUnknown = 0;
+    periods.forEach(function(w){
+      if (w.status === 'not_covered') notCovered += 1;
+      else if (w.status === 'suppressed' || w.dollars_suppressed === true) withheld += 1;
+
+      // The "Not priced" tally is accumulated for EVERY window, including the ones that
+      // contribute no dollars. The loop used to `return` on not_covered before it reached
+      // here, so an all-not-covered ladder printed a confident "Not priced: 0" — and
+      // reporting.report_window() emits NO `unpriced_calls` key at all on a not_covered or
+      // too_new window, so that count is not merely zero, it is unknown. Unknown is
+      // COUNTED and stated, never silently folded into the sum as a zero.
+      var u = w.unpriced_calls;
+      if (u === null || u === undefined || !isFinite(Number(u))) unpricedUnknown += 1;
+      else { unpriced += Number(u); unpricedKnown = true; }
+
+      SIDES.forEach(function(side){
+        var acc = w[side];
+        // The SAME event admission test the ladder cells and the ladder total apply. A
+        // zero-initialised counter printed unconditionally made the hero subtitle read
+        // "0 call event(s)" for a ladder whose every row said "not covered".
+        var ev = windowEvents(w, side);
+        if (ev === null) k[side].eventsUnknown += 1;
+        else { k[side].calls += ev; k[side].events = true; }
+        // The SAME dollar admission test the ladder cells and the ladder total apply. A
+        // zero-filled accumulator from store.py::_mk_acc() is truthy, so a bare `!acc`
+        // guard promoted k[side].saved from null to 0 and put an affirmative green
+        // hero card at the top of the document, directly contradicting the six labelled
+        // em dashes beneath it.
+        if (w.status === 'not_covered' || w.status === 'suppressed' ||
+            w.dollars_suppressed === true || !acc || !acc.calls) return;
+        var sv = Number(acc.saved), sp = Number(acc.spent);
+        if (!isFinite(sv) || !isFinite(sp)) return;
+        k[side].saved = (k[side].saved === null ? 0 : k[side].saved) + sv;
+        k[side].spent = (k[side].spent === null ? 0 : k[side].spent) + sp;
+      });
+    });
+
+    // The hero subtitle is a CLAIM about a count, so it falls through to a labelled
+    // non-number exactly as the dollar figure above it does. paintKpis escapes `s`, so the
+    // label is words rather than markup — the point is that it is not a number.
+    function eventSub(side){
+      var s = k[side];
+      if (!s.events){
+        return 'no ' + GRAIN + ' event count was available from any window';
+      }
+      return s.calls.toLocaleString('en-US') + ' ' + GRAIN + ' event(s)' +
+        (s.eventsUnknown ? ' · ' + s.eventsUnknown + ' window(s) could not report a count'
+                         : '');
+    }
+
+    paintKpis([
+      { k: 'Saved (measured)', v: savedMoney(k.measured.saved,
+          'No covered window contributed a priced measured figure. ' + NO_CLAIM),
+        s: eventSub('measured'),
+        cls: moneyClass(k.measured.saved) },
+      { k: 'Saved (estimated)', v: savedMoney(k.estimated.saved,
+          'No covered window contributed a priced estimated figure. ' + NO_CLAIM),
+        // A reconstructed figure is never painted in the measured success colour — but a
+        // costlier-than-baseline estimate still has to read as a loss.
+        cls: (moneyClass(k.estimated.saved) === 'red') ? 'red' : '',
+        s: eventSub('estimated') },
+      { k: 'Spent (measured)', v: money(k.measured.spent, NO_CLAIM),
+        s: 'at published list rates' },
+      { k: 'Spent (estimated)', v: money(k.estimated.spent, NO_CLAIM),
+        s: 'at published list rates' },
+      { k: 'Basis', v: '<span style="font-size:15px">measured &amp; estimated</span>',
+        s: 'reported separately, never summed' },
+      { k: 'Grain', v: '<span style="font-size:15px">' + esc(GRAIN) + '</span>',
+        s: 'chat-grain figures are excluded' },
+      { k: 'Not priced',
+        v: unpricedKnown
+             ? unpriced.toLocaleString('en-US')
+             : noClaim('No window reported an unpriced-call count. ' + NO_CLAIM),
+        s: 'call(s) excluded from both bases, counted here' +
+           (unpricedUnknown ? ' · ' + unpricedUnknown + ' window(s) reported no count'
+                            : '') },
+      { k: 'Windows withheld', v: (withheld + notCovered).toLocaleString('en-US'),
+        s: withheld + ' suppressed · ' + notCovered + ' not covered',
+        cls: (withheld + notCovered) > 0 ? 'red' : '' }
+    ]);
+
+    if (META) renderProvenanceFromMeta(META); else renderProvenanceFallback();
+  } else {
+    // The LEGACY /report payload. It carries no `report` block, so there is no disjoint
+    // ladder, no basis split and no audit meta to render — and the page says so rather
+    // than quietly looking like the redesigned one.
+    var banner = el('legacyBanner');
+    if (banner){
+      banner.innerHTML = '<b>Legacy view.</b> This page was served from the legacy ' +
+        '<span class="mono">/report</span> endpoint, which carries only the gateway ' +
+        'proxy’s blended summary. It has <b>no basis split</b> (measured and ' +
+        'estimated figures are mixed in every cell), <b>no disjoint period ladder</b> ' +
+        '(the windows below nest and cannot be added up), and <b>no audit provenance ' +
+        'block</b>. For the substantiation-grade report, open ' +
+        '<span class="mono">/api/v1/report.html</span>.';
+      banner.hidden = false;
+    }
+    show('secLadder', false);
+    show('secLegacyPeriods', true);
+    show('secBreakdown', false);
+    show('secTrend', false);
+
+    var ORDER = [['today','Today'],['week','This week'],['month','This month'],
+                 ['quarter','This quarter'],['year','This year'],['all','All-time']];
+    var P = D.periods || {};
+    var lb = el('legacyPeriodsBody');
+    if (lb){
+      lb.innerHTML = ORDER.map(function(o){
+        var v = P[o[0]] || {};
+        var saved = v.saved, spent = v.spent;
+        var sv = Number(saved), sp = Number(spent);
+        var base = (isFinite(sv) && isFinite(sp)) ? sv + sp : null;
+        var share = (base !== null && base > 0)
+          ? esc((sv / base * 100).toFixed(1) + '%')
+          : noClaim('No baseline value for this window, so no share can be stated. ' + NO_CLAIM);
+        return '<tr><td>' + esc(o[1]) + '</td>' +
+          '<td class="num">' + int(v.calls) + '</td>' +
+          '<td class="num">' + money(spent) + '</td>' +
+          '<td class="num">' + savedMoney(saved) + '</td>' +
+          '<td class="num">' + share + '</td></tr>';
+      }).join('');
+    }
+
+    var dol = D.dollars || {}, cnt = D.counts || {};
+    paintKpis([
+      { k: 'Saved (blended basis)', v: savedMoney(dol.saved, NO_CLAIM),
+        s: (dol.savings_pct !== null && dol.savings_pct !== undefined)
+             ? dol.savings_pct + '% of the baseline' : '',
+        // NOT `(Number(dol.saved) < 0) ? 'red' : 'green'` — Number(undefined) < 0 is
+        // false, so a MISSING dollars.saved was painted green behind its own em dash.
+        cls: moneyClass(dol.saved) },
+      { k: 'Metered spend', v: money(dol.spent, NO_CLAIM), s: 'at published list rates' },
+      { k: 'Calls routed cheaper', v: int(cnt.models_changed, NO_CLAIM),
+        s: 'of ' + (cnt.intercepted === null || cnt.intercepted === undefined
+                     ? 'an unknown number of' : Number(cnt.intercepted).toLocaleString('en-US')) +
+           ' intercepted' },
+      { k: 'Costlier routes', v: money(dol.extra, NO_CLAIM),
+        s: (cnt.models_upcharged === null || cnt.models_upcharged === undefined
+             ? 'count unavailable' : cnt.models_upcharged + ' call(s)') + ', subtracted above',
+        // Absent stays neutral; only a real positive figure is a real loss.
+        cls: (moneyClass(dol.extra) === 'green') ? 'red' : '' }
+    ]);
+
+    renderProvenanceFallback();
+  }
+
+  renderProxySurfaces();
+
+  // No inline event handlers: an `onclick=` attribute is blocked by any CSP that does not
+  // allow 'unsafe-inline', which would leave the print button dead in a hardened host.
+  var pb = el('printBtn');
+  if (pb && pb.addEventListener){
+    pb.addEventListener('click', function(){
+      try { window.print(); } catch (e) {}
+    });
+  }
 })();
 </script>
 </body>

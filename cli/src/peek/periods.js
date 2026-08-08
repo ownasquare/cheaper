@@ -75,20 +75,71 @@ function tzOffsetAt(ms) {
   return -d.getTimezoneOffset();
 }
 
+// The representable calendar in epoch MILLISECONDS: [0001-01-01T00:00:00Z,
+// 10000-01-01T00:00:00Z). Python's `datetime` covers exactly years 1..9999, so this is
+// the shared domain of the one time frame. Mirrors `periods.py::CAL_MIN_MS/CAL_MAX_MS`.
+const CAL_MIN_MS = -62135596800000;
+const CAL_MAX_MS = 253402300800000;
+
 // The calendar+pricing day for an event. `tzo` is frozen at WRITE time so a machine
 // that later moves timezone cannot restate history, and so a DST transition is
 // resolved with the offset that was actually in force at the instant of the call.
+//
+// A MISSING offset (null / undefined / '') means "nobody recorded one" — a legacy row,
+// or a row whose sources disagreed so `store.merge` nulled the field. It is NOT UTC.
+// This used to read `Number.isFinite(Number(tzo))`, and `Number(null)` is 0, so a
+// NULLED offset silently became UTC while an UNDEFINED one was reconstructed — two
+// answers for one state, and across the claude-sonnet-5 promo boundary that is the same
+// 50% split the frozen-offset column was added to close. An explicit 0 is still a
+// legitimate value and is still honoured; only the absent case reconstructs.
+//
+// MUST stay behaviourally identical to `gateway/app/periods.py::pday_of`, including
+// the year 1..9999 bound (Python's datetime range) and the null return outside it —
+// `cli/scripts/check-period-parity.js` diffs the two over the fixture set.
 function pdayOf(ts, tzo) {
   const ms = toMs(ts);
   if (!Number.isFinite(ms)) return null;
-  const off = Number.isFinite(Number(tzo)) ? Number(tzo) : tzOffsetAt(ms);
+  const missing = tzo === null || tzo === undefined
+    || (typeof tzo === 'string' && tzo.trim() === '');
+  const n = missing ? NaN : Number(tzo);
+  // Math.trunc mirrors Python's int(): a fractional offset must not shift the two
+  // runtimes onto different milliseconds.
+  let off;
+  if (Number.isFinite(n)) {
+    off = Math.trunc(n);
+  } else {
+    // RECONSTRUCTION PATH. The reconstructed offset is the ONE input the two runtimes
+    // cannot be assumed to agree on outside the calendar, so it is gated — the same two
+    // guards `periods.py::pday_of` applies:
+    //  1. the RAW instant must itself be a representable UTC time. At 10000-01-01T00:00Z
+    //     JS would otherwise reconstruct a westward machine offset and pull the instant
+    //     back to a confident '9999-12-31' while Python, which cannot represent the
+    //     instant at all, answers null. Whether a date EXISTS must not depend on which
+    //     runtime asked, nor on which side of UTC the machine sits.
+    //  2. the offset must actually be determinable. HONEST NOTE: on THIS runtime that
+    //     second check is REDUNDANT — `ms` is already finite and, past guard 1, always
+    //     inside the JS Date range, so `tzOffsetAt` cannot return NaN here. It is
+    //     written out because in `periods.py` the equivalent check IS load-bearing
+    //     (`local_offset_minutes` answers None rather than a fabricated 0), and the rule
+    //     has to read as ONE rule in BOTH files. Guard 1 is the load-bearing half here:
+    //     deleting it fails the parity gate on 8 answers.
+    // An EXPLICIT `tzo` bypasses both: it is a recorded fact about the row rather than a
+    // reading of this machine, and both runtimes shift by it identically.
+    if (!(ms >= CAL_MIN_MS && ms < CAL_MAX_MS)) return null;
+    off = tzOffsetAt(ms);
+    if (!Number.isFinite(off)) return null;
+  }
   // Shift into the local frame, then read the date parts in UTC. This is exact for any
   // offset, including the :30 and :45 zones a naive hour-based shift breaks.
   const shifted = new Date(ms + off * 60000);
   const y = shifted.getUTCFullYear();
+  // A seconds/milliseconds unit slip lands in year 55840. Neither runtime may invent a
+  // date for it: Python cannot represent it at all, so both return null and the row
+  // becomes a COUNTED, visible exclusion instead of a confident wrong bucket.
+  if (!Number.isFinite(y) || y < 1 || y > 9999) return null;
   const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
   const d = String(shifted.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return `${String(y).padStart(4, '0')}-${m}-${d}`;
 }
 
 // ---- IANA-zone arithmetic (shared contract with gateway/app/periods.py) ------------
@@ -300,6 +351,6 @@ function bucketRange(items, from, to, opts) {
 module.exports = {
   ORDER, PERIODS, periodStarts, bucket, bucketRange, toMs,
   startOfDay, startOfWeek, startOfMonth, startOfQuarter, startOfYear,
-  pdayOf, tzOffsetAt, zonedParts, zoneOffset, fromZoned,
+  pdayOf, tzOffsetAt, zonedParts, zoneOffset, fromZoned, CAL_MIN_MS, CAL_MAX_MS,
   periodBounds, previousPeriodBounds, disjointLadder, SKEW_TOLERANCE_MS,
 };

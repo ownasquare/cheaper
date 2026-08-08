@@ -51,7 +51,22 @@ const FORBIDDEN_KEYS = ['text', 'prompt', 'path', 'file', 'cwd', 'dir', 'snippet
 function eventsFromRecords(records, meta = {}) {
   const frame = sessionFrame(records);
   if (!frame) return [];
-  const { priced, idOf, ceilingModel, isEligible, bsrc } = frame;
+  const { priced, idOf, ceilingModel, isEligible, routedAware, bsrc } = frame;
+  // WHICH RULE produced `elig`, frozen alongside the verdict itself.
+  //
+  // `sessionFrame` picks between two genuinely different definitions of "work Cheaper
+  // routed" based on `routedAware` — whether this session carries ANY sub-agent — and it
+  // re-picks on every Stop, over the whole session. Storing only the verdict left the
+  // store unable to answer "did `elig: false` mean 'not a sub-agent' or 'on the ceiling
+  // model'?", which are different claims about the same money, and left the Stop-hook
+  // cursor (events.js::deltaFor) unable to see the rule flip at all: `base` does not move
+  // when a sub-agent appears, and the head row's `elig` usually does not either, so the
+  // whole session was never restated and rows frozen under the OLD rule survived next to
+  // rows frozen under the NEW one.
+  //
+  // Session-scoped, exactly like `base`/`bsrc` — every row of one session carries the
+  // same value, and a restatement replaces all of them together.
+  const erule = routedAware ? 'routed' : 'off_ceiling';
   const inst = installId();
   const harness = meta.harness || (records[0] && records[0].harness) || 'unknown';
   const out = [];
@@ -105,6 +120,7 @@ function eventsFromRecords(records, meta = {}) {
       base: ceilingModel,                     // FROZEN. Never derived at read time.
       bsrc,
       elig: !!isEligible(r),
+      erule,                                  // 'routed' | 'off_ceiling' — see above
       ctier: contentTier(r.text).tier,        // frozen classifier verdict
       cver: CLASSIFIER_VERSION,
       reason: '',

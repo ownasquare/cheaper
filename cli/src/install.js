@@ -312,7 +312,18 @@ async function run(argv) {
   const harnessFlag = hIdx !== -1 ? String(argv[hIdx + 1] || '').toLowerCase() : null;
   // Strip --harness <value> before parsing the rest as component tokens/flags,
   // so e.g. `install --harness codex` doesn't treat "codex" as a component.
-  const rest = argv.filter((a, i) => i !== hIdx && i !== hIdx + 1);
+  //
+  // The `hIdx === -1` case MUST short-circuit. `filter((a, i) => i !== hIdx && i !==
+  // hIdx + 1)` with hIdx === -1 evaluates its second clause as `i !== 0` and therefore
+  // dropped the FIRST ARGUMENT of every invocation that did not use --harness:
+  // `cheaper install --all` lost `--all`, `cheaper install gateway` lost `gateway`,
+  // and `cheaper install gateway hook` installed only the hook. Each of those then
+  // fell through to the interactive picker — where pressing Enter selects exactly
+  // DEFAULT_KEYS, which is what `--all` meant, so an interactive user could never see
+  // it. Non-interactively there was no such cover: the picker had no TTY to read, and
+  // the command exited 0 having installed nothing. This line is why that silent no-op
+  // was reachable from the documented commands and not just from a bare `install`.
+  const rest = hIdx === -1 ? argv.slice() : argv.filter((a, i) => i !== hIdx && i !== hIdx + 1);
   const preset = new Set(rest.filter((a) => !a.startsWith('-')));
   const all = rest.includes('--all');
 
@@ -326,6 +337,11 @@ async function run(argv) {
     if (!TAGLINE_HARNESS_KEYS.has(harnessFlag)) {
       console.log(c.red(`  No adapter yet for harness "${harnessFlag}".`) +
         c.dim(' Known: ' + [...TAGLINE_HARNESS_KEYS].join(', ') + ', claude-code\n'));
+      // A typo'd harness key installed NOTHING, and exiting 0 reported that as
+      // success — so a provisioning script that ran `cheaper install --harness cursr`
+      // marched on believing the harness was wired. The message was always there; the
+      // exit code is what a script can actually read.
+      process.exitCode = 1;
       return;
     }
     const results = taglineInstall.run(['--harness', harnessFlag]);
@@ -341,6 +357,31 @@ async function run(argv) {
     if (unknown.length) console.log(c.dim('  (ignoring unrecognized: ' + unknown.join(', ') +
       ' — valid: ' + COMPONENTS.map((x) => x.key).join(', ') + ', rules, all)\n'));
     chosen = keys;
+  } else if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    // NO COMPONENTS, NO --all, AND NO TERMINAL. The interactive picker below cannot
+    // run here, and calling ask() anyway was the whole defect: readline's question()
+    // never fires its callback on a closed/piped stdin, the promise never settles, the
+    // event loop drains, and node exits 0 — so `cheaper install < /dev/null` (a CI
+    // step, a Dockerfile RUN, a provisioning script) printed the menu, installed
+    // NOTHING, and reported success. Silent, and indistinguishable from a real install.
+    //
+    // This branch deliberately does NOT fall through to DEFAULT_KEYS. "No answer" is
+    // not consent: turning an unattended no-op into an unattended FULL install would
+    // write to ~/.claude/settings.json, register a plugin and copy agents on a machine
+    // whose operator only asked to see the menu — a worse failure than the one being
+    // fixed. Same reason util.js::ask() is left alone rather than taught to resolve('')
+    // on close: every one of its callers would inherit that silent default.
+    // Guard mirrors openurl.js::promptThenOpen, which already refuses to prompt
+    // without a TTY on both streams.
+    console.log(c.red('  ✗ No components selected, and there is no terminal to ask on.'));
+    console.log(c.dim('    stdin/stdout are not a TTY (piped, redirected, or CI), so the'));
+    console.log(c.dim('    interactive picker cannot run — and nothing is installed unattended.'));
+    console.log(c.dim('\n    Say what you want explicitly:'));
+    console.log('      cheaper install --all' + c.dim('                 # ' + DEFAULT_KEYS.join(' ')));
+    console.log('      cheaper install gateway hook' + c.dim('          # ' + COMPONENTS.map((x) => x.key).join(', ') + ', rules, all'));
+    console.log('      cheaper install --harness <key>' + c.dim('       # wire one other harness only\n'));
+    process.exitCode = 1;
+    return;
   } else {
     COMPONENTS.forEach((x, i) => console.log(`  ${c.bold(String(i + 1))}. ${x.label}`));
     console.log(c.dim('\n  Choose components (e.g. "1 2 3", names like "hook gateway", "rules"'));
@@ -349,7 +390,13 @@ async function run(argv) {
     if (!ans || ans === 'all') chosen = DEFAULT_KEYS.slice();
     else chosen = normalizeKeys(ans.split(/[\s,]+/).filter(Boolean)).keys;
   }
-  if (!chosen.length) { console.log(c.red('\n  Nothing selected. Aborting.\n')); return; }
+  // Asked for something, resolved to nothing — a failure, not a success. Exiting 0
+  // here made `cheaper install skil` (typo) look identical to a completed install.
+  if (!chosen.length) {
+    console.log(c.red('\n  Nothing selected. Aborting.\n'));
+    process.exitCode = 1;
+    return;
+  }
 
   // The plugin supersedes standalone skill/agents/hook — don't install both.
   if (chosen.includes('plugin') && chosen.some((k) => ['skill', 'agents', 'hook'].includes(k)))
@@ -359,6 +406,10 @@ async function run(argv) {
   const results = install({ components: chosen });
   for (const r of results)
     console.log('  ' + (r.ok ? c.green('✓') : c.red('✗')) + ' ' + (r.ok ? r.msg : `${r.key}: ${r.msg}`));
+  // A component that threw is printed with a red ✗ — but a script sees only the exit
+  // code, and 0 said "all installed". Same class as the two exits above: the command
+  // did not do what was asked, so it must not report success.
+  if (results.some((r) => !r.ok)) process.exitCode = 1;
   chosen = results.map((r) => r.key); // reflect plugin-supersede filtering for the notes below
   console.log(c.dim('\n  Done. Notes:'));
   if (chosen.includes('gateway'))

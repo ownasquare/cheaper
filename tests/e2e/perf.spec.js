@@ -23,10 +23,19 @@ test.describe('page load', () => {
       const n = performance.getEntriesByType('navigation')[0];
       return { dcl: n.domContentLoadedEventEnd - n.startTime,
                load: n.loadEventEnd - n.startTime,
-               transfer: n.transferSize || 0 };
+               decoded: n.decodedBodySize || 0 };
     });
     expect(t.dcl, 'DOMContentLoaded').toBeLessThan(BUDGET.domContentLoaded);
     expect(t.load, 'load').toBeLessThan(BUDGET.load);
+    // This number was being READ and then thrown away — measured, never asserted, which
+    // is a budget in name only. `decodedBodySize`, not `transferSize`: transferSize is 0
+    // for a memory-cache hit, so a budget built on it silently passes for free on exactly
+    // the runs where nothing was downloaded. decodedBodySize is the real payload the
+    // browser parsed, always populated same-origin, and it is the same budget the served
+    // -bytes test below applies — asserted here against what the BROWSER actually got,
+    // which is the number that would move if a subresource or an inlined library appeared.
+    expect(t.decoded, 'the browser reported no navigation payload at all').toBeGreaterThan(0);
+    expect(t.decoded / 1024, 'decoded navigation payload in KB').toBeLessThan(BUDGET.transferKB);
   });
 
   test('the served page stays small enough to have no dependencies', async ({ request, token }) => {

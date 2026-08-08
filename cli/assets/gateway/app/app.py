@@ -30,7 +30,7 @@ import export_fmt
 import reporting
 import store
 from auth import require_token
-from router import RouterConfig, decide, extract_text
+from router import RouterConfig, decide, routable_text
 from metrics import Metrics, normalize_effort
 
 
@@ -97,6 +97,16 @@ def _config_from_env() -> RouterConfig:
     }
     cfg.allow_upgrade_above_requested = os.environ.get(
         "ROUTER_ALLOW_UPGRADE", "false").lower() in ("1", "true", "yes")
+    # UNVALIDATED ON PURPOSE, AND SAFE ONLY BECAUSE decide() CLAMPS IT.
+    # An unknown tier name used to reach router._rank(), which raises ValueError on
+    # anything not in TIERS -- so a single typo in ROUTER_MIN_TIER turned every request
+    # into a 500 from inside the routing core, with a traceback pointing at TIERS.index
+    # rather than at the operator's environment. `decide()` now clamps an unrecognised
+    # value to the cheap default, which is the survivable reading and the one
+    # cli/src/peek/classify.js already took (so `peek` was estimating a working router
+    # while the gateway returned errors -- a divergence
+    # cli/scripts/check-policy-parity.js now drives a config for).
+    # Do NOT "fix" this by raising here: that reinstates the crash one layer up.
     cfg.min_tier = os.environ.get("ROUTER_MIN_TIER", cfg.min_tier)
     try:
         cfg.long_request_chars = int(os.environ.get("ROUTER_LONG_CHARS", cfg.long_request_chars))
@@ -124,6 +134,20 @@ _DASH_PATH = Path(__file__).resolve().parent / "dashboard.html"
 
 # OpenAI-compatible front-end (for Codex/Cursor/Copilot/OpenCode/… — any tool that
 # points its OpenAI base URL here). Set these to models your account actually has.
+#
+# KNOWN DEFECT, NOT FIXED HERE — the `opus` slot is mis-tiered. `pricing.model_tier`
+# reads `o3` out of the catalog as tier **sonnet**, not opus, so an auto-escalated hard
+# request on this front-end is answered by a MID-capability model while `x-router-tier`
+# reports it as top tier. That is the same defect class the Anthropic side just had
+# (a hardcoded tier→id map rotting away from the catalog), and `cli/scripts/sync-prices.js`
+# already flags the identical shape for Mistral's route targets. The catalog's own answer
+# is `pricing.representative_for("openai", tier)` → gpt-5-mini / gpt-5.4 / gpt-5.6-sol.
+#
+# Deliberately left alone rather than silently switched: unlike the Anthropic tiers,
+# these ids are a live account-entitlement question (the line above exists because not
+# every account can call every model), and flipping the default would change which model
+# real OpenAI traffic hits without anyone opting in. Set OPENAI_MODEL_TOP explicitly to
+# a genuine top-tier id, or resolve these from the catalog once entitlement is checked.
 OPENAI_UPSTREAM = os.environ.get("OPENAI_UPSTREAM_URL", "https://api.openai.com").rstrip("/")
 OPENAI_MODELS = {
     "haiku": os.environ.get("OPENAI_MODEL_CHEAP", "gpt-4o-mini"),
@@ -141,10 +165,23 @@ app = FastAPI(title="cheaper-gateway")
 # because the browser sends the attacker's Host and Starlette 400s it. `testserver`
 # is the TestClient's host (not routable). Override CHEAPER_ALLOWED_HOSTS only when
 # you deliberately expose the gateway with CHEAPER_HOST.
+#
+# `::1` USED TO BE IN THIS LIST AND WAS DEAD CONFIG — not a hole, just a lie.
+# TrustedHostMiddleware compares `host.split(":")[0]`, so the only legal way to write
+# an IPv6 literal in a Host header, `Host: [::1]:8787`, normalises to `"["` and can
+# never equal `"::1"`. The entry matched nothing, and it could not matter anyway: the
+# gateway binds 127.0.0.1 (cli/src/gateway.js), so an IPv6 loopback connection is
+# refused by the kernel long before any middleware sees it. IPv6 literal hosts are
+# therefore UNSUPPORTED; use localhost or 127.0.0.1. Do not re-add a `::`-bearing
+# entry expecting it to work — tests/test_app.py::test_no_allowed_host_entry_is_dead_config
+# fails on any entry this middleware's host parsing can never match.
 _ALLOWED_HOSTS = [h.strip() for h in os.environ.get(
-    "CHEAPER_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver").split(",") if h.strip()]
+    "CHEAPER_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if h.strip()]
 if "*" not in _ALLOWED_HOSTS:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS)
+# auth.origin_is_self() derives one accepted origin from the request's own Host header;
+# hand it the same list this middleware enforces so the two can never drift apart.
+auth.set_trusted_hostnames(_ALLOWED_HOSTS)
 
 # Mint the same-machine token BEFORE hardening perms, so a first run creates the file
 # 0600 and the chmod sweep then confirms it. Doing it at import means the CLI/desktop
@@ -154,15 +191,54 @@ _harden_perms()
 
 _client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
 
+# Response headers that must not be copied back from upstream (per-connection, or
+# recomputed by Starlette). Still a denylist because a RESPONSE from a known provider
+# is not attacker-shaped the way an inbound request is.
 _HOP_BY_HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding"}
+
+# Request headers forwarded UPSTREAM. This is an ALLOWLIST, and it replaced a denylist
+# that stripped only the five hop-by-hop names above.
+#
+# The denylist leaked: `Cookie` was copied verbatim onto the outbound request, so the
+# catch-all proxy relayed the local `cheaper_token` session cookie — the credential that
+# unlocks this machine's entire AI-usage record — to api.anthropic.com, along with
+# `Referer` (which discloses local URLs) and `x-cheaper-token` itself. The value confers
+# nothing off-machine (loopback bind + TrustedHostMiddleware), but a local secret must
+# not be handed to a third party at all, and the next header someone's client invents is
+# leaked by default under a denylist and dropped by default under this.
+#
+# Everything a provider actually needs is here; extend it deliberately:
+#   authorization / x-api-key / api-key  the caller's own provider credential
+#   anthropic-*   version, beta features            openai-*  organization, project, beta
+#   x-stainless-* the official SDKs' telemetry (harmless, kept for upstream debugging)
+#   content-type / accept / user-agent
+# Deliberately absent: cookie, referer, origin, x-cheaper-token, x-cheaper-source,
+# x-session-id, x-router-bypass (ours, consumed here), and accept-encoding (httpx sets
+# and honours its own).
+_FWD_EXACT = {"authorization", "x-api-key", "api-key", "content-type", "accept",
+              "user-agent"}
+_FWD_PREFIXES = ("anthropic-", "openai-", "x-stainless-")
 
 
 def _fwd_headers(request: Request) -> dict:
-    return {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    out = {}
+    for k, v in request.headers.items():
+        lk = k.lower()
+        if lk in _FWD_EXACT or lk.startswith(_FWD_PREFIXES):
+            out[k] = v
+    return out
 
 
 async def _triage_tier(body: dict, headers: dict) -> str | None:
-    text = extract_text(body)[:6000]
+    # routable_text, NOT extract_text — triage is a routing caller and had the same
+    # ratchet as the heuristic path. Feeding it the whole conversation plus the system
+    # prompt meant the triage model was asked to classify a client's static preamble
+    # and every prior turn, so its verdict was pinned by history exactly like the regex
+    # cascade was, AND the [:6000] clamp meant that on any long conversation the 6 kB it
+    # actually saw was the system prompt and the OLDEST messages — the current request
+    # was truncated away entirely. Scoped to the current user turn, the clamp now bites
+    # only on genuinely huge single prompts.
+    text = routable_text(body)[:6000]
     prompt = ("Classify this request for a model router. Reply with ONE word only: "
               "haiku (simple), sonnet (moderate), or opus (hard/correctness-critical: "
               "concurrency, security, proofs, hard debugging, high-stakes, dense "
@@ -228,7 +304,12 @@ async def healthz():
             # The build actually running, so `cheaper status` can prove freshness
             # instead of the user having to remember to restart.
             "code_sha": CODE_SHA,
-            "auth_required": bool(auth.current_token()),
+            # auth.enforcing(), not bool(current_token()): a token file that exists but
+            # yields no secret hands out no token yet still REFUSES every gated route
+            # (auth.check fails closed on it). Reporting False there would tell the CLI
+            # the gateway is open while it is in fact shut, and send a user hunting the
+            # wrong problem.
+            "auth_required": auth.enforcing(),
             "token_private": auth.token_is_private()}
 
 
@@ -371,7 +452,20 @@ async def ws(websocket: WebSocket):
     # Depends() cannot 401 a websocket, so check by hand and close with RFC-6455 1008
     # (policy violation) BEFORE accepting — an accepted-then-closed socket would already
     # have leaked the first frame.
-    if not auth.check(websocket):
+    #
+    # ORIGIN FIRST, and explicitly here rather than relying on auth.check alone. This
+    # socket is the single worst thing to get wrong in the whole gateway: it is the only
+    # route that hands a *cross-origin* caller a live, streaming, complete per-call usage
+    # record, because WebSockets are exempt from CORS — a fetch() to /metrics from
+    # another origin cannot read the response, this can. And the cookie gate did not
+    # stop it: SameSite=Strict computes "site" as eTLD+1 and IGNORES THE PORT, so a page
+    # on ANY other http://localhost:<port> was same-site, the browser attached
+    # cheaper_token to its ws:// handshake, and auth.check happily accepted it.
+    # (Precondition: the cookie must already exist in that browser profile, i.e. the
+    # user has opened the dashboard — the normal state for anyone using the product.)
+    # auth.check now refuses a cookie from a foreign origin too; this stays as its own
+    # statement so the socket remains origin-bound even if the credential rules change.
+    if not auth.origin_is_self(websocket) or not auth.check(websocket):
         await websocket.close(code=1008)
         return
     await websocket.accept()
@@ -401,7 +495,10 @@ async def messages(request: Request):
     source = _sanitize_source(request.headers.get("x-cheaper-source") or request.headers.get("user-agent", "")[:60])
     # Optional chat id the client forwards so per-chat savings can be attributed
     # exactly (the end-of-chat tagline). Absent for clients that don't send it.
-    session = request.headers.get("x-cheaper-session") or request.headers.get("x-session-id") or ""
+    # x-cheaper-session was retired: session attribution now comes from the
+    # provider-request-id join plus the sessionId read from inside the transcript
+    # record, not a client-supplied header. Do not re-add it.
+    session = request.headers.get("x-session-id") or ""
 
     if request.headers.get("x-router-bypass", "").lower() in ("1", "true", "yes"):
         return await _forward(ANTHROPIC_MSG_URL, raw, headers, request)
@@ -721,7 +818,10 @@ async def chat_completions(request: Request):
     headers = _fwd_headers(request)
     source = _sanitize_source((request.headers.get("x-cheaper-source")
               or request.headers.get("user-agent", "")[:52])) + " (openai)"
-    session = request.headers.get("x-cheaper-session") or request.headers.get("x-session-id") or ""
+    # x-cheaper-session was retired: session attribution now comes from the
+    # provider-request-id join plus the sessionId read from inside the transcript
+    # record, not a client-supplied header. Do not re-add it.
+    session = request.headers.get("x-session-id") or ""
 
     if request.headers.get("x-router-bypass", "").lower() in ("1", "true", "yes"):
         return await _forward(OPENAI_CHAT_URL, raw, headers, request)
@@ -982,10 +1082,24 @@ async def api_report_html(request: Request):
     mid-flight and produce a PDF full of empty tables. With the JSON inlined there is
     nothing to race.
 
-    NOTE on the rendered periods table: report.html is not modified by this change, so
-    its "Savings by period" block still renders the NESTED `summary().periods` under its
-    own printed caveat that those windows nest. The DISJOINT ladder, split by basis,
-    travels in `report.periods` for the surfaces that read it.
+    SCOPE, and why every aggregate on this page is built the same way.
+
+    `filtered_rows(..., apply_window=False)` deliberately drops ONLY the time-window test;
+    every other filter still applies. The disjoint ladder PARTITIONS history, and a
+    partition of a time-filtered slice partitions nothing, so the ladder -- and the hero
+    figures summed from it -- are whole-history.
+
+    Composition and Trend used to be built the other way: `report_breakdown(rows, d,
+    f["from"], f["to"])` and `report_trend(rows, "day", f["from"], f["to"])`, both of which
+    skip rows via `in_window`. That put a WINDOWED Composition table on the same page as a
+    WHOLE-HISTORY ladder, under a lede that told the reader only the row export honoured
+    the requested filter -- so a reader reconciling the two found a gap the page had
+    affirmatively said could not exist, and the excluded rows were counted nowhere.
+
+    They are now built over the SAME whole-history row set, with no window passed, so the
+    entire document has ONE scope and the lede is true. The requested window still governs
+    exactly one thing, and it is named as such on the page: the row export / `rows_matching`
+    figure in the audit meta, which comes from `matching_views` (window applied).
     """
     qp = request.query_params
 
@@ -1007,9 +1121,15 @@ async def api_report_html(request: Request):
                 guard_mode="raw", digest=export_fmt.row_digest(export_rows),
                 build=CODE_SHA, fmt="html", state=st),
             "periods": reporting.report_periods(rows, f["tz"], state=st),
-            "breakdown": {d: reporting.report_breakdown(rows, d, f["from"], f["to"])
+            # NO window here, on purpose -- see the SCOPE note in the docstring. Passing
+            # f["from"] / f["to"] narrows these two sections and NOTHING else on the page,
+            # which is the exact divergence the report's own lede denies. report.html also
+            # reconciles their event totals against the ladder's and prints any shortfall,
+            # so re-adding a window here surfaces as a printed "Scope divergence" block
+            # rather than as a silent gap.
+            "breakdown": {d: reporting.report_breakdown(rows, d)
                           for d in ("served", "base", "tier", "harness", "decision")},
-            "trend": reporting.report_trend(rows, "day", f["from"], f["to"]),
+            "trend": reporting.report_trend(rows, "day"),
             "grain": "call",
         }
         return payload
@@ -1033,8 +1153,13 @@ async def passthrough(path: str, request: Request):
     raw = await request.body()
     headers = _fwd_headers(request)
     url = f"{UPSTREAM}/{path}"
+    # Same leak as the Cookie header, different channel: `?token=` is the query-string
+    # form of this machine's dashboard credential (auth.presented reads it), and
+    # forwarding the query string verbatim would put it in a third party's access log.
+    # It is ours, consumed here, and never means anything upstream.
+    params = {k: v for k, v in request.query_params.items() if k != "token"}
     upstream = await _client.request(request.method, url, headers=headers,
-                                     content=raw, params=dict(request.query_params))
+                                     content=raw, params=params)
     resp_headers = {k: v for k, v in upstream.headers.items()
                     if k.lower() not in _HOP_BY_HOP}
     return Response(content=upstream.content, status_code=upstream.status_code,

@@ -65,8 +65,10 @@ prints the single branded line for ONE conversation (or nothing).
 - **`gateway/app/metrics.py`**: additive `session` column (ALTER-migrated for old DBs),
   `record(..., session="")`, `summary(..., session=None)` — a **parameterized** `WHERE session = ?`
   filter (no injection; no cross-session leak; `session=None` = unchanged behavior).
-- **`gateway/app/app.py`**: captures `x-cheaper-session` / `x-session-id` on both
-  `/v1/messages` and `/v1/chat/completions`; `/metrics?session=` scopes the summary.
+- **`gateway/app/app.py`**: captures `x-session-id` on both `/v1/messages` and
+  `/v1/chat/completions`; `/metrics?session=` scopes the summary. (`x-cheaper-session` was
+  later retired — see the 2026-08-06 local-savings-store spec — because session attribution
+  now comes from the provider-request-id join plus the transcript's own `sessionId`.)
 - Synced to shipped `cli/assets/gateway/` and installed `~/.cheaper/gateway/` (gateway was
   stopped; picks up on next `cheaper gateway start`).
 
@@ -134,9 +136,11 @@ Gateway not restarted (was stopped).
 
 ## Known follow-ups / limits
 
-- **Gateway-exact needs a session header.** Claude Code / Codex don't forward `x-cheaper-session`
+- **Gateway-exact needs a session header.** Claude Code / Codex don't forward `x-session-id`
   today, so the exact path stays dormant until a harness/wrapper sends it; the `~` transcript
-  estimate is what renders now. (Fully built + unit-proven end to end via a mock.)
+  estimate is what renders now. (Fully built + unit-proven end to end via a mock.) Note:
+  `x-cheaper-session` was retired — session attribution now comes from the provider-request-id
+  join plus the transcript's own `sessionId`, never a client-supplied header.
 - **Best-effort harness conventions.** Codex/Grok/PI.dev/Copilot/Cursor blocks assume each tool
   reads the AGENTS.md/`.mdc` at the written path. Confirmed-effective: **Claude Code** (plugin) and
   any harness routed through the **gateway**. Harmless if a tool ignores the file.

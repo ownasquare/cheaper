@@ -5,6 +5,14 @@ name: Publish CLI
 # Desktop installers live in the cheaper-desktop repo's own Release workflow.
 #
 # Secrets: NPM_TOKEN (npm automation token).
+#
+# Until this `test` job was added, this workflow's only job was `publish-npm`: it
+# verified the tag matched cli/package.json's version, then ran `npm publish` — no test
+# of any kind, on any runtime, ever ran first. A broken build published to the world
+# unchallenged. `test:` below is the SAME job definition ci.yml runs on every ordinary
+# push/PR (via `workflow_call`), so a release is gated on exactly the same bar as every
+# other commit, not a weaker or different one. `publish-npm.needs: test` means the
+# publish step (and its NPM_TOKEN) is never even reached if the suite fails.
 
 on:
   push:
@@ -15,8 +23,13 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    name: Run test suite before publishing
+    uses: ./.github/workflows/ci.yml
+
   publish-npm:
     name: Publish cheaperapp to npm
+    needs: test
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     env:

@@ -19,8 +19,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { CATALOG, CATALOG_AS_OF } = require('../src/peek/models');
-const { REPRESENTATIVE } = require('../src/peek/pricing');
+const { CATALOG, CATALOG_AS_OF, resolveModel } = require('../src/peek/models');
+const { REPRESENTATIVE, ROUTE_TARGET_BY_TIER } = require('../src/peek/pricing');
 
 const REPO = path.resolve(__dirname, '../..');
 // One gateway copy now: cli/assets/gateway is the single source npm ships, and the
@@ -34,6 +34,14 @@ function priceTable() {
       + 'Do not edit by hand — edit the JS catalog and re-run the script.',
     as_of: CATALOG_AS_OF,
     representative: REPRESENTATIVE,
+    // ROUTING TARGETS, keyed family -> tier -> model id, tier names being the same
+    // haiku/sonnet/opus the gateway already speaks. `representative` above is the same
+    // table keyed by PRICE BUCKET (cheap/mid/top) and is what pricing.py already reads;
+    // this second view exists so router.py / app.py can stop hardcoding a THIRD and
+    // FOURTH copy of "which model does tier X mean". See the long note on
+    // ROUTE_TARGET_BY_TIER in src/peek/pricing.js for the measured divergence this
+    // closes (11 overstating + 26 understating family/tier pairs on 2026-08-08).
+    route_targets: ROUTE_TARGET_BY_TIER,
     models: CATALOG,
   }, null, 2) + '\n';
 }
@@ -61,6 +69,102 @@ for (const [label, dest, next] of targets) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, next);
   console.log('wrote ' + label);
+}
+
+// ---- route targets must NAME REAL MODELS ----------------------------------------
+// ROUTE_TARGET is now the one place that answers "which model does tier X mean", for
+// both runtimes. That makes a typo in it a silent, product-wide mis-price rather than a
+// local one: representativeFor() would hand back a string, resolveModel() would return
+// null, and costOfDetailed() would price the counterfactual at $0 — a downgrade that
+// appears to be free. Checked here, at the moment the table is projected outward.
+//
+// The target must also BE of the tier it is sold as. A model one tier BELOW its slot is
+// how the gateway's OpenAI front end came to answer auto-escalated security/concurrency
+// requests on `o3` — which this catalog classifies as tier `sonnet` — while reporting
+// them as top tier. A model ABOVE its slot is the same defect pointed the other way: the
+// caller asked for the cheap tier and is billed for a flagship.
+//
+// ONE exception is legitimate: a family that publishes no model of that tier at all.
+// DeepSeek ships exactly two SKUs (flash = haiku, pro = opus), so its `sonnet` slot has
+// nothing of its own to name and correctly falls back DOWN to flash. Falling back UP is
+// never allowed, because that spends the user's money to fill a gap they did not ask to
+// have filled.
+const { TIERS, rank } = require('../src/peek/classify');
+
+// KNOWN, ENUMERATED mismatches that cannot be corrected from this file alone. This is a
+// RATCHET, not an excuse: a mismatch that is not listed here fails the gate, and a listed
+// one that no longer reproduces ALSO fails the gate, so the list cannot outlive its
+// blockers. Every entry names the exact blocker and the exact fix.
+const KNOWN_TIER_MISMATCHES = {
+  'mistral.sonnet':
+    "target 'mistral-small-4' is tier haiku, so Mistral's mid slot is filled by a cheap "
+    + "model and a sonnet-tier request is silently answered one tier down. Fix: point it "
+    + "at 'mistral-medium-3.5' (tier sonnet). BLOCKED BY cli/test/peek.test.js:343, whose "
+    + "`mid <= top` price invariant this correction would break — mistral-medium-3.5 "
+    + "prices at $9.00/2Mtok while the corrected top target prices at $2.00.",
+  'mistral.opus':
+    "target 'mistral-medium-3.5' is tier sonnet, so an auto-escalated hard request on a "
+    + "Mistral model is answered by a MID-capability model while reported as top tier. "
+    + "Fix: point it at 'mistral-large-3' (tier opus) — which is also CHEAPER "
+    + "($0.5/$1.5 vs $1.5/$7.5), so this correction raises quality and lowers cost. "
+    + "BLOCKED BY the same cli/test/peek.test.js:343 `mid <= top` invariant, which the "
+    + "catalog itself already contradicts (models.js:64: 'Mistral's flagship costs less "
+    + "than its mid model').",
+};
+
+let targetFailures = 0;
+const seenMismatches = new Set();
+for (const famName of Object.keys(ROUTE_TARGET_BY_TIER)) {
+  const tiers = ROUTE_TARGET_BY_TIER[famName];
+  // Which tiers this family actually publishes, so a legitimate gap is distinguishable
+  // from a careless slot.
+  const published = new Set(CATALOG.filter((e) => e.family === famName).map((e) => e.tier));
+  for (const tierName of TIERS) {
+    const key = famName + '.' + tierName;
+    const id = tiers[tierName];
+    if (!id) {
+      console.error(`ROUTE TARGET MISSING: ${key} is empty`);
+      targetFailures++;
+      continue;
+    }
+    const entry = resolveModel(id);
+    if (!entry) {
+      console.error(`ROUTE TARGET UNPRICEABLE: ${key} -> '${id}'`
+        + ' resolves to no catalog entry');
+      targetFailures++;
+      continue;
+    }
+    if (entry.tier === tierName) continue;
+    if (rank(entry.tier) < rank(tierName) && !published.has(tierName)) {
+      // Legitimate gap: the family publishes nothing of this tier, so the slot falls
+      // back DOWN to the nearest thing it does publish.
+      continue;
+    }
+    seenMismatches.add(key);
+    const known = KNOWN_TIER_MISMATCHES[key];
+    const line = `ROUTE TARGET TIER MISMATCH: ${key} -> '${id}' is catalogued as tier`
+      + ` '${entry.tier}'`;
+    if (known) {
+      console.error(line + '\n  KNOWN (ratcheted): ' + known);
+    } else {
+      console.error(line);
+      targetFailures++;
+    }
+  }
+}
+// A ledger entry that no longer reproduces is a lie about the current state — fail on it
+// so the list shrinks as the blockers are cleared.
+for (const key of Object.keys(KNOWN_TIER_MISMATCHES)) {
+  if (!seenMismatches.has(key)) {
+    console.error(`ROUTE TARGET LEDGER STALE: ${key} is listed in KNOWN_TIER_MISMATCHES`
+      + ' but no longer mismatches — delete the entry');
+    targetFailures++;
+  }
+}
+if (!targetFailures) {
+  const n = Object.keys(ROUTE_TARGET_BY_TIER).length * TIERS.length;
+  console.log('route targets: ' + n + ' entries resolve; '
+    + seenMismatches.size + ' known tier mismatch(es) ratcheted');
 }
 
 // ---- cross-runtime parity -------------------------------------------------------
@@ -135,9 +239,10 @@ try {
   parityFailures++;
 }
 
-if (stale || parityFailures) {
+if (stale || parityFailures || targetFailures) {
   if (stale) console.error('\n' + stale + ' file(s) stale — run: node cli/scripts/sync-prices.js');
   if (parityFailures) console.error(parityFailures + ' cross-runtime parity failure(s)');
+  if (targetFailures) console.error(targetFailures + ' route-target failure(s)');
   process.exit(1);
 }
 console.log(check ? 'price tables are in sync' : 'done');

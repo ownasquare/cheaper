@@ -48,6 +48,21 @@ function ev(over) {
   }, over || {});
 }
 
+// A normalized adapter record, for the tests that must go through the REAL writer
+// (`counterfactual.sessionFrame` → `emit.eventsFromRecords` → `events.deltaFor`) rather
+// than through hand-built rows. The eligibility RULE is a property of the session frame,
+// so a synthetic row cannot exercise the rule flip at all.
+const REC_TS = Date.UTC(2026, 7, 5, 12, 0, 0);
+function rec(over) {
+  return Object.assign({
+    harness: 'claude-code', sessionId: 's-rule', ts: REC_TS, tzo: 0,
+    model: 'claude-opus-5', source: 'user', sub: false,
+    inFresh: 100000, outTokens: 20000, cacheRead: 0,
+    cacheCreate5m: 0, cacheCreate1h: 0, cacheCreate: 0, estimated: true,
+    requestId: null, messageId: null,
+  }, over || {});
+}
+
 // ---- writer ------------------------------------------------------------------------
 
 test('append writes one line per event and fsyncs', () => {
@@ -62,6 +77,37 @@ test('append writes one line per event and fsyncs', () => {
     assert.strictEqual(text.split('\n').filter(Boolean).length, 2);
     // Segment files must not be readable by another local user.
     assert.strictEqual(fs.statSync(segs[0].file).mode & 0o077, 0);
+  });
+});
+
+test('a batch straddling a UTC month boundary is filed by EACH ROW\'S OWN month', () => {
+  withDir(() => {
+    const events = require('../src/peek/events');
+    // One chat, one append, two months. `emit.js` sorts a session ASCENDING by ts, so
+    // the OLDEST row leads the batch — deriving one segment path from `rows[0]` filed
+    // the September calls into the August file.
+    const aug = Date.UTC(2026, 7, 31, 23, 50, 0);
+    const sep = Date.UTC(2026, 8, 1, 0, 10, 0);
+    const r = events.append([ev({ id: 'rid:aug', ts: aug, pday: '2026-08-31' }),
+                             ev({ id: 'rid:sep', ts: sep, pday: '2026-09-01' })], 'cli');
+    assert.strictEqual(r.written, 2);
+    assert.strictEqual(r.torn, false);
+
+    const segs = events.listSegments();
+    assert.deepStrictEqual(segs.map((s) => s.ym).sort(), ['2026-08', '2026-09'],
+      'a month boundary inside one batch must open one fd per month');
+    const byYm = new Map(segs.map((s) => [s.ym, s.file]));
+    const augRows = []; events.readSegment(byYm.get('2026-08'), (o) => augRows.push(o));
+    const sepRows = []; events.readSegment(byYm.get('2026-09'), (o) => sepRows.push(o));
+    assert.deepStrictEqual(augRows.map((o) => o.id), ['rid:aug']);
+    assert.deepStrictEqual(sepRows.map((o) => o.id), ['rid:sep']);
+
+    // THE MONEY-VISIBLE CONSEQUENCE, not just tidy filing: `readAll` skips an
+    // out-of-range segment BY ITS FILENAME MONTH, so a September window never opened the
+    // August file and the September calls inside it left the total with no label.
+    const { rows } = events.readAll({ sinceMs: Date.UTC(2026, 8, 15) });
+    assert.deepStrictEqual(rows.map((o) => o.id), ['rid:sep'],
+      'the September row must survive a September window');
   });
 });
 
@@ -104,6 +150,196 @@ test('a segment written by a NEWER schema is refused, not read as zero', () => {
       'a forward-incompatible row must be COUNTED — reading it as absent would be a '
       + 'confident downward restatement of the user\'s money');
   });
+});
+
+// Put `file` into the state "this process cannot read the bytes", and return an undo.
+//
+// chmod 000 is the real-world cause (a restore that lost the mode bits, a hostile umask,
+// a half-synced file) and is what this test wants to assert on. It is NOT enforced for
+// uid 0, so when the suite runs as root the same state is produced by swapping the file
+// for a DIRECTORY of the same name — read(2) fails with EISDIR for every uid. Same
+// counter under test either way; nothing is skipped and no assertion is softened.
+function makeUnreadable(file) {
+  const body = fs.readFileSync(file);
+  fs.chmodSync(file, 0o000);
+  try {
+    fs.readFileSync(file);
+  } catch {
+    return () => fs.chmodSync(file, 0o600);
+  }
+  fs.chmodSync(file, 0o600);
+  fs.unlinkSync(file);
+  fs.mkdirSync(file);
+  return () => { fs.rmdirSync(file); fs.writeFileSync(file, body, { mode: 0o600 }); };
+}
+
+test('a segment whose bytes cannot be read is COUNTED, not reported as an empty month', () => {
+  withDir(() => {
+    const events = require('../src/peek/events');
+    events.append([ev(), ev({ id: 'rid:req_2' })], 'cli');
+    const seg = events.listSegments()[0].file;
+    const undo = makeUnreadable(seg);
+    try {
+      const { rows, stats } = events.readAll();
+      assert.strictEqual(rows.length, 0);
+      // `segments` is incremented before the read is attempted, so without a counter of
+      // its own an unopenable segment reads as "1 segment, 0 rows" — byte-identical to a
+      // genuinely quiet month. A truncated read must never pass for a complete one.
+      assert.strictEqual(stats.segments, 1);
+      assert.strictEqual(stats.unreadable, 1, 'the failure to read must be VISIBLE');
+      assert.strictEqual(stats.corrupt, 0, 'nothing here was corrupt — only unreadable');
+    } finally { undo(); }
+    // Non-vacuous: the same segment, readable again, really does carry two rows.
+    assert.strictEqual(events.readAll().rows.length, 2);
+  });
+});
+
+test('a truncated sealed segment is COUNTED as corrupt, not as a sealed empty month', () => {
+  withDir(() => {
+    const events = require('../src/peek/events');
+    const zlib = require('zlib');
+    const dir = process.env.CHEAPER_EVENTS_DIR;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const whole = zlib.gzipSync(Buffer.from(JSON.stringify(ev()) + '\n', 'utf8'));
+    // `cheaper compact` verifies a sealed segment before unlinking its sources, so this
+    // is damage that arrived AFTER sealing — a truncated restore, a torn sync.
+    fs.writeFileSync(path.join(dir, '2026-08.sealed.jsonl.gz'),
+      whole.subarray(0, whole.length - 6), { mode: 0o600 });
+    const { rows, stats } = events.readAll();
+    assert.strictEqual(rows.length, 0);
+    assert.strictEqual(stats.segments, 1);
+    assert.strictEqual(stats.corrupt, 1, 'a gzip that does not inflate must be NAMED');
+    assert.strictEqual(stats.unreadable, 0, 'its bytes were readable; its contents were not');
+  });
+});
+
+// ---- which writer a segment NAME attributes itself to ---------------------------------
+
+test('segmentWriter reads the writer off the name, and refuses to invent one', () => {
+  const events = require('../src/peek/events');
+  assert.strictEqual(events.segmentWriter('2026-08.a1b2c3d4.cli.jsonl'), 'cli');
+  assert.strictEqual(events.segmentWriter('2026-08.a1b2c3d4.gw.jsonl'), 'gw');
+  assert.strictEqual(events.segmentWriter('2026-08.cli.jsonl'), 'cli');   // pre-install-id
+  assert.strictEqual(events.segmentWriter('2026-08.gw.jsonl'), 'gw');
+  // A sealed month is the MERGE of that month's cli AND gw segments. It cannot be
+  // attributed to either, and the old `/\.gw\.jsonl(\.gz)?$/i ? 'gw' : 'cli'` answered
+  // 'cli' for it — an else branch producing a confident wrong attribution.
+  assert.strictEqual(events.segmentWriter('2026-08.a1b2c3d4.sealed.jsonl.gz'), null);
+  assert.strictEqual(events.segmentWriter('2026-08.sealed.jsonl.gz'), null);
+  assert.strictEqual(events.segmentWriter('nonsense.jsonl'), null);
+  // A sync client inserts its marker before the LAST extension, which the anchored
+  // `\.gw\.jsonl$` test also missed — and the glob in listSegments deliberately READS
+  // these files, so they were read and then mis-attributed.
+  assert.strictEqual(events.segmentWriter('2026-08.a1b2c3d4.gw (conflicted copy).jsonl'), 'gw');
+  assert.strictEqual(events.segmentWriter('2026-08.a1b2c3d4.cli (1).jsonl'), 'cli');
+});
+
+test('a gw row inside a SEALED month is never read back as writer cli', () => {
+  withDir(() => {
+    const events = require('../src/peek/events');
+    const zlib = require('zlib');
+    const dir = process.env.CHEAPER_EVENTS_DIR;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // A gateway-origin row that carries no `w` of its own, sealed into a month by
+    // `cheaper compact`. `readAll` falls back to the SEGMENT's writer for exactly this
+    // row, so the segment's answer is the row's answer.
+    const row = ev({ id: 'rid:gwrow', prov: 'gateway' });
+    delete row.w;
+    fs.writeFileSync(path.join(dir, '2026-08.a1b2c3d4.sealed.jsonl.gz'),
+      zlib.gzipSync(Buffer.from(JSON.stringify(row) + '\n', 'utf8')), { mode: 0o600 });
+
+    const segs = events.listSegments();
+    assert.strictEqual(segs.length, 1);
+    assert.strictEqual(segs[0].writer, null,
+      'a sealed segment holds BOTH writers; naming one of them is a guess');
+    const { rows } = events.readAll();
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0]._w, null,
+      'an unknown writer must be a labelled non-answer, never a confident "cli"');
+  });
+});
+
+test('a row that carries its OWN writer still wins over the segment name', () => {
+  withDir(() => {
+    const events = require('../src/peek/events');
+    const zlib = require('zlib');
+    const dir = process.env.CHEAPER_EVENTS_DIR;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(dir, '2026-08.a1b2c3d4.sealed.jsonl.gz'),
+      zlib.gzipSync(Buffer.from(JSON.stringify(ev({ id: 'rid:1', w: 'gw' })) + '\n'
+        + JSON.stringify(ev({ id: 'rid:2', w: 'cli' })) + '\n', 'utf8')), { mode: 0o600 });
+    const { rows } = events.readAll();
+    assert.deepStrictEqual(rows.map((r) => [r.id, r._w]).sort(),
+      [['rid:1', 'gw'], ['rid:2', 'cli']],
+      'the null segment writer must not erase a writer the row states itself');
+  });
+});
+
+// ---- the install id, when it cannot be persisted --------------------------------------
+
+// `fsutil.HOME` is a module-level const read at REQUIRE time, so a home swap has to happen
+// before the module loads — which means a child process, not an env tweak in-band.
+const EVENTS_JS = path.join(__dirname, '..', 'src', 'peek', 'events.js');
+const ID_PROBE = `
+  const e = require(${JSON.stringify(EVENTS_JS)});
+  const path = require('path');
+  const a = e.installIdInfo();
+  const b = e.installIdInfo();
+  console.log(JSON.stringify({ a, b, seg: path.basename(e.segmentPath('cli', Date.UTC(2026, 7, 5))) }));
+`;
+
+function probeInstallId(home, extraEnv) {
+  const r = require('child_process').spawnSync(process.execPath, ['-e', ID_PROBE], {
+    encoding: 'utf8',
+    env: Object.assign({}, process.env, { CHEAPER_PEEK_HOME: home }, extraEnv || {}),
+  });
+  assert.strictEqual(r.status, 0, r.stderr);
+  return { json: JSON.parse(r.stdout), stderr: r.stderr };
+}
+
+test('an install id that cannot be persisted is STABLE, not a fresh one per run', () => {
+  const home = tmpdir('instid');
+  // `~/.cheaper/install.json` exists as a DIRECTORY: read(2) fails EISDIR and write(2)
+  // fails EISDIR, for every uid including root — the same construction the unreadable
+  // segment test uses, and for the same reason.
+  fs.mkdirSync(path.join(home, '.cheaper', 'install.json'), { recursive: true });
+
+  const one = probeInstallId(home);
+  const two = probeInstallId(home);
+  assert.strictEqual(one.json.a.source, 'derived', JSON.stringify(one.json));
+  assert.match(one.json.a.id, /^[0-9a-f]{8}$/);
+  assert.strictEqual(one.json.a.id, one.json.b.id, 'unstable inside a single process');
+
+  // THE ACTUAL HARM. The id is part of every segment's NAME, so a fresh random id per run
+  // did not merely lose the synced-home guarantee — it wrote ONE SEGMENT FILE PER
+  // INVOCATION, and the Stop hook fires on every assistant turn. The old comment claimed a
+  // non-persisted id "still writes a valid, dedupable segment", which was true of the rows
+  // and false of the directory.
+  assert.strictEqual(one.json.a.id, two.json.a.id,
+    'a machine that cannot persist its install id must not mint a new one every run');
+  assert.strictEqual(one.json.seg, two.json.seg,
+    'one segment FILE per invocation is the failure this id exists to prevent');
+  assert.match(one.stderr, /install\.json could not be written/,
+    'the degradation must be stated, not silent');
+  // …but never from the Stop hook, whose stderr is the user's chat and which runs on
+  // every single turn.
+  assert.doesNotMatch(probeInstallId(home, { CHEAPER_FROM_HOOK: '1' }).stderr,
+    /install\.json could not be written/);
+});
+
+test('a writable home still mints and then reuses a RANDOM id — the fallback is narrow', () => {
+  const home = tmpdir('instid-ok');
+  const one = probeInstallId(home);
+  assert.strictEqual(one.json.a.source, 'minted', JSON.stringify(one.json));
+  assert.strictEqual(one.json.b.source, 'persisted', 'the mint must reach the disk');
+  assert.strictEqual(one.stderr, '', 'a healthy home must warn about nothing');
+  const two = probeInstallId(home);
+  assert.strictEqual(two.json.a.source, 'persisted');
+  assert.strictEqual(two.json.a.id, one.json.a.id);
+  // Non-vacuous: a random id really is random, so the derived fallback above was not
+  // simply the same value every home would have produced anyway.
+  const other = probeInstallId(tmpdir('instid-ok2'));
+  assert.notStrictEqual(other.json.a.id, one.json.a.id);
 });
 
 test('concurrent writers from two processes lose no rows', async () => {
@@ -200,6 +436,65 @@ test('a raised session ceiling re-emits the WHOLE session at rev+1', () => {
     assert.strictEqual(d.reason, 'restated');
     assert.strictEqual(d.emit.length, 2, 'a restatement is VISIBLE, not a silent patch');
     assert.ok(d.emit.every((e) => e.rev === 2));
+  });
+});
+
+test('a session that acquires its FIRST sub-agent restates the WHOLE session', () => {
+  withDir(() => {
+    const events = require('../src/peek/events');
+    const { eventsFromRecords } = require('../src/peek/emit');
+    const { fold } = require('../src/peek/reconcile');
+    const meta = { harness: 'claude-code', sessionId: 's-rule', prov: 'transcript',
+                   writer: 'cli' };
+
+    // Turn 1 — no sub-agent anywhere, so `sessionFrame.routedAware` is false and
+    // eligible means "not on the ceiling model": the haiku turn is credited.
+    const turn1 = [
+      rec({ requestId: 'req_1' }),
+      rec({ requestId: 'req_2', ts: REC_TS + 60000, model: 'claude-haiku-4-5' }),
+    ];
+    const a = eventsFromRecords(turn1, meta);
+    assert.deepStrictEqual(a.map((e) => e.elig), [false, true]);
+    assert.ok(a.every((e) => e.erule === 'off_ceiling'));
+    const d1 = events.deltaFor('claude-code', 's-rule', a);
+    assert.strictEqual(d1.emit.length, 2);
+    assert.strictEqual(events.append(d1.emit, 'cli').written, 2);
+    events.writeCursor('claude-code', 's-rule', d1.cursor);
+
+    // Turn 2 — the first sub-agent appears. `sessionFrame` SWAPS the rule for the whole
+    // session: eligible now means "was a sub-agent", so req_2 is no longer credited.
+    // Neither `base` (a sub-agent never enters the ceiling pool) nor the HEAD row's
+    // `elig` moves, which is exactly why fingerprinting the verdict alone missed this.
+    const turn2 = turn1.concat([
+      rec({ requestId: 'req_3', ts: REC_TS + 120000, model: 'claude-haiku-4-5',
+            source: 'subagent', sub: true }),
+    ]);
+    const b = eventsFromRecords(turn2, meta);
+    assert.strictEqual(b[0].base, a[0].base, 'the ceiling did NOT move');
+    assert.strictEqual(b[0].elig, a[0].elig, 'and the head row\'s verdict did NOT move');
+    assert.deepStrictEqual(b.map((e) => e.elig), [false, false, true]);
+
+    const d2 = events.deltaFor('claude-code', 's-rule', b);
+    assert.strictEqual(d2.reason, 'restated',
+      'a rule flip is a restatement, not a tail append');
+    assert.strictEqual(d2.emit.length, 3, 'the WHOLE session, not just the new row');
+    assert.ok(d2.emit.every((e) => e.rev === 2));
+    assert.strictEqual(events.append(d2.emit, 'cli').written, 3);
+    events.writeCursor('claude-code', 's-rule', d2.cursor);
+
+    // What is actually ON DISK must now speak with ONE rule. Without the restatement
+    // req_2 survives at its highest rev still carrying `elig: true` from the OLD rule,
+    // sitting next to req_3's `elig: true` from the NEW one — two incompatible
+    // eligibility rules frozen into one session, and a call credited twice over.
+    const { rows } = fold(events.readAll().rows);
+    assert.strictEqual(rows.length, 3);
+    const rules = [...new Set(rows.map((r) => r.erule))];
+    assert.deepStrictEqual(rules, ['routed'], 'a fold must see exactly one rule');
+    assert.deepStrictEqual(rows.filter((r) => r.elig).map((r) => r.id), ['rid:req_3'],
+      'only the sub-agent is eligible under the rule the session ended on');
+
+    // And a third Stop with nothing new still writes NOTHING.
+    assert.strictEqual(events.deltaFor('claude-code', 's-rule', b).reason, 'no-op');
   });
 });
 

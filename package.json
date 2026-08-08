@@ -2,13 +2,13 @@
   "name": "cheaper-app-tests",
   "private": true,
   "version": "0.0.0",
-  "description": "Test harness for the Cheaper.app repo. NOT published — the npm package is cli/package.json, whose `files` list ships only bin/, src/ and assets/. Playwright lives here so the shipped package keeps its empty dependency tree.",
+  "description": "Test harness for the Cheaper.app repo. NOT published — the npm package is cli/package.json, whose `files` list ships only bin/, src/ and assets/. Playwright lives here so the shipped package keeps its empty dependency tree. Two script notes, because JSON cannot carry comments: (1) test:gateway names cli/assets/gateway/tests, the REAL path — `gateway/` is a git-tracked symlink to it, which a Windows checkout without symlink support and a `git archive`/source-zip export both materialise as a plain text file, so `gateway/tests` is not a directory there and pytest collects nothing; (2) test:e2e:report passes .playwright-report explicitly, because playwright.config.js sets the html reporter's outputFolder to .playwright-report while `playwright show-report` with no argument looks in playwright-report and exits 1 with 'No report found'.",
   "scripts": {
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "test:e2e:report": "playwright show-report",
+    "test:e2e:report": "playwright show-report .playwright-report",
     "test:cli": "npm --prefix cli test",
-    "test:gateway": "python3 -m pytest gateway/tests -q",
+    "test:gateway": "python3 -m pytest cli/assets/gateway/tests -q",
     "test:all": "npm run test:cli && npm run test:gateway && npm run test:e2e"
   },
   "devDependencies": {

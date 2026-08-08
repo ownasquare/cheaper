@@ -68,13 +68,30 @@
   .pill.other{background:rgba(139,139,149,0.15);color:var(--muted);}
   .muted{color:var(--muted);}
   svg.spark{width:100%;height:90px;display:block;}
+  /* renderSpark() swaps this wrapper's ENTIRE content between the 90px chart and a
+     one-line ".empty-note" (~41px) depending on whether >=2 points fall inside the
+     trailing 1-hour window — and that window rolls in real time. Without a floor here,
+     a call that was inside the window when a reader loaded the page can roll back out
+     of it a few minutes later with no other change on screen, and the panel — along
+     with every panel below it — visibly jumps upward. That is a real layout-shift bug
+     for a live page, not just a test artifact: it is what turned "Savings by period"
+     and everything under it into an apparent full-page regression in this suite, when
+     only #sparkWrap (already masked out of the pixel diff, per volatileRegions() in
+     visual.spec.js, BECAUSE its content is time-volatile) had actually changed. Pin the
+     footprint to the chart's own height so both states occupy the same box and nothing
+     downstream reflows either for a real viewer or for the masked screenshot.  */
+  #sparkWrap{min-height:90px;}
   .peek-headline{font-size:1rem;margin-bottom:10px;}
   .peek-headline .green{color:var(--green);font-weight:700;}
   .harness-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:0.82rem;border-bottom:1px solid var(--line);}
   .harness-row:last-child{border-bottom:none;}
   .harness-row .hlabel{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .harness-row .hcalls{color:var(--muted);width:70px;text-align:right;}
-  .harness-row .hsaved{color:var(--green);font-weight:600;width:90px;text-align:right;}
+  /* min-width, not width: a measured figure still occupies exactly 90px, so populated rows
+     are pixel-identical — but the labelled non-number ("— no data yet") that replaces an
+     ABSENT figure is longer than a dollar amount and may not be clipped into an em dash
+     with no label beside it. */
+  .harness-row .hsaved{color:var(--green);font-weight:600;min-width:90px;text-align:right;}
   .installed-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0;}
   .installed-dot.yes{background:var(--green);}
   .opp{padding:8px 0;border-bottom:1px solid var(--line);font-size:0.8rem;}
@@ -97,8 +114,19 @@
   .dim-card .label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:8px;}
   .dim-card .headline{font-size:1.7rem;font-weight:700;line-height:1.1;color:var(--green);}
   .dim-card .headline.small{font-size:1.15rem;}
+  /* SIGNED baseline: Cheaper spending more than a baseline is a real, honest result and
+     must read as one -- red, not the default green "you saved" color. */
+  .dim-card .headline.money-neg{color:var(--red-fg);}
+  /* Missing (not measured) is visually and semantically distinct from a measured $0 --
+     muted/italic like the other nodata cells on this page, never a bare $0.00. */
+  .dim-card .headline.nodata{color:var(--muted);font-style:italic;font-size:1.15rem;}
   .dim-card .sub{font-size:0.75rem;color:var(--muted);margin-top:6px;}
+  .dim-card .sub.warn{color:var(--red-fg);}
   .dim-card .spent-sub{font-size:0.8rem;color:var(--red);font-weight:600;margin-top:8px;}
+  /* An ABSENT spend is not a $0.00 spend. `.dim-card .spent-sub` (0,2,0) outranks the bare
+     `.nodata` (0,1,0) further down, so the muted/italic treatment has to be re-stated at
+     the same specificity or a missing figure would still render in confident red bold. */
+  .dim-card .spent-sub.nodata{color:var(--muted);font-weight:400;font-style:italic;}
   .tag-potential{display:inline-block;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;
     color:var(--blue);background:rgba(96,165,250,0.15);border-radius:99px;padding:2px 7px;margin-left:6px;vertical-align:middle;}
 
@@ -280,12 +308,17 @@
     font-size:0.82rem;padding:3px 0;}
   .pop-row .n{color:var(--muted);font-size:0.72rem;}
   .pop-delta{font-size:0.76rem;margin-top:6px;color:var(--muted);}
-  .comp-row{display:grid;grid-template-columns:1fr 96px 96px 64px;gap:10px;
+  /* The events column carries TWO per-basis counts and a separate unpriced badge, so it
+     is wider than the single cross-basis scalar it replaced. */
+  .comp-row{display:grid;grid-template-columns:1fr 96px 96px 168px;gap:10px;
     align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:0.82rem;}
   .comp-row:last-child{border-bottom:none;}
   .comp-row .k{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .comp-row .m,.comp-row .e{text-align:right;}
-  .comp-row .c{text-align:right;color:var(--muted);}
+  .comp-row .c{text-align:right;color:var(--muted);white-space:nowrap;}
+  /* Rows that entered NEITHER accumulator. They are already inside `events`, so they are
+     shown BESIDE the counts with their own prefix — never added to them. */
+  .comp-row .unpriced{color:var(--amber,#f59e0b);font-size:0.72rem;}
   /* ONE scroll container around the bars AND their labels.
      They were two independent `overflow-x:auto` elements, which is both an
      accessibility failure (a scrollable region with no keyboard access) and a real
@@ -294,13 +327,25 @@
   .trend-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
   .trend{display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:8px;
     width:max-content;min-width:100%;}
-  .trend .tb{flex:0 0 14px;display:flex;flex-direction:column;justify-content:flex-end;
+  /* ONE bucket = TWO bars, one per basis, each scaled against its OWN maximum. A single
+     bar per bucket could only be drawn from a cross-basis sum, and its HEIGHT carried
+     that sum as surely as its tooltip did. */
+  .trend .tbg{flex:0 0 auto;display:flex;align-items:flex-end;gap:2px;height:100%;}
+  .trend .tb{flex:0 0 12px;display:flex;flex-direction:column;justify-content:flex-end;
     height:100%;}
   .trend .tb i{display:block;width:100%;border-radius:2px 2px 0 0;background:var(--green);}
+  .trend .tb.estimated i{background:var(--blue);opacity:0.6;}
   .trend .tb.neg i{background:var(--red);border-radius:0 0 2px 2px;}
+  /* A bar slot that has no number to plot renders its LABEL instead — set vertically so
+     "withheld" fits a 12px column. A 0-height bar would be a measured zero. */
+  .trend .tb.nodata,.trend .tb.unpriceable{align-items:center;font-size:0.55rem;
+    line-height:1;font-style:normal;overflow:hidden;}
+  .trend .tb b{font-weight:400;writing-mode:vertical-rl;text-orientation:mixed;
+    white-space:nowrap;}
+  .trend-undated{font-size:0.74rem;color:var(--muted);margin-top:8px;}
   .trend-axis{display:flex;gap:3px;font-size:0.6rem;color:var(--muted);margin-top:4px;
     width:max-content;min-width:100%;}
-  .trend-axis span{flex:0 0 14px;text-align:center;}
+  .trend-axis span{flex:0 0 26px;text-align:center;}
 
   /* ---- Logs: filters + register ---- */
   .logs-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;
@@ -335,7 +380,17 @@
   /* ---- responsive ---- */
   @media (max-width:1024px){
     body{padding:16px;}
-    .comp-row{grid-template-columns:1fr 84px 84px 52px;}
+    /* The events column (.c) carries "N | N" plus, on an excluded row, a
+       "+N unpriced" badge — the withheld-row EXCLUSION NOTICE (invariant 4: an
+       exclusion must be counted AND VISIBLE). 52px only fit the bare counts; the badge
+       text alone measures ~65px at this breakpoint's font size, so on a real tablet
+       viewport (810px, iPad gen 7) it rendered past the panel edge, past the body's
+       right padding, and past the viewport itself — silently clipped by
+       html{overflow-x:hidden} with no scrollbar to reach it. 120px is sized off the
+       measured worst case (~96px cell-left to badge-right) plus headroom for a
+       two-digit unpriced count. The key column is `1fr` and absorbs the difference by
+       shrinking (it already truncates with an ellipsis, which is not clipping). */
+    .comp-row{grid-template-columns:1fr 84px 84px 120px;}
   }
   @media (max-width:760px){
     body{padding:12px;}
@@ -384,6 +439,21 @@
     tr{break-inside:avoid;page-break-inside:avoid;}
     a[href]::after{content:"";}
     .basis-legend{font-size:8pt;}
+    /* The @media (max-width:760px) rules above force table#logsTable and table.ladder
+       to a min-width and make .table-wrap horizontally scrollable with a right-edge
+       fade, so a phone user can swipe to the hidden columns. None of that survives
+       print: Chrome's own "printable width" at default settings is well under 760px
+       (Letter with default margins is ~739px, A4 ~717px), so without this reset a
+       printed page silently carried the mobile layout — a fixed-width table wider than
+       the sheet, with the columns past the fold clipped instead of scrollable, and a
+       scroll-hint sentence pointing at a gesture paper cannot perform. report.html
+       carries the same reset (.scroller{overflow:visible}, table min-width:0) for the
+       same reason; this mirrors it for the two tables and the scroll chrome that are
+       dashboard.html-specific. */
+    .table-wrap{overflow-x:visible !important;}
+    table#logsTable,table.ladder{min-width:0 !important;}
+    .table-wrap::after{content:none !important;}
+    .scrollhint{display:none !important;}
   }
 </style>
 
@@ -396,7 +466,14 @@
     <a href="#monitor" data-tab="monitor">Monitor</a>
   </div>
   <div class="right">
-    <span class="status"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></span>
+    <!-- setStatus() mutates #statusText as the WebSocket connects/drops/reconnects, and
+         with no live region that transition was silent to a screen-reader user — never
+         announced, the same gap the auth wall's role="alert" closes for the 401 case.
+         "polite" (not "assertive") because a connection blip is not an interruption on
+         the level of "you can't see this page's data at all": startPolling() takes over
+         the moment the socket drops, so the dashboard keeps updating on the fallback
+         path while this text merely narrates the transport underneath it. -->
+    <span class="status" role="status" aria-live="polite"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></span>
     <button type="button" class="navpill" id="themeToggle" aria-label="Toggle light or dark theme">&#9728; Light</button>
     <a class="navpill gh" href="https://github.com/ownasquare/cheaper" target="_blank" rel="noopener">&#9733; GitHub</a>
     <a class="navpill love" href="https://cheaper.app/love" target="_blank" rel="noopener">&#9825; Love</a>
@@ -449,8 +526,13 @@
          reader who added the column counted today six times, and "this month vs last
          month" was not expressible at all. -->
     <div class="panel">
+      <!-- The additivity claim is CONDITIONAL and this markup asserted it unconditionally.
+           renderLadder() rewrites it off the same predicate cli/src/reports.js applies over
+           the same periods: with even one withholding window on screen the dollar column
+           does NOT sum to Lifetime, and the static wording denied a 0.06 gap the same table
+           displayed. -->
       <h2>Savings by period
-        <span class="h2note">disjoint windows &mdash; these add up to lifetime</span></h2>
+        <span class="h2note" id="ladderHeadNote">disjoint windows &mdash; these add up to lifetime</span></h2>
       <div class="basis-legend" id="basisLegend">
         <span><i class="sw measured"></i>measured <span class="muted">&mdash; observed by the gateway from provider-reported usage</span></span>
         <span><i class="sw estimated"></i>estimated <span class="muted">&mdash; reconstructed from local transcripts</span></span>
@@ -735,6 +817,25 @@
     });
   }
   function num(v, d){ v = Number(v); return isFinite(v) ? v : (d===undefined?0:d); }
+  // ---- The three-state reader for every SIGNED figure that can be genuinely ABSENT ----
+  //
+  // A MEASURED zero and an ABSENT measurement are different claims. `num(v, 0)` collapses
+  // them: it turns "no measurement was made" into a confident $0.00 / 0 / 0.0s, and that
+  // rendering is BYTE-IDENTICAL to the one a real measured zero produces. Every figure on
+  // this page that can legitimately be missing therefore reads through here instead.
+  //
+  // The sign is PRESERVED (a negative is a real result); suppression, if any, happens at
+  // RENDER with a label. `''`, `null`, `undefined`, booleans and non-finite values are all
+  // MISSING — `Number('')` and `Number(false)` are both 0, so a bare isFinite() check would
+  // have quietly re-created the exact defect this function exists to remove.
+  function measuredValue(v){
+    if (v === null || v === undefined || v === '' || typeof v === 'boolean'){
+      return { value: null, missing: true };
+    }
+    var n = Number(v);
+    if (!isFinite(n)) return { value: null, missing: true };
+    return { value: n, missing: false };
+  }
   function money(v){
     v = num(v, 0);
     var neg = v < 0;
@@ -820,17 +921,40 @@
     var total = num(d.total, 0);
     var dr = pctFrac(d.downgrade_rate);
     var dollars = d.dollars || {};
-    var saved = num(dollars.saved, 0);
-    var spent = num(dollars.spent, 0);
-    var savedPct = pctFrac(dollars.savings_pct);
+    // The SAME three-state split renderDims() uses. These two cards and the Money dim card
+    // read the SAME two accumulators; if only one surface learned the difference the two
+    // would disagree on screen — one saying "$0.00 spent", the other "— (no data yet)".
+    var savedInfo = measuredValue(dollars.saved);
+    var spentInfo = measuredValue(dollars.spent);
+    // …and so does the percentage DERIVED from them. This is the new state the Saved/Spent
+    // change creates and it has to move with them: `savings_pct` lives in the same `dollars`
+    // dict, so the payload that leaves Saved and Spent absent leaves this absent too — and
+    // "Savings % 0.0%" standing beside "Saved —" is the SAME self-contradiction on the same
+    // row, three cards along, just reintroduced by the fix instead of by the original code.
+    var savedPctInfo = measuredValue(dollars.savings_pct);
 
     var html = '';
     html += '<div class="card"><div class="label">Total routed</div><div class="value">' + total.toLocaleString('en-US') + '</div></div>';
     html += '<div class="card"><div class="label">Downgrade rate</div><div class="value green">' + dr.toFixed(1) + '%</div>' +
             '<div class="bar-track"><div class="bar-fill" style="width:' + Math.min(100, Math.max(0, dr)) + '%"></div></div></div>';
-    html += '<div class="card"><div class="label">Saved</div><div class="value green">' + money(saved) + '</div><div class="sub">vs all-top-tier</div></div>';
-    html += '<div class="card"><div class="label">Spent</div><div class="value red">' + money(spent) + '</div></div>';
-    html += '<div class="card"><div class="label">Savings %</div><div class="value green">' + savedPct.toFixed(1) + '%</div></div>';
+    html += '<div class="card"><div class="label">Saved</div><div class="value ' +
+            (savedInfo.missing ? 'nodata">&mdash;' : 'green">' + money(savedInfo.value)) + '</div>' +
+            // `dollars.saved` is metrics.py's REQUESTED-MODEL accumulator: base_x is
+            // cost_of_model(om, ...) where `om` is the model the caller ASKED FOR, and
+            // baselines.requested_default is literally dollars["saved"]. The all-top-tier
+            // comparison is a SEPARATE accumulator (billed_top), surfaced as
+            // baselines.highest_tier. Captioning this figure "vs all-top-tier" made the
+            // stat card and the Money dim card attach two different baselines to the SAME
+            // $0.20 while the real all-frontier figure ($0.40) sat one panel below it.
+            // The wording tracks moneyBaselineValue()'s requested_default subject.
+            '<div class="sub">vs the model you asked for</div>' +
+            (savedInfo.missing ? '<div class="sub warn">no data yet</div>' : '') + '</div>';
+    html += '<div class="card"><div class="label">Spent</div><div class="value ' +
+            (spentInfo.missing ? 'nodata">&mdash;' : 'red">' + money(spentInfo.value)) + '</div>' +
+            (spentInfo.missing ? '<div class="sub warn">no data yet</div>' : '') + '</div>';
+    html += '<div class="card"><div class="label">Savings %</div><div class="value ' +
+            (savedPctInfo.missing ? 'nodata">&mdash;' : 'green">' + pctFrac(savedPctInfo.value).toFixed(1) + '%') + '</div>' +
+            (savedPctInfo.missing ? '<div class="sub warn">no data yet</div>' : '') + '</div>';
     document.getElementById('statCards').innerHTML = html;
   }
 
@@ -848,73 +972,174 @@
   }
 
   // ---------- Savings dimensions (money / tokens / time) ----------
+  // ONE three-state reader for ALL THREE baseline choices.
+  //
+  // Every one of the three is SIGNED and every one of the three can be genuinely ABSENT,
+  // so the absent/negative/measured-zero split may not live in one branch:
+  //   * `baselines.highest_tier` is billed_top - spent, no clamp.
+  //   * `baselines.requested_default` is metrics.py's `dollars["saved"]` accumulator —
+  //     the same signed number `dollars["extra"]` and `counts.models_upcharged` exist to
+  //     describe. It is also the DEFAULT selection, and it is absent on the very first
+  //     paint: setBaseline() runs renderDims({}) before /metrics has answered.
+  //   * the historical total is peek's `dollarsSaved`, which tagline.js itself branches on
+  //     at `<= -SHOW_MIN_USD`. `lastPeek` is null until /peek returns and stays null
+  //     FOREVER if the chat-history scan never runs — "vs your history $0.00" would be a
+  //     measured claim for an analysis that was never performed.
+  // A missing figure is NOT a measured zero, so none of the three may be coerced through
+  // num(v, 0).
+  //
+  // `subject` is the plain-language name of THIS baseline, carried with the value. The
+  // negative caption is written from it rather than from a hard-coded string, because a
+  // caption naming the all-frontier CEILING on an overspend measured against the user's
+  // own requested model — or against their own history — substantiates a different and
+  // much larger-sounding claim than the one that was measured.
   function moneyBaselineValue(d){
-    var dollars = d.dollars || {};
     var baselines = d.baselines || {};
-    if (baselineChoice === 'highest_tier') return { amount: num(baselines.highest_tier, 0), label: 'vs all-frontier' };
-    if (baselineChoice === 'historical') {
-      var totals = (lastPeek && lastPeek.totals) || {};
-      return { amount: num(totals.dollarsSaved, 0), label: 'vs your history' };
+    var counts = d.counts || {};
+    var raw, info;
+    if (baselineChoice === 'highest_tier') {
+      raw = baselines.highest_tier;
+      info = {
+        label: 'vs all-frontier',
+        subject: 'the all-frontier baseline',
+        // Priced rows with no published all-frontier rate on their own day: `billed_top`
+        // (and therefore this baseline) covers FEWER rows than `dollars.spent`. An
+        // exclusion, so it is counted and shown here rather than left to silently shrink
+        // the comparison.
+        billedTopMissing: num(counts.billed_top_missing, 0)
+      };
+    } else if (baselineChoice === 'historical') {
+      // A null/absent `lastPeek.totals` is MISSING, not zero: no scan has been performed.
+      var totals = (lastPeek && lastPeek.totals) || null;
+      raw = totals ? totals.dollarsSaved : null;
+      info = { label: 'vs your history', subject: 'your own history' };
+    } else {
+      raw = baselines.requested_default;
+      info = { label: 'vs your model', subject: 'the model you asked for' };
     }
-    return { amount: num(baselines.requested_default, 0), label: 'vs your model' };
+    var missing = raw === null || raw === undefined || !isFinite(Number(raw));
+    info.amount = missing ? null : Number(raw);
+    info.missing = missing;
+    return info;
   }
   function historicalDimsAvailable(){
     return baselineChoice === 'historical' && lastPeek && lastPeek.totals;
   }
+  // Tokens and Time reach the page through exactly the same first paint as Money:
+  // setBaseline() runs renderDims({}) before /metrics has answered, and render() is reached
+  // ONLY from ws.onmessage and the poll — both of whose .catch swallows every failure — so
+  // an unreachable, down or 401 gateway leaves whatever this produced on screen
+  // INDEFINITELY. `num(v, 0)` here printed a confident "0 reasoning tokens" and "0.0s
+  // saved" for a measurement that was never made, on the pane the user lands on first, and
+  // did so identically on all three baseline choices. Both therefore carry the same
+  // three-state split the money baseline does, and both keep the two components separable:
+  // `timeSavedModelS` and `timeSavedReasoningPotentialS` are different measurements and one
+  // may be present while the other is absent.
   function tokensDimValue(d){
     if (historicalDimsAvailable()){
-      var totals = lastPeek.totals;
+      var ht = measuredValue(lastPeek.totals.tokensSavedReasoningPotential);
       return {
-        tokensSaved: num(totals.tokensSavedReasoningPotential, 0),
+        tokensSaved: ht.value, missing: ht.missing,
         label: 'reasoning tokens (historical)'
       };
     }
     var tokens = d.tokens || {};
+    var t = measuredValue(tokens.saved_reasoning_potential);
     return {
-      tokensSaved: num(tokens.saved_reasoning_potential, 0),
+      tokensSaved: t.value, missing: t.missing,
       label: 'reasoning tokens you could save'
     };
   }
   function timeDimValue(d){
     if (historicalDimsAvailable()){
       var totals = lastPeek.totals;
+      var hm = measuredValue(totals.timeSavedModelS);
+      var hr = measuredValue(totals.timeSavedReasoningPotentialS);
       return {
-        savedModelS: num(totals.timeSavedModelS, 0),
-        savedReasoningS: num(totals.timeSavedReasoningPotentialS, 0),
+        savedModelS: hm.value, modelMissing: hm.missing,
+        savedReasoningS: hr.value, reasoningMissing: hr.missing,
         label: 'saved (historical)'
       };
     }
     var time = d.time || {};
+    var m = measuredValue(time.saved_model_s);
+    var r = measuredValue(time.saved_reasoning_potential_s);
     return {
-      savedModelS: num(time.saved_model_s, 0),
-      savedReasoningS: num(time.saved_reasoning_potential_s, 0),
+      savedModelS: m.value, modelMissing: m.missing,
+      savedReasoningS: r.value, reasoningMissing: r.missing,
       label: 'saved (from model routing)'
     };
   }
   function renderDims(d){
     var dollars = d.dollars || {};
-    var spent = num(dollars.spent, 0);
+    // `.spent-sub` sat two lines beneath a headline that had already learned this split and
+    // still read it through num(v, 0), so the card asserted "no data yet" and "$0.00 spent"
+    // in the same box. Same reader as the headline, now.
+    var spentInfo = measuredValue(dollars.spent);
     var moneyInfo = moneyBaselineValue(d);
     var tokensInfo = tokensDimValue(d);
     var timeInfo = timeDimValue(d);
 
     var html = '';
+    // The Money headline: three distinct states, none of which may collapse into the
+    // others. A measured negative is red text WITH a plain-language label (never a bare
+    // "-$X.XX" that reads as a rendering glitch); a missing figure is an em dash with a
+    // "no data" note (never $0.00, which would claim a measurement that was not made).
+    var moneyHeadline, moneyCls = '', moneyNote = '';
+    if (moneyInfo.missing){
+      moneyHeadline = '&mdash;';
+      moneyCls = 'nodata';
+      moneyNote = 'no data yet';
+    } else if (moneyInfo.amount < 0){
+      moneyHeadline = money(moneyInfo.amount);
+      moneyCls = 'money-neg';
+      // The subject comes from the SELECTED baseline, never from a literal: this caption
+      // sits directly beneath `moneyInfo.label`, and naming a different baseline than the
+      // label does is an affirmative claim the card itself contradicts.
+      moneyNote = 'you spent ' + money(Math.abs(moneyInfo.amount)) +
+        ' MORE than ' + moneyInfo.subject + ' this period — a real result, not an error.';
+    } else {
+      moneyHeadline = money(moneyInfo.amount);
+    }
     html += '<div class="dim-card">' +
       '<div class="label">Money</div>' +
-      '<div class="headline">' + money(moneyInfo.amount) + '</div>' +
+      '<div class="headline' + (moneyCls ? ' ' + moneyCls : '') + '">' + moneyHeadline + '</div>' +
       '<div class="sub">' + esc(moneyInfo.label) + '</div>' +
-      '<div class="spent-sub">' + money(spent) + ' spent</div>' +
+      (moneyNote ? '<div class="sub warn">' + esc(moneyNote) + '</div>' : '') +
+      // Priced rows this baseline could not cover (no all-frontier rate on their own
+      // day) -- an exclusion, so it is stated rather than left to silently shrink the
+      // comparison the headline above is making.
+      (moneyInfo.billedTopMissing ? '<div class="sub" title="Priced calls with no ' +
+        'published all-frontier rate on their own day are excluded from this baseline">' +
+        num(moneyInfo.billedTopMissing, 0).toLocaleString('en-US') +
+        ' call(s) excluded from this baseline (no all-frontier rate that day)</div>' : '') +
+      (spentInfo.missing
+        ? '<div class="spent-sub nodata">&mdash; spent (no data yet)</div>'
+        : '<div class="spent-sub">' + money(spentInfo.value) + ' spent</div>') +
       '</div>';
+    // Tokens. The "potential" tag qualifies a FIGURE; with no figure there is nothing for
+    // it to qualify, so it is dropped rather than left labelling an em dash.
     html += '<div class="dim-card">' +
       '<div class="label">Tokens</div>' +
-      '<div class="headline">' + tokenCount(tokensInfo.tokensSaved) + '<span class="tag-potential">potential</span></div>' +
+      '<div class="headline' + (tokensInfo.missing ? ' nodata' : '') + '">' +
+      (tokensInfo.missing
+        ? '&mdash;'
+        : tokenCount(tokensInfo.tokensSaved) + '<span class="tag-potential">potential</span>') +
+      '</div>' +
       '<div class="sub">' + esc(tokensInfo.label) + '</div>' +
+      (tokensInfo.missing ? '<div class="sub warn">no data yet</div>' : '') +
       '</div>';
+    // Time. Two independent measurements, two independent states: model-routing time may be
+    // known while the reasoning potential is not, so they are never gated on one flag.
     html += '<div class="dim-card">' +
       '<div class="label">Time</div>' +
-      '<div class="headline">' + seconds(timeInfo.savedModelS) + '</div>' +
+      '<div class="headline' + (timeInfo.modelMissing ? ' nodata' : '') + '">' +
+      (timeInfo.modelMissing ? '&mdash;' : seconds(timeInfo.savedModelS)) + '</div>' +
       '<div class="sub">' + esc(timeInfo.label) + '</div>' +
-      '<div class="sub">+ ' + seconds(timeInfo.savedReasoningS) + ' potential from reasoning</div>' +
+      '<div class="sub">' + (timeInfo.reasoningMissing
+        ? '<span class="nodata">&mdash;</span> potential from reasoning (no data yet)'
+        : '+ ' + seconds(timeInfo.savedReasoningS) + ' potential from reasoning') + '</div>' +
+      (timeInfo.modelMissing ? '<div class="sub warn">no data yet</div>' : '') +
       '</div>';
     document.getElementById('dimGrid').innerHTML = html;
   }
@@ -975,6 +1200,33 @@
   }
 
   // ---------- Sparkline ----------
+  // The spark line used to hard-code the DARK-theme green — #34d399 stroke and its
+  // rgba(52,211,153,0.15) area fill — instead of reading the themeable --green custom
+  // property. In light mode --green resolves to the darker #047857 (chosen so it holds
+  // 4.8:1 on --card; see the :root[data-theme="light"] block above), so the hard-coded
+  // #34d399 line failed WCAG AA on white — and because the fill was the SAME wrong
+  // color, it washed out together with the line instead of compensating for it. Reading
+  // the property at render time keeps the chart on whichever swatch the cascade actually
+  // chose (OS-default, explicit light, or explicit dark).
+  function themeGreen(){
+    try {
+      var v = getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
+      if (v) return v;
+    } catch(e){}
+    return '#34d399';
+  }
+  // --green is always a 3- or 6-digit hex (see every :root block above); the area fill
+  // needs its own alpha independent of the line color, so this expands the hex into an
+  // rgba() rather than adding a second custom property that could drift out of sync.
+  function hexToRgba(hex, alpha){
+    var h = String(hex).replace('#', '');
+    if (h.length === 3) h = h.split('').map(function(c){ return c + c; }).join('');
+    var r = parseInt(h.substring(0, 2), 16);
+    var g = parseInt(h.substring(2, 4), 16);
+    var b = parseInt(h.substring(4, 6), 16);
+    if (!isFinite(r) || !isFinite(g) || !isFinite(b)) return 'rgba(52,211,153,' + alpha + ')';
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+  }
   function renderSpark(d){
     var ts = (d.timeseries && Array.isArray(d.timeseries.points)) ? d.timeseries.points : [];
     var wrap = document.getElementById('sparkWrap');
@@ -996,9 +1248,10 @@
     var linePath = pts.map(function(p, i){ return (i===0?'M':'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
     var areaPath = linePath + ' L' + pts[pts.length-1][0].toFixed(1) + ',' + (H-pad) +
                    ' L' + pts[0][0].toFixed(1) + ',' + (H-pad) + ' Z';
+    var green = themeGreen();
     var svg = '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' +
-      '<path d="' + areaPath + '" fill="rgba(52,211,153,0.15)" stroke="none"></path>' +
-      '<path d="' + linePath + '" fill="none" stroke="#34d399" stroke-width="2" vector-effect="non-scaling-stroke"></path>' +
+      '<path d="' + areaPath + '" fill="' + hexToRgba(green, 0.15) + '" stroke="none"></path>' +
+      '<path d="' + linePath + '" fill="none" stroke="' + green + '" stroke-width="2" vector-effect="non-scaling-stroke"></path>' +
       '</svg>';
     wrap.innerHTML = svg;
   }
@@ -1097,6 +1350,145 @@
 
   var reportsState = { dim: 'served', bucket: 'day', loaded: false, loading: false };
 
+  // ---- ONE per-basis event reader, for every reporting surface on this page ----------
+  //
+  // `events` is ROWS SEEN on one basis, in one window / group / bucket. It ALREADY
+  // INCLUDES the rows whose dollars could not be derived — reporting.py states the
+  // contract verbatim: "`unpriced_calls` stays a SUBSET counter of `events`, not an addend
+  // to it" — so `unpriced_calls` is displayed BESIDE this figure and is never added to it.
+  //
+  // Returns a NUMBER or null. Never 0 as a fallback: a window Cheaper was not watching, a
+  // window whose count could not be reported, and a window in which zero calls happened
+  // are three different claims, and only the last one is a measurement. The ladder, the
+  // composition rows and the trend tooltips all read THIS function, so they cannot drift
+  // into three different answers about the same payload — which is exactly how the
+  // composition column came to contradict the ladder cell on the same screen.
+  function basisEvents(o, side){
+    if (!o) return null;
+    var ev = o.events || {};
+    var e = ev[side];
+    if (e !== undefined && e !== null && isFinite(Number(e))) return Number(e);
+    // Older payloads carried no `events` block. The accumulator's own `calls` counts rows
+    // PRICED, which is a floor on rows seen — better than refusing to state anything, and
+    // still never a fabricated 0.
+    var acc = o[side];
+    if (acc && isFinite(Number(acc.calls))) return Number(acc.calls);
+    return null;
+  }
+
+  // The unpriced-call count for a window / group / bucket, under EITHER runtime's spelling
+  // (`unpricedCalls` in cli/src/peek/store.js, `unpriced_calls` in gateway/app/reporting.py
+  // — cli/src/reports.js reads both for the same reason). null when no count was reported,
+  // which is not the same claim as "none were unpriced".
+  function unpricedOf(o){
+    if (!o) return null;
+    var raw = (o.unpricedCalls === undefined || o.unpricedCalls === null)
+      ? o.unpriced_calls : o.unpricedCalls;
+    if (raw === undefined || raw === null || !isFinite(Number(raw))) return null;
+    return Number(raw);
+  }
+
+  // ===== THE SHARED CLAIM PREDICATE ==================================================
+  // ONE copy per render surface — this file, report.html and cli/src/reports.js — kept
+  // TEXTUALLY IDENTICAL and pinned as such by cli/test/html.test.js. cli/src/savings.js
+  // imports the reports.js copy rather than keeping a fourth. An HTML page cannot import,
+  // so the copies are the price of the rule; the test is what stops them drifting again.
+  //
+  // Three claims a cell can make, and the project rules forbid collapsing any into another:
+  //   'not_covered' — Cheaper was not watching. No rows exist because none were recorded.
+  //   'withheld'    — Cheaper WAS watching, rows exist, and their dollars are deliberately
+  //                   not claimed (over a fifth of the window's tokens are unpriceable).
+  //   'absent'      — no rows of that basis in this window at all.
+  //   'value'       — a real figure, sign and all. A measured zero lives here.
+  //
+  // Every surface used to decide between them by testing `acc.calls` — ROWS PRICED. The
+  // `events` field means ROWS SEEN. A window that is 100% unpriceable therefore has
+  // acc.calls === 0 on BOTH bases, hit the ABSENT branch, and printed "No measured rows in
+  // this window" directly above its own note saying rows were seen and deliberately not
+  // priced — an affirmative falsehood, on the same screen, in the same row.
+  //
+  // So the decision is made from the WINDOW / POINT / GROUP, never from acc.calls, and
+  // WITHHELD is tested BEFORE ABSENT. That ordering is most of the fix.
+  //
+  // Rows-seen is PER BASIS. `unpriced_calls` is a SUBSET counter of `events`, never an
+  // addend to it, so a KNOWN zero on this basis admits no unpriced row of this basis
+  // either; the unpriced count only stands in for rows-seen when rows-seen itself could not
+  // be reported. Both spellings are read — `unpricedCalls` from cli/src/peek/store.js,
+  // `unpriced_calls` from gateway/app/reporting.py — because both runtimes feed all four
+  // surfaces.
+  //
+  // `priced <= 0` is the third way a figure can fail to be a claim, and it is why reading
+  // `acc.calls` was seductive: foldRows initialises `saved` to 0, so a basis that priced
+  // NOTHING still carries a 0. That 0 is vacuous — it is the initial value, not a
+  // measurement — and rendering it as $0.00 would be the mirror defect of rendering it as
+  // an em dash. It is a real claim only when at least one row was actually priced. So
+  // zero-priced becomes WITHHELD when rows were seen and ABSENT when none were, and a
+  // MEASURED zero (priced rows that netted to nothing) still renders $0.00.
+  function claimState(o, side, v){
+    if (!o) return 'absent';
+    if (o.status === 'not_covered') return 'not_covered';
+    var acc = o[side];
+    var ev = o.events || {};
+    var e = ev[side];
+    var seen = (e !== undefined && e !== null && isFinite(Number(e)))
+      ? Number(e)
+      : ((acc && isFinite(Number(acc.calls))) ? Number(acc.calls) : null);
+    var raw = (o.unpricedCalls === undefined || o.unpricedCalls === null)
+      ? o.unpriced_calls : o.unpricedCalls;
+    var up = (raw === undefined || raw === null || !isFinite(Number(raw))) ? 0 : Number(raw);
+    var priced = (acc && isFinite(Number(acc.calls))) ? Number(acc.calls) : 0;
+    var sawRows = (seen === null) ? (up > 0) : (seen > 0);
+    var declined = (o.dollars_suppressed === true || o.status === 'suppressed'
+                    || v === null || v === undefined || !isFinite(Number(v))
+                    || priced <= 0);
+    if (sawRows && declined) return 'withheld';
+    if (!sawRows) return 'absent';
+    if (!acc) return 'absent';
+    return 'value';
+  }
+
+  // ONE copy per render surface — this file, gateway/app/report.html and cli/src/reports.js
+  // — kept TEXTUALLY IDENTICAL and pinned as such by cli/test/html.test.js, exactly like
+  // claimState() above.
+  //
+  // A withheld window's `notes` array carries ONE generic sentence from the store —
+  // "N of M call(s) in this window (P% of its tokens) are not in the price catalog" — which
+  // is TRUE for every withholding reason except one. `cache_state_indeterminate` withholds a
+  // row whose SERVED model is fully catalogued: switching models invalidates the caller's
+  // prompt cache, so the served arm can pay a cache CREATE exactly where the un-switched
+  // baseline would have paid a cache READ (or vice versa), and nothing recorded says which —
+  // the counterfactual is unknown, not the price. Repeating "not in the price catalog" for
+  // that row is not imprecise, it is false, and it is the kind of false claim this product
+  // exists to refuse to make.
+  //
+  // `w.unpriced` is the reason -> count breakdown both runtimes publish alongside `notes`
+  // (gateway/app/reporting.py, cli/src/peek/store.js). Reading it lets the note be reworded
+  // for the reason that actually applies, rather than trusting a single sentence to describe
+  // every row it was generated for.
+  function suppressionNotes(w) {
+    var raw = (w && w.notes) || [];
+    var by = (w && w.unpriced) || {};
+    var indet = Number(by.cache_state_indeterminate) || 0;
+    if (!indet) return raw;                       // nothing to reword
+    var total = 0;
+    for (var k in by) {
+      if (Object.prototype.hasOwnProperty.call(by, k)) total += Number(by[k]) || 0;
+    }
+    var plural = indet === 1 ? '' : 's';
+    var indetNote = indet + ' call' + plural + ' in this window switched the served model '
+      + 'with no recorded cache read: the model IS in the price catalog, but switching '
+      + 'models invalidates the prompt cache, so the counterfactual could have paid a cache '
+      + 'READ or a cache CREATE and nothing recorded says which. No dollar figure is claimed '
+      + 'for ' + (indet === 1 ? 'it' : 'them') + '.';
+    // Wholly cache-state-indeterminate: the catalog sentence is not merely imprecise here,
+    // it is FALSE (the model is catalogued), so it is replaced rather than kept alongside.
+    if (indet >= total) return [indetNote];
+    // Mixed: some rows in the same window really are uncatalogued, so the raw sentence stays
+    // true of THAT subset and is kept; the cache-state subset gets its own sentence instead
+    // of being folded into a catalog claim it would make false.
+    return raw.concat([indetNote]);
+  }
+
   // A cell that cannot be reported honestly renders a LABEL, never $0.00. Zero is a
   // measured result; "no claim is made" is not, and the two must not look alike.
   function basisCell(w, side, field){
@@ -1107,31 +1499,37 @@
         + 'period. That is not the same as saving $0.">not covered</td>';
     }
     var acc = w[side];
-    var note = esc((w.notes || []).join(' '));
+    var note = esc(suppressionNotes(w).join(' '));
     // EVENTS and TOKENS survive dollar suppression. When more than a fifth of a
     // window's tokens are unpriceable the DOLLARS are withheld — but the call counts
     // are exactly known and are not in doubt, and blanking them would understate what
     // actually happened on top of declining to price it.
     if (field === 'calls'){
-      // Prefer the window's own per-basis event count, which includes rows whose
-      // DOLLARS could not be derived. Falling back to the priced-accumulator `calls`
-      // alone made a window read "0 events" directly above a note saying "1 of 1
-      // call(s) in this window is not in the price catalog".
-      var evw = w.events || {};
-      var n = (evw[side] !== undefined && evw[side] !== null)
-        ? num(evw[side], 0)
-        : num(acc && acc.calls, 0);
-      if (!acc && !(evw[side] > 0)) return '<td class="num nodata">&mdash;</td>';
-      var up = num(w.unpriced_calls, 0);
+      // The window's own per-basis ROWS SEEN count, which includes rows whose DOLLARS
+      // could not be derived. Falling back to the priced-accumulator `calls` alone made a
+      // window read "0 events" directly above a note saying "1 of 1 call(s) in this window
+      // is not in the price catalog". Read through the SHARED basisEvents() so this cell,
+      // the composition column and the trend tooltips cannot answer differently.
+      var n = basisEvents(w, side);
+      if (n === null) return '<td class="num nodata">&mdash;</td>';
+      var up = unpricedOf(w);
       return '<td class="num"' + (up ? ' title="' + up + ' of these could not be priced"' : '')
         + '>' + n.toLocaleString('en-US') + '</td>';
     }
-    if (!acc || !acc.calls){
-      return '<td class="num nodata" title="No ' + side + ' rows in this window">&mdash;</td>';
+    // THE SIBLING TEST. This used to read `if (!acc || !acc.calls)` — ROWS PRICED — four
+    // lines below a `calls` branch that had already been switched to the shared
+    // basisEvents() (ROWS SEEN). One row therefore printed three mutually contradictory
+    // statements: an em dash titled "No measured rows in this window", an events cell
+    // reading 2, and a note beneath reading "100% of this window's tokens are not in the
+    // price catalog, so no dollar figure is claimed."
+    var v = acc ? (field === 'saved' ? acc.saved : acc.spent) : null;
+    var st = claimState(w, side, v);
+    if (st === 'withheld'){
+      return '<td class="num unpriceable" title="'
+        + (note || 'No dollar figure is claimed for this window.') + '">withheld</td>';
     }
-    var v = field === 'saved' ? acc.saved : acc.spent;
-    if (v === null || v === undefined){
-      return '<td class="num unpriceable" title="' + note + '">withheld</td>';
+    if (st === 'absent'){
+      return '<td class="num nodata" title="No ' + side + ' rows in this window">&mdash;</td>';
     }
     v = num(v, 0);
     var cls = field === 'saved' ? (v > 0 ? 'money-pos' : (v < 0 ? 'money-neg' : '')) : '';
@@ -1151,6 +1549,24 @@
     var notes = document.getElementById('ladderNotes');
     if (!body) return;
     var rows = (rep && rep.periods) || [];
+
+    // THE HEADING. `lifetime_window`'s own docstring records that the ladder sums to
+    // Lifetime ONLY when no window is dollars_suppressed: suppression is a per-window
+    // decision (>20% of THAT window's tokens unpriceable), so a window can withhold its
+    // dollars while Lifetime — computed independently over all the rows — still prices
+    // them. Over one real fixture the visible dollar column summed to 3.000000 while the
+    // Lifetime row in the SAME table read 3.060000, and this heading denied the 0.06.
+    // cli/src/reports.js caveats its heading off exactly this test; static markup here
+    // could not, and renderLadder never rewrote it.
+    var withholding = rows.filter(function(w){
+      return w && (w.dollars_suppressed === true || w.status === 'suppressed'); });
+    var headNote = document.getElementById('ladderHeadNote');
+    if (headNote){
+      headNote.innerHTML = withholding.length
+        ? 'disjoint windows &mdash; the COUNTS add up to lifetime; the dollar column does not'
+        : 'disjoint windows &mdash; these add up to lifetime';
+    }
+
     if (!rows.length){
       body.innerHTML = '<tr><td colspan="8" class="muted">No period data yet. '
         + 'Events appear after an end-of-chat tagline runs, or run '
@@ -1173,9 +1589,10 @@
       // Notes belong to their ROW, not to a pooled list under the table: with six
       // windows and a shared footnote block a reader cannot tell which period a
       // "100% of this window is unpriceable" sentence describes.
-      if ((w.notes || []).length){
+      var wNotes = suppressionNotes(w);
+      if (wNotes.length){
         html += '<tr class="rownote"><td colspan="8">'
-          + (w.notes || []).map(function(n){ return '&#8627; ' + esc(n); }).join('<br>')
+          + wNotes.map(function(n){ return '&#8627; ' + esc(n); }).join('<br>')
           + '</td></tr>';
       }
     });
@@ -1209,9 +1626,104 @@
     if (notes){
       // The footer explains the two bases and the coverage boundary — the things that
       // apply to the whole table. Per-window notes live on their own row.
+      //
+      // The withheld-additivity sentence is the SAME sentence cli/src/reports.js prints
+      // under its own caveated heading, word for word, so a reader who sees both surfaces
+      // is told the same thing about the same payload.
+      var parts = [];
+      if (withholding.length){
+        parts.push(withholding.length + ' window(s) above withhold their dollars. Their '
+          + 'priced rows still contribute to Lifetime, which is computed independently, so '
+          + 'the withheld rows cannot be added back and the column does not sum. Compare on '
+          + 'events or tokens, which are never withheld.');
+      }
       var cov = rep.coverage && rep.coverage.label;
-      notes.innerHTML = cov ? ('Coverage: ' + esc(cov)) : '';
+      if (cov) parts.push('Coverage: ' + esc(cov));
+      notes.innerHTML = parts.join('<br>');
     }
+  }
+
+  // ONE basis's saved figure for one comparison window, in the SAME three states — and the
+  // same words — the terminal renderer uses (cli/src/reports.js::pair):
+  //
+  //   a number  -> the figure, sign and all
+  //   ABSENT    -> no rows on this basis in this window: an em dash
+  //   WITHHELD  -> the window's dollars were suppressed: the amber "withheld" label
+  //
+  // The previous reader returned null for `status === 'suppressed'` on BOTH bases, and the
+  // caller then printed "not covered" — which asserts Cheaper was not watching, when in
+  // fact it was watching and simply cannot price the rows. Three distinct claims had been
+  // collapsed into the one that happens to be false. `not_covered` is decided by the
+  // WINDOW, in popRow(); it is never inferred from a missing basis.
+  function popSaved(w, side){
+    var acc = w && w[side];
+    var v = acc ? acc.saved : null;
+    var st = claimState(w, side, v);
+    if (st === 'not_covered'){
+      // Unreachable from popRow(), which branches on the WINDOW first — but a collapse
+      // here would be the same defect, so the claim is stated rather than folded.
+      return '<span class="notcovered" title="Cheaper was not watching during this period. '
+        + 'That is not the same as saving $0.">not covered</span>';
+    }
+    if (st === 'withheld'){
+      return '<span class="unpriceable" title="'
+        + esc(suppressionNotes(w).join(' ') || 'No dollar figure is claimed for this window.')
+        + '">withheld</span>';
+    }
+    if (st === 'absent') return '<span class="nodata">&mdash;</span>';
+    return money(Number(v));
+  }
+
+  // The same two columns for a CALL COUNT, mirroring cli/src/reports.js::nPair.
+  //
+  // `measured.calls + estimated.calls` is a cross-basis sum in a column where the
+  // separation is far less visually obvious than in the dollar column: "n=4" for a window
+  // carrying 3 measured and 1 estimated call names a single population of four that does
+  // not exist — printed directly above this card's own caption saying the two are never
+  // summed — and it is the number a reader uses to decide whether the dollars beside it
+  // are signal or noise. An ABSENT accumulator is a labelled non-number, never n=0.
+  //
+  // The number is ROWS SEEN, read through the SHARED basisEvents(). It used to read
+  // `acc.calls` — ROWS PRICED — which was the surviving half of the collapse that had just
+  // been fixed in the money column beside it. A window that is 100% unpriceable prices
+  // nothing on EITHER basis, so popSaved() correctly rendered
+  // `withheld / withheld` while this rendered `n=0 | 0` in the SAME row: one half asserting
+  // that rows exist whose dollars were deliberately not claimed, the other half asserting
+  // that no rows exist. renderLadder(), on the SAME tab over the SAME window, read
+  // basisEvents() and printed 3 and 1 for those very rows. And a WITHHELD window rendered
+  // the IDENTICAL count cell as a genuinely EMPTY one, so this column could not tell "4
+  // calls happened, none priceable" from "nothing happened".
+  //
+  // basisEvents() returns null rather than a fabricated 0, so a not-covered or too-new
+  // window — which carries no `events` block and no accumulators — stays a labelled
+  // non-number, while a covered window that genuinely saw nothing still states its
+  // measured 0.
+  function popN(w, side){
+    var n = basisEvents(w, side);
+    if (n === null) return '<span class="nodata">&mdash;</span>';
+    return String(n);
+  }
+
+  function popRow(label, w){
+    var txt;
+    if (!w){
+      txt = '<span class="nodata">&mdash;</span>';
+    } else if (w.status === 'not_covered'){
+      // "$0", "we weren't watching" and "we declined to price it" are THREE different
+      // claims. Only the first is a measurement, and this branch is the only one entitled
+      // to say the second.
+      txt = '<span class="notcovered" title="Cheaper was not watching during this period. '
+        + 'That is not the same as saving $0.">not covered</span>';
+    } else {
+      txt = '<span title="measured">' + popSaved(w, 'measured') + '</span>'
+        + ' <span class="muted">/</span> '
+        + '<span class="muted" title="estimated">' + popSaved(w, 'estimated') + '</span>';
+    }
+    // n is ALWAYS shown, on both sides and on both bases. A 400% jump on 3 events is
+    // noise, and a percentage without its denominator cannot be read as noise.
+    return '<div class="pop-row"><span>' + esc(label) + '</span>'
+      + '<span>' + txt + ' <span class="n" title="measured | estimated — never summed">'
+      + 'n=' + popN(w, 'measured') + ' | ' + popN(w, 'estimated') + '</span></span></div>';
   }
 
   function renderPop(rep){
@@ -1223,34 +1735,30 @@
     var html = '';
     keys.forEach(function(k){
       var c = cmps[k] || {};
-      var nOf = function(w){
-        if (!w) return 0;
-        return ((w.measured && w.measured.calls) || 0) + ((w.estimated && w.estimated.calls) || 0);
-      };
-      var savedOf = function(w){
-        if (!w || w.status === 'not_covered' || w.status === 'suppressed') return null;
-        return ((w.measured && w.measured.saved) || 0) + 0;
-      };
-      var estOf = function(w){
-        if (!w || w.status === 'not_covered' || w.status === 'suppressed') return null;
-        return ((w.estimated && w.estimated.saved) || 0) + 0;
-      };
-      var one = function(label, w){
-        var m = savedOf(w), e = estOf(w);
-        var txt = (m === null && e === null) ? '<span class="notcovered">not covered</span>'
-          : ('<span title="measured">' + (m === null ? '&mdash;' : money(m)) + '</span>'
-             + ' <span class="muted">/</span> '
-             + '<span class="muted" title="estimated">' + (e === null ? '&mdash;' : money(e)) + '</span>');
-        // n is ALWAYS shown, on both sides. A 400% jump on 3 events is noise, and a
-        // percentage without its denominator cannot be read as noise.
-        return '<div class="pop-row"><span>' + esc(label) + '</span>'
-          + '<span>' + txt + ' <span class="n">n=' + nOf(w) + '</span></span></div>';
-      };
       html += '<div class="pop-card"><div class="label">' + esc(k) + '</div>'
-        + one('this ' + k, c.current) + one('last ' + k, c.previous)
+        + popRow('this ' + k, c.current) + popRow('last ' + k, c.previous)
         + '<div class="pop-delta">measured / estimated &mdash; never summed</div></div>';
     });
     el.innerHTML = html;
+  }
+
+  // ONE basis's saved figure for one composition group. Same three states, same words as
+  // popSaved() above and as report.html::groupCell. `money(num(g.measured.saved, 0))`
+  // printed a confident $0.00 for a group whose dollars were WITHHELD.
+  function compSaved(g, side){
+    var acc = g && g[side];
+    var v = acc ? acc.saved : null;
+    var st = claimState(g, side, v);
+    if (st === 'not_covered'){
+      return '<span class="notcovered" title="Cheaper was not watching during this period. '
+        + 'That is not the same as saving $0.">not covered</span>';
+    }
+    if (st === 'withheld'){
+      return '<span class="unpriceable" title="No dollar figure is claimed for this '
+        + 'group.">withheld</span>';
+    }
+    if (st === 'absent') return '<span class="nodata">&mdash;</span>';
+    return money(Number(v));
   }
 
   function renderComposition(rows){
@@ -1259,27 +1767,69 @@
     rows = Array.isArray(rows) ? rows : [];
     if (!rows.length){ el.innerHTML = '<div class="empty-note">No events in this window.</div>'; return; }
     var html = '<div class="comp-row" style="border-bottom:1px solid var(--line);color:var(--muted);font-size:0.7rem;text-transform:uppercase;letter-spacing:0.04em">'
-      + '<span class="k">key</span><span class="m">measured</span><span class="e">estimated</span><span class="c">calls</span></div>';
+      + '<span class="k">key</span><span class="m">saved (measured)</span>'
+      + '<span class="e">saved (estimated)</span>'
+      + '<span class="c" title="rows seen on each basis, then the subset of them that '
+      + 'could not be priced">events m | e</span></div>';
+    var cell = function(n){
+      return n === null ? '<span class="nodata">&mdash;</span>' : n.toLocaleString('en-US');
+    };
     rows.slice(0, 20).forEach(function(g){
-      var m = (g.measured && g.measured.calls) ? money(num(g.measured.saved,0)) : '<span class="nodata">&mdash;</span>';
-      var e = (g.estimated && g.estimated.calls) ? money(num(g.estimated.saved,0)) : '<span class="nodata">&mdash;</span>';
-      // Call counts come from `events` (split by basis) with a flat `calls` fallback.
-      // Reading only `calls` rendered a hard 0 on every row — a column that looked
-      // populated and said nothing.
-      var ev = g.events || {};
-      // Include the UNPRICEABLE calls. A group exists because calls landed in it, so
-      // rendering "0 calls" next to an em-dash cost — while the row is visibly present —
-      // contradicts itself and reads as a bug. The money is withheld; the count is not.
-      var nCalls = num(g.calls, num(ev.measured, 0) + num(ev.estimated, 0))
-        + num(g.unpriced_calls, 0);
+      // Counts stay in TWO columns, per basis, exactly as the dollars do and exactly as
+      // the terminal renderer prints them (cli/src/reports.js: `pair(cell, 'calls')`).
+      var nm = basisEvents(g, 'measured');
+      var ne = basisEvents(g, 'estimated');
+      // `events` means ROWS SEEN and ALREADY INCLUDES the rows that could not be priced.
+      // reporting.py states the contract verbatim — "`unpriced_calls` stays a SUBSET
+      // counter of `events`, not an addend to it" — so the `+ unpriced_calls` that used to
+      // be added here counted EVERY exclusion twice: one measured llama-4-maverick row
+      // (events {measured:1, estimated:0}, unpriced_calls 1) rendered a calls column of 2,
+      // contradicting both its own tooltip and the ladder's Events (measured) cell on the
+      // same screen. The exclusion is still COUNTED and VISIBLE — beside the counts, with
+      // its own prefix, the way the terminal shows it (`+N unpriced`) — and counted ONCE.
+      var up = unpricedOf(g);
+      var title = 'rows seen: ' + (nm === null ? 'unknown' : nm) + ' measured, '
+        + (ne === null ? 'unknown' : ne) + ' estimated'
+        + (up ? ' — ' + up + ' of them could not be priced and are already counted in '
+                + 'those figures, never added to them' : '');
       html += '<div class="comp-row">'
         + '<span class="k" title="' + esc(g.key) + '">' + esc(g.key) + '</span>'
-        + '<span class="m">' + m + '</span>'
-        + '<span class="e muted">' + e + '</span>'
-        + '<span class="c" title="' + num(ev.measured,0) + ' measured + ' + num(ev.estimated,0)
-          + ' estimated">' + nCalls.toLocaleString('en-US') + '</span></div>';
+        + '<span class="m">' + compSaved(g, 'measured') + '</span>'
+        + '<span class="e muted">' + compSaved(g, 'estimated') + '</span>'
+        + '<span class="c" title="' + esc(title) + '">'
+        + cell(nm) + ' <span class="muted">|</span> ' + cell(ne)
+        + (up ? ' <span class="unpriced">+' + up.toLocaleString('en-US')
+                + ' unpriced</span>' : '')
+        + '</span></div>';
     });
     el.innerHTML = html;
+  }
+
+  // ONE basis's saved figure for one trend bucket, as a VALUE rather than as markup —
+  // the bar geometry needs the number, not a rendered cell. Identical in vocabulary and in
+  // its three states to cli/src/reports.js::savedOf, which the terminal renderer uses over
+  // the very same store.reportTrend() payload:
+  //
+  //   a number   -> a bar and a figure (signed; the sign is preserved)
+  //   undefined  -> ABSENT: no call on this basis in this bucket
+  //   null       -> WITHHELD: `saved` is null because the window's dollars were suppressed
+  //
+  // `(r.measured.saved || 0)` collapsed the last of those into a zero addend, so a bucket
+  // whose dollars were explicitly declined plotted as a measured zero and printed the
+  // OTHER basis's figure as if it were the bucket's total.
+  // It takes the POINT, not just the accumulator. Reading only the accumulator meant it
+  // could not see the point's own `dollars_suppressed` flag or its `events`, so a bucket
+  // that is 100% unpriceable — calls 0 on both bases, the shape reportTrend really emits —
+  // took the ABSENT branch and titled itself "no measured rows in this bucket" while
+  // renderLadder, on the SAME tab over the SAME rows, printed 2 measured events and 3
+  // unpriced.
+  function trendSaved(t, side){
+    var acc = t ? t[side] : null;
+    var v = acc ? acc.saved : null;
+    var st = claimState(t, side, v);
+    if (st === 'withheld') return null;                     // WITHHELD, by decision
+    if (st === 'value') return Number(v);                   // signed; sign preserved
+    return undefined;                                       // ABSENT / not covered
   }
 
   function renderTrend(rows){
@@ -1289,30 +1839,96 @@
     if (!rows.length){ el.innerHTML = '<div class="empty-note">No dated events yet.</div>'; return; }
     // Hand-rolled bars — the same precedent as the existing SVG sparkline. A charting
     // library would be the CLI's first dependency, and `dependencies: {}` is deliberate.
-    var vals = rows.map(function(r){
-      return ((r.measured && r.measured.saved) || 0) + ((r.estimated && r.estimated.saved) || 0);
-    });
-    var max = Math.max.apply(null, vals.map(Math.abs).concat([0.0001]));
-    var bars = '', axis = '';
-    rows.forEach(function(r, i){
-      var v = vals[i];
-      var h = Math.max(v === 0 ? 0 : 2, Math.round((Math.abs(v) / max) * 100));
-      var ev = r.events || {};
-      var n = num(r.calls, num(ev.measured, 0) + num(ev.estimated, 0));
-      bars += '<span class="tb' + (v < 0 ? ' neg' : '') + '" title="' + esc(r.bucket)
-        + ': ' + money(v) + ' over ' + n + ' call' + (n === 1 ? '' : 's') + '">'
-        + '<i style="height:' + h + '%"></i></span>';
+    //
+    // ONE scalar per bucket used to be `measured.saved + estimated.saved`, plotted as ONE
+    // bar, printed in ONE tooltip as one dollar figure over one summed call count, and
+    // scaled against a maximum taken over those same summed values — so the bar's HEIGHT
+    // carried the cross-basis sum as surely as its label did, in the panel whose own page
+    // footer says the two bases are never summed. The terminal renderer had already been
+    // split; this one had not, so the two implementations of one rule told different
+    // stories about a single payload ($3.00 over 4 calls here, "$2.88 | $0.12" there).
+    //
+    // The maximum for each basis is now taken over THAT BASIS ALONE, and only over the
+    // values that ARE numbers: an absent or withheld figure contributes no magnitude
+    // rather than a zero one, and the undated point is not on the date axis at all. A
+    // shared axis would assert a comparable magnitude across two bases that have none.
+    var maxOf = function(side){
+      var m = 0.0001;                       // a positive floor, never a summed maximum
+      rows.forEach(function(r){
+        if (r.undatable) return;
+        var v = trendSaved(r, side);
+        if (typeof v === 'number') m = Math.max(m, Math.abs(v));
+      });
+      return m;
+    };
+    var maxes = { measured: maxOf('measured'), estimated: maxOf('estimated') };
+
+    var barCell = function(r, side){
+      var v = trendSaved(r, side);
+      // The tooltip count is per basis too. "over 4 calls" for 3 measured plus 1 estimated
+      // is the same cross-basis count renderPop was printing as n=4.
+      var n = basisEvents(r, side);
+      var over = (n === null) ? 'call count unavailable'
+                              : (n.toLocaleString('en-US') + ' call' + (n === 1 ? '' : 's'));
+      var head = esc(r.bucket) + ' &middot; ' + side + ': ';
+      if (v === undefined){
+        return '<span class="tb nodata" title="' + head + 'no ' + side
+          + ' rows in this bucket"><b>&mdash;</b></span>';
+      }
+      if (v === null){
+        return '<span class="tb unpriceable" title="' + head + 'dollars withheld &mdash; '
+          + over + ', not in the price catalog"><b>withheld</b></span>';
+      }
+      // A genuine MEASURED zero draws no block, and says $0.00 in its own tooltip — which
+      // is the claim actually being made.
+      var h = Math.max(v === 0 ? 0 : 2, Math.round((Math.abs(v) / maxes[side]) * 100));
+      return '<span class="tb ' + side + (v < 0 ? ' neg' : '') + '" title="' + head
+        + money(v) + ' over ' + over + '"><i style="height:' + h + '%"></i></span>';
+    };
+
+    var bars = '', axis = '', undated = '';
+    rows.forEach(function(r){
+      if (r.undatable){
+        // The trailing `undated` point carries rows that could be placed on NO day — no
+        // usable instant and no usable frozen day. `deriveRow`/`derive_row` refuse to
+        // price exactly those, so their saved is 0 because nothing was claimed, not
+        // because zero was measured. A bar under a DATE axis is an affirmative claim
+        // about a day, so this point is labelled and never plotted — and it used to be
+        // plotted, at $0.00, under an axis label reading "ed".
+        var un = unpricedOf(r);
+        undated += '<div class="trend-undated"><span class="unpriceable">not dated</span> '
+          + '&middot; ' + (un === null
+              ? '<span class="nodata">call count unavailable</span>'
+              : esc(un.toLocaleString('en-US') + ' call(s)'))
+          + ' attributed to no day, unpriced.</div>';
+        return;
+      }
+      // TWO bars per bucket, one per basis, each scaled against its own maximum.
+      bars += '<span class="tbg">' + barCell(r, 'measured') + barCell(r, 'estimated')
+        + '</span>';
       // MM-DD, not DD: a bare day number is ambiguous the moment the series crosses a
       // month, and this series routinely spans a year.
       axis += '<span title="' + esc(r.bucket) + '">'
         + esc(String(r.bucket).slice(5).replace('-', '/')) + '</span>';
     });
-    // One focusable scroll region wrapping BOTH, so the bars and their labels can never
-    // scroll out of step with each other.
-    el.innerHTML = '<div class="trend-scroll" tabindex="0" role="region" '
+
+    // Every point was undated. Saying "No dated events yet." alone would be true but would
+    // silently drop the rows that DO exist, so the labelled point is kept beside it.
+    if (!bars){
+      el.innerHTML = '<div class="empty-note">No dated events yet.</div>' + undated;
+      return;
+    }
+    // One focusable scroll region wrapping BOTH the bars and their labels, so the two can
+    // never scroll out of step with each other.
+    el.innerHTML = '<div class="basis-legend">'
+      + '<span><i class="sw measured"></i>measured</span>'
+      + '<span><i class="sw estimated"></i>estimated</span>'
+      + '<span class="muted">each bar is scaled against its OWN basis; the two are never '
+      + 'summed</span></div>'
+      + '<div class="trend-scroll" tabindex="0" role="region" '
       + 'aria-label="Savings trend, scrollable">'
       + '<div class="trend">' + bars + '</div>'
-      + '<div class="trend-axis">' + axis + '</div></div>';
+      + '<div class="trend-axis">' + axis + '</div></div>' + undated;
   }
 
   function loadReports(force){
@@ -1496,12 +2112,29 @@
       el.innerHTML = '<div class="empty-note">Run <code>cheaper peek</code> to see your historical savings.</div>';
       return;
     }
+    // `available` is NOT a validation. app.py returns the contents of ~/.cheaper/peek.json
+    // VERBATIM; only a read/parse exception yields available:false. A truncated write, a
+    // scan that produced no totals, and an older peek.json schema therefore ALL arrive here
+    // with `available` truthy and `totals` partial or absent — and the guard above lets
+    // every one of them through. So each figure below reads through the SAME three-state
+    // reader the dim cards use. moneyBaselineValue()'s historical branch already calls
+    // these exact shapes MISSING, and one page may not render "— / no data yet" in the
+    // Money card while this panel renders a green "$0.00" from the one shared lastPeek.
     var totals = p.totals || {};
-    var savedPct = pctFrac(totals.savedPct);
-    var html = '<div class="peek-headline">Could have saved <span class="green">' + money(totals.dollarsSaved) + '</span>' +
-      ' (' + savedPct.toFixed(1) + '% off)';
-    if (totals.annualizedSaved !== undefined && totals.annualizedSaved !== null){
-      html += ' &middot; <span class="muted">annualized ~' + money(totals.annualizedSaved) + '</span>';
+    var savedInfo = measuredValue(totals.dollarsSaved);
+    var pctInfo = measuredValue(totals.savedPct);
+    var annInfo = measuredValue(totals.annualizedSaved);
+    var html = '<div class="peek-headline">Could have saved '
+      + (savedInfo.missing
+          ? '<span class="nodata">&mdash;</span> <span class="muted">no data yet</span>'
+          : '<span class="green">' + money(savedInfo.value) + '</span>')
+      // "(X% off)" QUALIFIES a percentage that was measured. With none measured there is
+      // nothing for it to qualify, so the clause is dropped outright rather than filled
+      // with 0.0% — which beside a REAL total reads "Could have saved $5.00 (0.0% off)",
+      // one sentence contradicting itself.
+      + (pctInfo.missing ? '' : ' (' + pctFrac(pctInfo.value).toFixed(1) + '% off)');
+    if (!annInfo.missing){
+      html += ' &middot; <span class="muted">annualized ~' + money(annInfo.value) + '</span>';
     }
     html += '</div>';
 
@@ -1516,7 +2149,16 @@
         }
         html += '<span class="hlabel">' + esc(h.label || h.key || 'unknown') + '</span>';
         html += '<span class="hcalls">' + num(h.calls,0).toLocaleString('en-US') + ' calls</span>';
-        html += '<span class="hsaved">' + money(h.dollarsSaved) + '</span>';
+        // A harness row with no dollarsSaved is an ABSENT figure sitting inside a
+        // COMPARISON: "Claude Code  10 calls  $0.00" printed beside a real "Codex  3 calls
+        // $1.25" fabricates a measured result for the row that has none, and the reader
+        // ranks the two against each other.
+        var hs = measuredValue(h.dollarsSaved);
+        html += '<span class="hsaved">'
+          + (hs.missing
+              ? '<span class="nodata">&mdash;</span> <span class="muted">no data yet</span>'
+              : money(hs.value))
+          + '</span>';
         html += '</div>';
       });
       html += '</div>';
@@ -1533,9 +2175,18 @@
     if (opps.length){
       html += '<div style="margin-top:6px;"><div class="label" style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:6px;">Biggest opportunities</div>';
       opps.forEach(function(o){
+        // Same rule as the harness rows: these five are RANKED against one another, so an
+        // outcome with no `saved` may not borrow a $0.00 it never measured. (The sort key
+        // above still reads the raw value through num() — that is arithmetic, and the sign
+        // is preserved there; suppression happens HERE, at render, with a label.)
+        var oSaved = measuredValue(o.saved);
         html += '<div class="opp">' +
           '<span class="route">' + esc(o.from || '?') + ' &rarr; ' + esc(o.to || '?') + '</span>' +
-          ' &nbsp;<span class="saved">' + money(o.saved) + '</span>' +
+          ' &nbsp;<span class="saved">'
+            + (oSaved.missing
+                ? '<span class="nodata">&mdash;</span> <span class="muted">no data yet</span>'
+                : money(oSaved.value))
+            + '</span>' +
           '<div class="meta">' + esc(o.source || '') + (o.reason ? ' &mdash; ' + esc(truncate(o.reason, 90)) : '') + '</div>' +
           '</div>';
       });
@@ -1984,6 +2635,12 @@
     if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
     else document.documentElement.removeAttribute('data-theme');
     paintThemeButton();
+    // --green just changed with the theme, and renderSpark() reads it at render time
+    // (see the comment on themeGreen() above) rather than subscribing to the cascade —
+    // so a chart painted once at load and never revisited here would keep showing the
+    // OLD theme's swatch after every toggle, silently reintroducing the exact
+    // wrong-theme-color bug themeGreen() exists to fix, just delayed to the second paint.
+    if (lastData) renderSpark(lastData);
   }
   (function initTheme(){
     var saved = null;
@@ -2000,7 +2657,14 @@
     try {
       var mq = window.matchMedia('(prefers-color-scheme: light)');
       var onChange = function(){
-        if (!document.documentElement.hasAttribute('data-theme')) paintThemeButton();
+        if (!document.documentElement.hasAttribute('data-theme')){
+          paintThemeButton();
+          // Same reasoning as applyTheme() above: the OS flip just changed --green
+          // (nothing stamped data-theme, so @media (prefers-color-scheme) alone moved
+          // it), and the spark chart must follow rather than keep the swatch it was
+          // first painted with.
+          if (lastData) renderSpark(lastData);
+        }
       };
       if (mq.addEventListener) mq.addEventListener('change', onChange);
       else if (mq.addListener) mq.addListener(onChange);

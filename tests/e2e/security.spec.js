@@ -115,13 +115,55 @@ test.describe('gateway authentication', () => {
 
   test('the websocket refuses an un-tokened client and accepts a tokened one',
     async ({ page, token, baseURL }) => {
+      // BOTH halves run from a page THIS GATEWAY SERVED, and that is load-bearing.
+      //
+      // /ws is origin-bound on top of the credential check (app.py's `if not
+      // auth.origin_is_self(websocket) or not auth.check(websocket)`), because a
+      // WebSocket is exempt from CORS and is the one route that would hand a
+      // cross-origin caller a live stream of the whole usage record. A page the suite
+      // never navigated sits on `about:blank`, whose origin is OPAQUE — Chromium sends
+      // `Origin: null`, the same thing a sandboxed iframe or a file:// page sends —
+      // and the gateway refuses it (pinned in gateway/tests/test_auth.py::
+      // test_websocket_refuses_a_null_origin). Starlette surfaces a close() made
+      // BEFORE accept() as a 403 on the handshake, so this test used to fail its
+      // tokened half against a completely healthy gateway. Measured, on this browser:
+      //
+      //   page.url() with no goto ........ about:blank   location.origin -> "null"
+      //     ws?token=<valid> ............. closed-1006          <- the gate, correctly
+      //   after goto('/dashboard') (401) .. origin -> http://localhost:<port>
+      //     ws (no credential) ........... closed-1006
+      //     ws?token=<valid> ............. OPENED
+      //   after goto('/dashboard?token=') . cookie cheaper_token present
+      //     ws (cookie only) ............. OPENED         <- what dashboard.html builds
+      //
+      // and, at the raw-handshake layer against the same app:
+      //   Origin: null            + ?token=  -> 403     Origin: self + ?token= -> 101
+      //   Origin: self            + cookie   -> 101     Origin: localhost:9999
+      //                                                   + cookie             -> 403
+      //   no Origin, header token            -> 101     no credential          -> 403
+      //
+      // So: do not "simplify" this back to a bare page.evaluate on about:blank. The
+      // null-origin refusal is a FEATURE, and it is asserted where it can be asserted
+      // without ambiguity — server-side, in test_auth.py. Here it would be untestable
+      // rather than merely awkward: from a null origin nothing is ever accepted, so
+      // there is no positive control, and a client-side abort would be indistinguishable
+      // from the server's refusal — a test that passes without the gate existing.
+      const wsBase = baseURL.replace('http', 'ws');
+
+      // A page on the gateway's own origin that was NEVER authenticated: /dashboard
+      // answers 401 with the auth wall and, per the test above, issues no cookie. So
+      // this is a same-origin browser holding no credential at all.
+      const wall = await page.goto('/dashboard');
+      expect(wall.status()).toBe(401);
+      expect(await page.evaluate(() => sessionStorage.getItem('cheaper.token'))).toBeNull();
+
       const closed = await page.evaluate((url) => new Promise((res) => {
         const ws = new WebSocket(url + '/ws');
         ws.onclose = (e) => res(e.code);
         ws.onmessage = () => res('GOT-DATA');
         ws.onopen = () => res('OPENED');
         setTimeout(() => res('TIMEOUT'), 5000);
-      }), baseURL.replace('http', 'ws'));
+      }), wsBase);
       // The gateway REJECTS the handshake rather than closing an accepted socket, so no
       // WebSocket is ever established and not one frame can leak. A browser reports
       // that as 1006 (abnormal closure) because there is no close frame to read a code
@@ -132,32 +174,49 @@ test.describe('gateway authentication', () => {
       expect([1006, 1008], `an un-tokened socket must not open (got ${closed})`)
         .toContain(closed);
 
+      // Same page, same origin, same browser — the ONLY thing that changed is the
+      // credential. That is what makes the refusal above non-vacuous: if the handshake
+      // were being aborted before it ever reached the gateway, this would fail too.
       const got = await page.evaluate(([url, t]) => new Promise((res) => {
         const ws = new WebSocket(url + '/ws?token=' + t);
         ws.onmessage = (e) => { try { res(JSON.parse(e.data).type); } catch { res('BAD'); } };
         ws.onclose = (e) => res('closed-' + e.code);
         setTimeout(() => res('TIMEOUT'), 5000);
-      }), [baseURL.replace('http', 'ws'), token]);
+      }), [wsBase, token]);
       expect(got).toBe('metrics');
+
+      // …and the socket the REAL dashboard opens, which is none of the above: after an
+      // authenticated load the page has scrubbed the token out of its own URL, so
+      // dashboard.html's wsUrl() builds a bare ws://location.host/ws and the HttpOnly
+      // cookie is the only credential it carries. Regressing the origin binding into
+      // "cookies are never enough for /ws" would kill the live view for every real
+      // user while leaving both assertions above green.
+      const loaded = await page.goto(`/dashboard?token=${token}`);
+      expect(loaded.status()).toBe(200);
+      const live = await page.evaluate((url) => new Promise((res) => {
+        const ws = new WebSocket(url + '/ws');
+        ws.onmessage = (e) => { try { res(JSON.parse(e.data).type); } catch { res('BAD'); } };
+        ws.onclose = (e) => res('closed-' + e.code);
+        setTimeout(() => res('TIMEOUT'), 5000);
+      }), wsBase);
+      expect(live, 'the cookie-only socket dashboard.html actually opens must connect')
+        .toBe('metrics');
     });
 });
 
 test.describe('injection boundaries', () => {
-  test('an adversarial model id renders as TEXT, never as markup', async ({ page, request, token }) => {
-    // `reason`, `source` and model ids are client-controlled and reach the Logs table.
-    const payload = '<img src=x onerror=window.__XSS__=1>';
-    await request.post('/v1/messages', {
-      headers: { 'x-api-key': 't', 'anthropic-version': '2023-06-01',
-                 'x-cheaper-source': payload },
-      data: { model: payload, max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] },
-      failOnStatusCode: false,
-    });
-    await page.goto(`/dashboard?token=${token}#logs`);
-    await page.waitForLoadState('networkidle');
-    expect(await page.evaluate(() => window.__XSS__)).toBeUndefined();
-    expect(await page.locator('img[src="x"]').count()).toBe(0);
-  });
-
+  // The one injection-boundary test that POSTs to /v1/messages — the mutating half of
+  // this describe block — lives in tests/e2e/zz-injection-mutates-store.spec.js, NOT
+  // here. See that file's header comment for why: it permanently adds one row to the
+  // gateway's shared SQLite store for the rest of the run (there is exactly one gateway
+  // process and one DB across the whole suite — see playwright.config.js's webServer and
+  // its "keep writes serialised" comment), which changes row counts and page heights
+  // that OTHER specs depend on staying exactly as seed.js left them — most visibly
+  // visual.spec.js's pixel-diffed #logs and #monitor screenshots, which grew by one
+  // table row's worth of height (1440x1425 -> 1440x1472 on #logs) and failed the
+  // moment this test ran before them.
+  // These two remain here because neither one mutates anything — both are plain GETs
+  // against an export endpoint that already exists in the seeded data.
   test('the CSV export guards spreadsheet formulas', async ({ request, token }) => {
     const r = await request.get('/api/v1/export?format=csv', {
       headers: { 'x-cheaper-token': token },

@@ -84,8 +84,54 @@ function localRows(o) {
     });
   }
   out.sort((a, b) => b.ts - a.ts);
+  // `readStats` travels WHOLE — no hand-picked subset. The register's job is to account
+  // for every row, so the reader's own refusals (`unreadable`, `corrupt`, `bad`,
+  // `partialTail`, `futureSchema`) are part of the answer, not diagnostics beside it.
+  // `storeHoles` below renders them; a counter published here and rendered nowhere is
+  // invisible to everyone who does not pass --json.
   return { rows: out.slice(0, o.limit), total: out.length,
            source: 'local-store', store: { readStats, foldStats } };
+}
+
+// Segments the reader could not account for, as printable lines.
+//
+// events.js::readSegment counts `unreadable` (the bytes could not be obtained) and
+// `corrupt` (the bytes were read but the gzip did not inflate) precisely so a truncated
+// read cannot pass for a complete one — and `readAll` increments `segments` BEFORE it
+// attempts the read, so without these lines a month nobody could open is indistinguishable
+// from a month with no calls. This register prints "showing N of M": both N and M are
+// derived only from segments that WERE read, so an unaccounted segment makes both of them
+// understatements of an unknown size. That has to be said on the same screen.
+//
+// Empty when the rows came from the gateway: the local store was never read, so there is
+// nothing to report about it, and inventing a clean bill of health for a file we did not
+// open would be its own false claim.
+function storeHoles(data) {
+  const st = (data && data.store && data.store.readStats) || null;
+  if (!st) return [];
+  const out = [];
+  if (st.unreadable) {
+    out.push(`${st.unreadable} segment(s) could NOT BE READ (permissions or an incomplete `
+      + 'copy). Their calls are absent from this register and from the counts below; how '
+      + 'many there were is unknown.');
+  }
+  if (st.corrupt) {
+    out.push(`${st.corrupt} sealed segment(s) are CORRUPT (the archive did not inflate). `
+      + 'Their calls are absent from this register and from the counts below; how many '
+      + 'there were is unknown.');
+  }
+  if (st.bad) {
+    out.push(`${st.bad} line(s) could not be parsed and were skipped.`);
+  }
+  if (st.futureSchema) {
+    out.push(`${st.futureSchema} event(s) were written by a NEWER Cheaper and are not `
+      + 'counted. Upgrade: npm i -g cheaper');
+  }
+  if (st.partialTail) {
+    out.push(`${st.partialTail} segment(s) end in a partial line (a chat is still writing) `
+      + '— skipped, not lost.');
+  }
+  return out;
 }
 
 async function fetchRows(o) {
@@ -105,10 +151,18 @@ function renderTable(data) {
   console.log('  ' + c.amber('cheaper logs') + c.dim('  — every routed call, priced at its own day and SKU'));
   console.log('  ' + c.dim(`source: ${data.source}` + (data.gatewayNote ? ` (${data.gatewayNote})` : '')));
   console.log('');
+  // Printed BEFORE the table and before the empty state: "No events in this range" is an
+  // affirmative claim, and a segment the reader could not open is the evidence that would
+  // refute it. See storeHoles().
+  const holes = storeHoles(data);
+  for (const h of holes) console.log('  ' + c.amber(h));
+  if (holes.length) console.log('');
   if (!rows.length) {
     // The empty state matters: a measured-only table renders blank on a machine that
     // has never proxied anything, and a blank table reads as "you saved nothing".
-    console.log('  ' + c.dim('No events in this range.'));
+    console.log('  ' + (holes.length
+      ? c.dim('No READABLE events in this range — see the unaccounted segment(s) above.')
+      : c.dim('No events in this range.')));
     console.log('  ' + c.dim('  measured rows need the gateway in the request path:'));
     console.log('     ' + c.bold('export ANTHROPIC_BASE_URL=http://localhost:8787'));
     console.log('  ' + c.dim('  estimated rows appear after an end-of-chat tagline runs, or run:'));
@@ -165,7 +219,11 @@ function renderTable(data) {
   const total = data.count !== undefined ? data.count : data.total;
   const totalTxt = typeof total === 'string' ? total
     : (total === undefined || total === null ? '?' : total.toLocaleString('en-US'));
-  console.log('  ' + c.dim(`showing ${shown} of ${totalTxt}`));
+  // Both `shown` and `total` are counted over the segments that WERE read, so an
+  // unaccounted segment makes each of them a floor rather than a count. Saying "of 412"
+  // beside a segment nobody could open asserts a completeness the reader does not have.
+  console.log('  ' + c.dim(`showing ${shown} of ${totalTxt}`)
+    + (holes.length ? c.amber('  (of the segments that could be read — see above)') : ''));
   console.log('  ' + c.dim('Full audit export:  ') + c.bold('cheaper export --format csv --out audit.csv'));
   console.log('');
 }
@@ -179,4 +237,8 @@ async function run(argv = [], opts = {}) {
   renderTable(data);
 }
 
-module.exports = { run, parseArgs, localRows };
+// `storeHoles` and `renderTable` are exported for the SAME reason reports.js exports
+// `renderReport`: so cli/test/peek.test.js can drive the REAL renderer over a fixture
+// instead of re-implementing its rules. A second implementation of "what counts as an
+// unaccounted segment" is exactly the drift these counters exist to prevent.
+module.exports = { run, parseArgs, localRows, renderTable, storeHoles };
