@@ -3589,13 +3589,28 @@ test('dashboard.html: toggling the theme re-renders the spark chart, not only fi
 // Every basis that is NOT 'measured', including the two ways the block can fail to say
 // anything useful. All five must render identically as far as the FIGURE is concerned:
 // the reader's takeaway ("I cannot quote this") is the same in every one of them.
+//
+// The counts mirror the store this workstream was commissioned against: 94 rows, four of
+// which produced output and carry the entire figure, and NONE of which carried
+// provider-reported usage. Note zero_token_calls (the contract's name: in + out == 0) is
+// 0 there and zero_output_calls is 90 — those probes each carry 2-13 INPUT tokens, so
+// they are priced and round to $0.00 rather than being tokenless. The two counts are not
+// interchangeable and the renderer must not treat them as if they were.
 const UNMEASURED_CASES = [
   ['unmeasured', { measured_calls: 0, unmeasured_calls: 94, dollars_basis: 'unmeasured',
-                   priced_calls: 4, zero_token_calls: 90 }],
+                   priced_calls: 4, zero_token_calls: 0,
+                   examined_calls: 94, zero_output_calls: 90, output_bearing_calls: 4 }],
   ['mixed', { measured_calls: 2, unmeasured_calls: 92, dollars_basis: 'mixed',
-              priced_calls: 4, zero_token_calls: 90 }],
+              priced_calls: 4, zero_token_calls: 0,
+              examined_calls: 94, zero_output_calls: 90, output_bearing_calls: 4 }],
   ['none', { measured_calls: 0, unmeasured_calls: 94, dollars_basis: 'none',
              priced_calls: 0, zero_token_calls: 94 }],
+  // A gateway that publishes ONLY the five contract names — no `examined_calls`, no
+  // `zero_output_calls`, no `headline`. Everything beyond the contract is optional and
+  // the statement must still be correct, just shorter.
+  ['the contract names and nothing else',
+    { measured_calls: 0, unmeasured_calls: 94, dollars_basis: 'unmeasured',
+      priced_calls: 4, zero_token_calls: 0 }],
   // An older gateway that predates the contract. This is the DEFAULT state of every
   // installed copy the day this ships, so it is the case that must not degrade to a
   // confident number.
@@ -3662,6 +3677,40 @@ test('dashboard.html: a MEASURED basis leaves every figure unqualified', () => {
   const d = moneyDim(dims('requested_default', payload, null));
   assert.strictEqual(d.value, '$80.52');
   assert.ok(!/approx/.test(d.card), 'a measured spend line was qualified as "about"');
+});
+
+test('dashboard.html: the downgrade rate states the population it was computed over', () => {
+  // 67.0% over 94 rows, 90 of which produced no completion at all, reads as "two thirds
+  // of my work was routed cheaper" and is not that. metrics.py publishes the same rate
+  // over calls that actually produced output BESIDE the existing key — it may not
+  // redefine it, because the cross-runtime parity gates compare that one — so this card
+  // states both and names each population.
+  const render = cardsDriver();
+  const html = render({ total: 94, downgrade_rate: 67.0, measurement: Object.assign(
+    {}, UNMEASURED_CASES[0][1],
+    { downgrade_rate_output_bearing: 25.0, output_bearing_calls: 4 }) });
+  const card = statCard(html, 1);
+  assert.strictEqual(card.value, '67.0%', 'the existing rate was redefined rather than framed');
+  assert.match(text(card.card), /of every intercepted call/,
+    'the headline rate does not name its own population');
+  assert.match(text(card.card), /25\.0% over the 4 call\(s\) that produced output/,
+    'the output-bearing rate is not stated beside it');
+
+  // NULL, never 0.0, when nothing produced output: no population, no rate. "0.0% of
+  // completed work was downgraded" is a claim about a population that does not exist.
+  const none = render({ total: 94, downgrade_rate: 67.0, measurement: {
+    dollars_basis: 'unmeasured', priced_calls: 0,
+    downgrade_rate_output_bearing: null, output_bearing_calls: 0 } });
+  const nc = statCard(none, 1);
+  assert.ok(!/0\.0% over/.test(text(nc.card)),
+    'a rate was fabricated for a population with no members');
+  assert.match(text(nc.card), /no call produced output/,
+    'the empty population is not labelled');
+
+  // A gateway that publishes neither says nothing extra, rather than inventing a frame.
+  const bare = render({ total: 94, downgrade_rate: 67.0 });
+  assert.ok(!/produced output/.test(text(statCard(bare, 1).card)),
+    'a population was described for a gateway that reported none');
 });
 
 test('dashboard.html: an ABSENT figure is never qualified — "about —" claims nothing', () => {
@@ -3732,13 +3781,46 @@ test('dashboard.html: the basis line states the basis on every payload, includin
   // ITEM (b), second half: the Logs tab's wall of $0.00 is EXPLAINED rather than left to
   // look like a broken pricing path that someone then "fixes" by inventing a number.
   const zeros = render({ measurement: UNMEASURED_CASES[0][1] });
-  assert.match(text(zeros.innerHTML), /90 recorded calls returned no output tokens/,
-    'the zero-token rows are not explained anywhere');
+  assert.match(text(zeros.innerHTML), /90 of 94 recorded calls returned no output tokens/,
+    'the zero-output rows are not explained anywhere, or lost their denominator');
   assert.match(text(zeros.innerHTML), /which is the correct figure for them/,
-    'the zero-token explanation does not say the $0.00 is correct');
+    'the zero-output explanation does not say the $0.00 is correct');
   // …and it is not asserted when the gateway did not report it.
   assert.ok(!/returned no output tokens/.test(text(bare.innerHTML)),
-    'a zero-token claim was made for a gateway that published no such count');
+    'a zero-output claim was made for a gateway that published no such count');
+
+  // THE TWO COUNTS ARE NOT INTERCHANGEABLE. `zero_token_calls` (the contract name) means
+  // in + out == 0; `zero_output_calls` means a call that had input, WAS priced, and
+  // rounds to $0.00. On the store this was commissioned against the first is 0 and the
+  // second is 90, so a renderer that read the contract name would have printed nothing at
+  // the exact moment the explanation was needed — and a renderer that printed the
+  // contract count with the output wording would have described 90 priced calls as
+  // tokenless.
+  const tokenless = render({ measurement: { dollars_basis: 'unmeasured', priced_calls: 4,
+                                            examined_calls: 94, zero_token_calls: 7 } });
+  assert.match(text(tokenless.innerHTML), /7 of 94 recorded calls carried no tokens at all/,
+    'the contract-name count is not stated when it is the only one published');
+  assert.ok(!/returned no output tokens/.test(text(tokenless.innerHTML)),
+    'a tokenless count was described as "returned no output tokens", which is a different '
+    + 'and larger population');
+
+  // THE GATEWAY'S OWN ACKNOWLEDGEMENT, verbatim. metrics.py calls it "the acknowledgement
+  // a renderer MUST carry when it prints an unsubstantiated figure" and parametrises it
+  // by exact counts; restating it here in different words is how the two halves of one
+  // fix end up describing the same population two ways.
+  const ACK = 'This figure is arithmetic over 4 priced call(s), none of which carried '
+    + 'provider-reported usage.';
+  const acked = render({ measurement: Object.assign({}, UNMEASURED_CASES[0][1],
+    { headline: { saved: null, unsubstantiated_saved: 80.52,
+                  withheld_reason: 'unmeasured_usage', acknowledgement: ACK } }) });
+  assert.ok(text(acked.innerHTML).includes(ACK),
+    'the gateway published an acknowledgement and the page did not print it');
+  // …and it is ESCAPED. It is payload data, and the only string on this line that did not
+  // originate in dashboard.html.
+  const hostile = render({ measurement: { dollars_basis: 'unmeasured', priced_calls: 1,
+    headline: { acknowledgement: '<img src=x onerror=alert(1)>' } } });
+  assert.ok(!/<img/.test(hostile.innerHTML),
+    'the acknowledgement was injected as markup instead of escaped');
 });
 
 // ---------------------------------------------------------------------------
@@ -3837,6 +3919,19 @@ test('dashboard.html: the connection indicator tells live, connected-idle and '
     //    quiet, and saying "no traffic for 0s" would be nonsense.
     s.push({ freshness: { newest_ts: null, age_seconds: null, live: false } });
     assert.strictEqual(s.read().text, 'connected — nothing recorded yet');
+
+    // …and the window `live` is judged against comes from the PAYLOAD when the gateway
+    // publishes it, so this page cannot hold a second, drifting copy of that number.
+    // A gateway with a 10-minute window keeps a 5-minute-old row live; the local
+    // 120-second fallback would have called the same row stale.
+    s.push({ freshness: { newest_ts: now - 300, age_seconds: 300, live: true,
+                          window_seconds: 600 } });
+    assert.strictEqual(s.read().text, 'live',
+      'the page overruled the gateway’s own liveness window with its local fallback');
+    s.push({ freshness: { newest_ts: now - 300, age_seconds: 300, live: true,
+                          window_seconds: 60 } });
+    assert.strictEqual(s.read().text, 'connected — no traffic for 5m',
+      'a row outside the gateway’s OWN published window was still called live');
 
     // 5. A gateway that publishes no freshness block at all. "Connected" is the whole of
     //    what is known about it, and inferring "live" from a completed handshake is

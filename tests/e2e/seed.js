@@ -536,7 +536,17 @@ from metrics import Metrics
 m = Metrics(db_path=${JSON.stringify(db)})
 now = ${Math.floor(now / 1000)}
 rows = [
-  ('haiku','claude-haiku-4-5','claude-opus-5','opus','simple lookup','claude-code',900,1200,200,'body','req_e2e_1',210000,0,0),
+  # usage_source NULL, deliberately. This is the state of EVERY row on the machine that
+  # produced the "unmeasured dollars published as measured" defect: nothing on that
+  # gateway had ever carried provider-reported usage, so its headline saving was
+  # reconstructed from what each request asked for rather than read off the bill.
+  #
+  # NULL is priceable (see metrics.row_is_priceable — only 'estimate' and a non-2xx status
+  # are excluded), so this row still contributes exactly the same dollars it did as
+  # 'body'. What it changes is the BASIS: with one priced row unmeasured, summary()'s
+  # dollars_basis is "mixed" rather than "measured", which is the state the dashboard has
+  # to qualify. A fixture that is 100% 'body' can only ever exercise the flattering path.
+  ('haiku','claude-haiku-4-5','claude-opus-5','opus','simple lookup','claude-code',900,1200,200,None,'req_e2e_1',210000,0,0),
   ('haiku','claude-haiku-4-5','claude-opus-5','opus','simple lookup','claude-code',1100,900,200,'body','req_e2e_2',180000,0,0),
   ('sonnet','claude-sonnet-5','claude-opus-5','opus','moderate refactor','claude-code',30000,9000,200,'body','req_e2e_3',800000,20000,0),
   ('opus','claude-opus-5','claude-opus-5','opus','correctness-critical','claude-code',40000,3000,200,'body','req_e2e_4',900000,30000,0),

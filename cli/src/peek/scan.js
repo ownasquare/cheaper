@@ -171,6 +171,24 @@ function scanHarness(def, opts) {
     out.bySource[r.source === 'subagent' ? 'subagent' : 'user']++;
     if (est.actualTier) out.routedFrom[est.actualTier]++;
     if (est.effTier) out.routedTo[est.effTier]++;
+    // `downgradable` AND THE DOLLARS NOW COUNT DIFFERENT POPULATIONS, KNOWINGLY.
+    //
+    // `est.downgraded` is strictly about TIER RANK. The dollars above are about the SERVED
+    // MODEL, and since estimateCall stopped pricing a same-tier route as no route at all
+    // those two stopped being the same set: a caller on `claude-opus-4` asking a security
+    // question is served `claude-opus-5` — same opus tier, so no downgrade, but $90.00 ->
+    // $30.00 on a 1M/1M call. That row adds to `dollarsSaved` and NOT to `downgradable`.
+    //
+    // The consequence is a real reconciliation gap on the surfaces that print the two side
+    // by side (render.js:172 and :210 put "N downgradable" next to "you'd save $X"): X can
+    // no longer be derived from N, and X can be non-zero while N is 0. Both numbers are
+    // TRUE — one counts tier moves, the other counts dollars — but a reader is entitled to
+    // reconcile them, so the wording or the counter has to change.
+    //
+    // NOT DONE HERE. Widening `downgradable` to mean "substituted" would change a headline
+    // COUNT that every surface and several tests already read, on the back of a change
+    // whose remit was the per-call arithmetic. `est.substituted` is the field to count when
+    // it is done, and it is already on every row — do not re-derive the routing rules here.
     if (est.downgraded) {
       // "Downgradable" is a claim that Cheaper WOULD move this call. For a vendor with no
       // rewriting endpoint it would not, so the claim belongs in the other bucket — and

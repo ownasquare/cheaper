@@ -114,7 +114,13 @@ test.describe('structure', () => {
     const page = await dash.open('dashboard');
     // A green/red dot alone is invisible to a colour-blind reader and to a screen
     // reader. The adjacent text carries the same information.
-    await expect(page.locator('#statusText')).toHaveText(/live|connecting|reconnecting/);
+    //
+    // THREE states now carry a distinct dot colour — green (live), amber (connected, no
+    // traffic) and red (disconnected) — so there is one more distinction that colour
+    // alone cannot make, not fewer. Note that "connected" is not "connecting": the amber
+    // state is a settled one and must read as such.
+    await expect(page.locator('#statusText'))
+      .toHaveText(/^(live|connecting…|reconnecting…|connected — .+)$/);
   });
 
   test('every form control has an accessible name', async ({ dash }) => {

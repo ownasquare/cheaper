@@ -13,9 +13,24 @@ const TABS = ['dashboard', 'reports', 'logs', 'monitor'];
 
 // Regions whose pixels legitimately differ between runs and would make a screenshot
 // assertion flaky rather than informative:
-//   #statusText   flips connecting… -> live as the websocket settles
+//   #statusText   flips connecting… -> live / connected — no traffic for N as the
+//                 websocket settles, and the "for N" half counts UP against the wall
+//                 clock on a 15-second repaint even when nothing else on the page moves
 //   .sago         "3h ago" — recomputed against the wall clock on every render
-//   #sparkWrap    a 1-hour live window; its bars move with real time
+//   #sparkWrap    a live series; its geometry moves with real time
+//   #basisLine    the measurement-basis statement. Its WORDING is a function of what the
+//                 gateway publishes in `measurement`, which is an additive block landing
+//                 separately from this page — so the same seeded store legitimately
+//                 produces "Basis unknown…" on one build and "Partly measured. 3 of 4
+//                 priced calls…" on the next, with no UI change at all. Masking it drops
+//                 the only coverage the product's central honesty claim had, so
+//                 expectBasisStated() below asserts its TEXT directly — a stronger check
+//                 than the pixels were, exactly as for #provenance.
+//                 NOT fixed by masking: a wording change that alters the WRAPPED LINE
+//                 COUNT changes the height of everything below it, and a full-page
+//                 screenshot compares dimensions first. Expect a one-off re-baseline when
+//                 the gateway starts publishing `measurement`; that is a real content
+//                 change, not flake.
 //   #trendWrap    bucketed on each call's own local DAY, and the fixture is seeded
 //                 relative to `now`, so the day labels shift every run
 //   #recentBody / #sessions   live feeds carrying wall-clock times
@@ -41,7 +56,7 @@ const TABS = ['dashboard', 'reports', 'logs', 'monitor'];
 // clipping and collapsed-box checks above.
 function volatileRegions(page) {
   return ['#statusText', '#sparkWrap', '#trendWrap', '#recentBody', '#sessions', '.sago',
-          '#provenance']
+          '#provenance', '#basisLine']
     .map((sel) => page.locator(sel));
 }
 
@@ -64,6 +79,44 @@ async function expectProvenanceStated(page, where) {
   // The limits of the claim, which is the part a reader acts on.
   expect(txt, `${where}: provenance must disclaim negotiated rates`)
     .toMatch(/negotiated discounts, credits and flat-rate plans are not modelled/);
+}
+
+// The measurement-basis statement answers "over what TOKEN COUNTS?" — the question
+// #provenance's price-catalog line does not. They are independent: a page can apply an
+// impeccable price catalog to token counts nobody ever measured, which is exactly the
+// state that produced a confident "$80.52 saved / 86.4%" headline out of 94 rows whose
+// usage_source was NULL from end to end.
+//
+// It is masked out of the pixel comparison (its wording moves with the gateway build, not
+// with this page), so assert it here or the product's central honesty claim would have no
+// test at all. It must be present on EVERY tab and must never be blank: a banner that
+// appears only when something is wrong teaches a reader that its absence means nothing.
+async function expectBasisStated(page, where) {
+  const el = page.locator('#basisLine');
+  await expect(el, `${where}: the measurement-basis statement is missing`).toBeVisible();
+  const txt = (await el.innerText()).trim();
+  expect(txt.length, `${where}: the basis statement rendered blank`).toBeGreaterThan(40);
+  // One of the four states the contract can be in, named. Anything else — including
+  // silence — is the page failing to say what its dollars rest on.
+  expect(txt, `${where}: the basis statement names no basis: "${txt}"`)
+    .toMatch(/^(Measured\.|Not measured\.|Partly measured\.|Basis unknown\.|No dollar figure is claimed\.)/);
+  // …and when it is NOT "Measured.", the headline figures must carry the qualifier that
+  // statement promises. A banner saying "not measured" over an unqualified $80.52 is the
+  // original defect with a disclaimer bolted on.
+  // The stat cards live inside #tab-dashboard, so this half only runs on the tab that
+  // renders them — a hidden pane has no readable text.
+  const onDashboard = await page.locator('#tab-dashboard.active').count();
+  if (!/^Measured\./.test(txt) && onDashboard) {
+    const saved = page.locator('#statCards .card', { hasText: 'Saved' }).first();
+    const value = (await saved.locator('.value').innerText()).trim();
+    // An ABSENT figure is already a labelled non-number and is not qualified further:
+    // "about —" would turn a clean "no claim made" into a half-claim.
+    if (!/^—$/.test(value)) {
+      expect(value, `${where}: the basis line says "${txt.slice(0, 24)}…" but the Saved `
+        + `card reads "${value}" — an unmeasured figure presented as a measured result`)
+        .toMatch(/^about /);
+    }
+  }
 }
 
 // A page must never spill sideways. Horizontal overflow is the single most common
@@ -160,6 +213,7 @@ test.describe('rendering', () => {
       await expectNoHorizontalOverflow(page, `${testInfo.project.name} #${tab}`);
       await expectNoClippedText(page, `${testInfo.project.name} #${tab}`);
       await expectProvenanceStated(page, `${testInfo.project.name} #${tab}`);
+      await expectBasisStated(page, `${testInfo.project.name} #${tab}`);
 
       // Nothing may sit outside the viewport on the left, and nothing may collapse to
       // zero height — both render as "a section is missing" rather than as an error.

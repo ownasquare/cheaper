@@ -40,7 +40,16 @@ test.describe('smoke', () => {
   test('the live status indicator reaches a settled state', async ({ dash }) => {
     const page = await dash.open('dashboard');
     // "connecting…" forever is a real failure that a screenshot alone would not flag.
-    await expect(page.locator('#statusText')).toHaveText(/live|reconnecting/, { timeout: 15000 });
+    //
+    // The settled set is now THREE states, not two. "live" is a claim about the DATA — a
+    // row arrived inside the liveness window — and /ws re-pushes the whole summary every
+    // five seconds whether or not a call was routed, so a connected-but-idle gateway is
+    // indistinguishable from a live one at the transport layer. It says "connected — …"
+    // instead, which is the state this suite's own fixture is in: the newest seeded row
+    // is minutes old by the time a test runs, so asserting "live" here would be asserting
+    // the defect. Each of the three is pinned individually in liveness.spec.js.
+    await expect(page.locator('#statusText'))
+      .toHaveText(/^(live|reconnecting…|connected — .+)$/, { timeout: 15000 });
   });
 
   test('no rendered text anywhere contains NaN, undefined or [object Object]',

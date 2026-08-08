@@ -180,9 +180,17 @@
      when something is wrong teaches readers that its absence means nothing, and the
      absence is exactly the state ("this gateway reports no basis at all") that has to be
      visible. Full-width, above every tab, and not dismissable. */
+  /* min-height for the same reason #sparkWrap carries one: renderBasisLine() rewrites
+     this element's ENTIRE content between the first empty paint (which can only say
+     "basis unknown" — no payload has arrived yet) and the first /metrics push, and the
+     two states are different sentence lengths. Without a floor, everything below it —
+     which is the whole page — jumps a line or two a few hundred milliseconds after load.
+     Sized to three lines at this font size plus the padding, which covers every branch on
+     a desktop-width container; a narrow viewport wraps past it and the floor simply stops
+     applying, which is correct (there is no shift to absorb when both states are tall). */
   .basis-line{border:1px solid var(--line);border-left-width:4px;border-radius:8px;
     padding:10px 14px;margin-bottom:16px;font-size:0.8rem;line-height:1.55;
-    color:var(--muted);background:var(--card);}
+    min-height:80px;color:var(--muted);background:var(--card);}
   .basis-line b{color:var(--text);}
   .basis-line.ok{border-left-color:var(--green);}
   .basis-line.warn{border-left-color:var(--amber);}
@@ -1028,13 +1036,43 @@
     var basis = (m && typeof m.dollars_basis === 'string')
       ? m.dollars_basis.trim().toLowerCase() : '';
     if (!DOLLAR_BASES[basis]) basis = 'unknown';
+    var head = (m && typeof m.headline === 'object' && m.headline) ? m.headline : null;
     return {
       published: !!m,
       basis: basis,
       measured: measuredValue(m && m.measured_calls),
       unmeasured: measuredValue(m && m.unmeasured_calls),
       priced: measuredValue(m && m.priced_calls),
-      zeroToken: measuredValue(m && m.zero_token_calls)
+      // --- the contract's five names end here. Everything below is metrics.py's own
+      // --- additive material, and every one of them is OPTIONAL: a gateway that
+      // --- publishes only the contract still renders a correct, if shorter, statement.
+      //
+      // zero_token_calls is the CONTRACT's name and means in + out == 0. It is NOT the
+      // count that explains the register's wall of $0.00: on the store this was
+      // commissioned against it is zero, because those 90 probes each carry 2-13 INPUT
+      // tokens. A call with input and no output is priced, costs a fraction of a cent and
+      // rounds to $0.00 — which is why metrics.py publishes `zero_output_calls` beside it
+      // and says so. Read the specific count when it exists; fall back to the contract
+      // name, whose sentence has to be worded differently because it means something
+      // different.
+      zeroToken: measuredValue(m && m.zero_token_calls),
+      zeroOutput: measuredValue(m && m.zero_output_calls),
+      examined: measuredValue(m && m.examined_calls),
+      // The downgrade rate over calls that actually produced a completion, and its
+      // denominator. `downgrade_rate` at the top level counts every probe that moved a
+      // model but produced no output and no money — a rate whose denominator is mostly
+      // empty handshakes. metrics.py publishes this BESIDE it rather than redefining the
+      // existing key (the parity gates compare that one across runtimes), and it is null,
+      // never 0.0, when nothing produced output: no population, no rate.
+      outputBearing: measuredValue(m && m.output_bearing_calls),
+      downgradeOutputRate: measuredValue(m && m.downgrade_rate_output_bearing),
+      // THE SENTENCE metrics.py says a renderer "MUST carry when it prints an
+      // unsubstantiated figure". Taking it from the payload rather than restating it here
+      // is what stops the two halves of this fix describing the same population
+      // differently — and it is parametrised by exact COUNTS, which this page does not
+      // otherwise have in one place.
+      acknowledgement: (head && typeof head.acknowledgement === 'string')
+        ? head.acknowledgement.trim() : ''
     };
   }
   // The single predicate every money renderer on this pane asks before printing a figure
@@ -1090,14 +1128,20 @@
     if (!f) return { published: false, live: false, age: null, everRecorded: null };
     var newest = measuredValue(f.newest_ts);
     var age = measuredValue(f.age_seconds);
+    // The gateway publishes the window it computed `live` from, precisely so this page
+    // does not carry a second copy of the number and drift from it. The local constant is
+    // the fallback for a gateway that does not, not a competing definition.
+    var win = measuredValue(f.window_seconds);
+    var window = (!win.missing && win.value > 0) ? win.value : LIVE_WINDOW_S;
     var seconds = null;
     if (!newest.missing) seconds = Math.max(0, (Date.now() / 1000) - newest.value);
     else if (!age.missing) seconds = Math.max(0, age.value);
     return {
       published: true,
+      window: window,
       // The gateway's own verdict is authoritative when it says "live"; the locally
       // recomputed age is what keeps a stale page from continuing to claim it.
-      live: f.live === true && (seconds === null || seconds <= LIVE_WINDOW_S),
+      live: f.live === true && (seconds === null || seconds <= window),
       age: seconds,
       everRecorded: !newest.missing
     };
@@ -1189,15 +1233,42 @@
         + 'prefixed <b>about</b> and must not be quoted as a measured saving.';
     }
 
-    // The register's wall of $0.00, explained where a reader can act on it. A call that
-    // returned no output tokens genuinely costs its input tokens and nothing else, and on
-    // a probe-sized request that rounds to $0.00 — the CORRECT figure for it, not a
-    // missing one. Left unexplained it reads as a broken pricing path, and someone
-    // "fixes" it by inventing a number.
-    var zt = m.zeroToken;
-    if (!zt.missing && zt.value > 0){
-      html += ' <span class="muted">' + zt.value.toLocaleString('en-US') + ' recorded call'
-        + (zt.value === 1 ? '' : 's') + ' returned no output tokens at all; '
+    // THE GATEWAY'S OWN ACKNOWLEDGEMENT, verbatim, when it publishes one.
+    //
+    // metrics.py calls this "the acknowledgement a renderer MUST carry when it prints an
+    // unsubstantiated figure" and parametrises it by exact counts. Printing the payload's
+    // sentence rather than a second sentence written here is what stops the two halves of
+    // this fix describing the same population in two different ways — and it is the only
+    // place the exact measured/unmeasured split is spelled out for a reader. Escaped: it
+    // is data, and it is the one string on this line that did not originate in this file.
+    if (m.acknowledgement){
+      html += ' <span class="muted">' + esc(m.acknowledgement) + '</span>';
+    }
+
+    // The register's wall of $0.00, explained where a reader can act on it.
+    //
+    // TWO DIFFERENT COUNTS, and they are not interchangeable. `zero_output_calls` is the
+    // one that explains the column: a call with input tokens and no output IS priced, and
+    // on a probe-sized request the price rounds to $0.00 — the CORRECT figure for it, not
+    // a missing one. `zero_token_calls` (the contract's name) means no tokens at ALL, and
+    // on the store this was commissioned against it is zero, so a sentence built from it
+    // would never appear at the exact moment it is needed. Prefer the specific count and
+    // fall back to the contract one, worded for what each actually means. Left
+    // unexplained, the column reads as a broken pricing path — and someone "fixes" it by
+    // inventing a number.
+    var zo = m.zeroOutput, zt = m.zeroToken;
+    var denom = !m.examined.missing ? m.examined
+      : (!m.priced.missing ? m.priced : { missing: true });
+    var ofTotal = denom.missing ? '' : ' of ' + denom.value.toLocaleString('en-US');
+    if (!zo.missing && zo.value > 0){
+      html += ' <span class="muted">' + zo.value.toLocaleString('en-US') + ofTotal
+        + ' recorded call' + (zo.value === 1 ? '' : 's') + ' returned no output tokens; '
+        + (zo.value === 1 ? 'it prices' : 'they price') + ' to $0.00, which is the correct '
+        + 'figure for ' + (zo.value === 1 ? 'it' : 'them') + ' in the register &mdash; not '
+        + 'a missing one.</span>';
+    } else if (!zt.missing && zt.value > 0){
+      html += ' <span class="muted">' + zt.value.toLocaleString('en-US') + ofTotal
+        + ' recorded call' + (zt.value === 1 ? '' : 's') + ' carried no tokens at all; '
         + (zt.value === 1 ? 'it prices' : 'they price') + ' to $0.00, which is the correct '
         + 'figure for ' + (zt.value === 1 ? 'it' : 'them') + ' in the register &mdash; not '
         + 'a missing one.</span>';
@@ -1225,8 +1296,32 @@
 
     var html = '';
     html += '<div class="card"><div class="label">Total routed</div><div class="value">' + total.toLocaleString('en-US') + '</div></div>';
+    // THE DENOMINATOR THIS RATE IS COMPUTED OVER, stated beside it.
+    //
+    // `downgrade_rate` counts every intercepted call, including probes and handshakes
+    // that moved a model but produced no completion and no money — on the store this was
+    // commissioned against, 90 of 94 rows. A rate dominated by empty probes is not wrong,
+    // it is uninformative, and read as "two thirds of my work was routed cheaper" it is
+    // actively misleading. metrics.py publishes the same rate over calls that actually
+    // produced output, BESIDE the existing key rather than redefining it (that key is
+    // compared across runtimes by the parity gates). Null, never 0.0, when nothing
+    // produced output: no population, no rate — so an absent figure is labelled here
+    // rather than coerced.
+    var mInfo = measurementInfo(d);
+    var obRate = mInfo.downgradeOutputRate, obN = mInfo.outputBearing;
+    var obNote = '';
+    if (!obRate.missing){
+      obNote = '<div class="sub">' + pctFrac(obRate.value).toFixed(1) + '% over the '
+        + (obN.missing ? '' : obN.value.toLocaleString('en-US') + ' ')
+        + 'call(s) that produced output</div>';
+    } else if (!obN.missing && obN.value === 0){
+      obNote = '<div class="sub warn">no call produced output, so no rate over completed '
+        + 'work can be stated</div>';
+    }
     html += '<div class="card"><div class="label">Downgrade rate</div><div class="value green">' + dr.toFixed(1) + '%</div>' +
-            '<div class="bar-track"><div class="bar-fill" style="width:' + Math.min(100, Math.max(0, dr)) + '%"></div></div></div>';
+            '<div class="bar-track"><div class="bar-fill" style="width:' + Math.min(100, Math.max(0, dr)) + '%"></div></div>' +
+            (obNote ? '<div class="sub">of every intercepted call</div>' + obNote : '') +
+            '</div>';
     // Saved / Spent / Savings % are all derived from the SAME token counts, so they carry
     // the SAME basis qualifier or none of them do — see approxFigure(). Qualifying only
     // the flattering one would be its own dishonesty. `Total routed` and `Downgrade rate`
