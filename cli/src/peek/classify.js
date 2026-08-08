@@ -394,6 +394,25 @@ function effectiveTier(text, actualModel) {
 //                            is no more expensive; if none is, PASS THROUGH and route
 //                            nothing at all (router.py:203-228).
 //
+// AND ONE RULE THAT IS NOT IN THIS FUNCTION AT ALL, because it is not a decision — it is
+// whether decide() is reached:
+//
+//   -1. IS THERE AN ENDPOINT?  The gateway rewrites `body["model"]` on exactly two paths,
+//                            /v1/messages (app.py:491, Anthropic) and
+//                            /v1/chat/completions (app.py:812, OpenAI). Traffic for any
+//                            other vendor falls to the catch-all proxy (app.py:1151),
+//                            which relays the request — including POSTs — verbatim and
+//                            never touches `body["model"]`. decide() is never called, so
+//                            no rule below runs and no dollar moves.
+//                            routeDecision() deliberately does NOT model this: it answers
+//                            "what would the router decide", which is a well-formed
+//                            question for a Gemini request even though no Gemini request
+//                            ever reaches it. pricing.js::ROUTABLE_FAMILIES carries the
+//                            endpoint fact and scan.js keeps the unreachable vendors out
+//                            of the headline. Putting it here instead would collapse
+//                            "the router refused" and "the router was never asked" into
+//                            one passthrough, and those need different remedies.
+//
 // Rules 3-5 are the ones that change the estimate's DIRECTION, and peek modelled none of
 // them, so its number described a router that does not exist:
 //

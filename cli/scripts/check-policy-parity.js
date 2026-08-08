@@ -65,6 +65,29 @@
 //           passthrough result, where tier is null. `reason` is prose and is NOT
 //           compared: it is free to be reworded.
 //
+// THERE IS NO "GATE 3 ON THE SERVED MODEL ID", AND THAT IS A CONCLUSION, NOT AN OMISSION.
+// GATE 2 already compares the served id: the `continue` below requires `d.model ===
+// pyModel`, not merely the tier. It is worth writing down because the obvious diagnosis of
+// the next pricing defect will be "add a gate on the model id", and it has now been wrong
+// once.
+//
+// MEASURED 2026-08-08. estimateCall priced a same-TIER route as if no route had happened,
+// so 63 substitutions in the shipped catalog booked $0.00 against $1,851.20 of real
+// movement at a 1M/1M basket (and, on an input-heavy basket, hid three real anti-savings).
+// Every gate stayed green through all of it, correctly:
+//   * GATE 2 — both runtimes answered `opus, gpt-5.6-sol`. They AGREED. There was no
+//     cross-runtime divergence to find.
+//   * sync-prices.js — both runtimes price gpt-5.6-sol identically. Also agreed.
+// The gap was inside peek, BETWEEN its two halves: the router named a model and the
+// estimator then priced a different one. No question asked of both runtimes can see that,
+// because both halves are JS — a third parity gate would have been a third green light.
+//
+// The invariant that catches it is a COMPOSITION one — "the dollars follow the decision" —
+// and it lives in cli/test/policy_parity.test.js ('THE COMPOSITION INVARIANT'), where
+// routeDecision and estimateCall can be composed directly and no interpreter is needed.
+// Putting it here would have widened a script whose entire contract is "ask both runtimes
+// the same question" into one that no longer states what it checks.
+//
 // The corpus is likewise behavioural. Beyond a fixed set of hand-written requests, it
 // SAMPLES a probe string from each pattern in BOTH runtimes' cascades (best effort — a
 // sample that matches nothing is still a perfectly good parity probe). That is what makes

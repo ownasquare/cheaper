@@ -74,7 +74,7 @@ PROMO_EDGE_TZO = -420           # minutes EAST of UTC
 
 def insert_row(path, *, ts, tzo, served="claude-sonnet-5", base="claude-opus-5",
                in_tok=1_000_000, out_tok=1_000_000, request_id="req_tz_1",
-               session="c", status=200, usage_source="body",
+               session="c", status=200, usage_source="body", tier="sonnet",
                cache_read=0, cache_create_5m=0, cache_create_1h=0):
     """A decisions row written with an EXPLICIT stored offset (or None for a legacy row).
 
@@ -86,6 +86,12 @@ def insert_row(path, *, ts, tzo, served="claude-sonnet-5", base="claude-opus-5",
     produces for the NULLs a row written without them -- so every caller predating them
     is byte-for-byte unaffected. They exist for the cache-migration tests below, which
     need a row whose SPLIT (not just its totals) is under test.
+
+    ``tier`` defaults to the "sonnet" this helper always hard-coded, so every caller
+    predating the parameter is likewise unaffected. It is settable because
+    ``summary()["downgrade_rate"]`` is computed from the TIER column alone (rows whose
+    tier is not the priciest, over all rows) -- a fixture that cannot vary the tier
+    cannot exercise that figure or the honest rate published beside it.
     """
     with sqlite3.connect(path) as c:
         c.execute(
@@ -93,7 +99,7 @@ def insert_row(path, *, ts, tzo, served="claude-sonnet-5", base="claude-opus-5",
             "reason, source, in_tokens, out_tokens, status, session, usage_source, "
             "request_id, tzo, cache_read, cache_create_5m, cache_create_1h) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ts, "sonnet", served, base, "opus", "s", "t", in_tok, out_tok, status,
+            (ts, tier, served, base, "opus", "s", "t", in_tok, out_tok, status,
              session, usage_source, request_id, tzo,
              cache_read, cache_create_5m, cache_create_1h))
         c.commit()
@@ -212,6 +218,158 @@ def test_tokens_downgraded_is_reported():
         s = m.summary(session="c")
         assert s["tokens"]["downgraded"] == 6000  # 4 rows * (1000+500)
         assert s["downgraded_by_tier"] == {"haiku": 4, "sonnet": 0, "opus": 0}
+
+
+def test_a_purely_upcharged_chat_publishes_a_token_count():
+    """THE LEDGER RATCHET, at its source.
+
+    `tokens.downgraded` only accumulates on the `saved > 0` branch, so a chat that was
+    PURELY an upcharge published `tokens.downgraded == 0` with a real negative
+    `dollars.saved`. cli/src/peek/tagline.js feeds that number to `ledger.record()` as
+    `tokensCredited`, and ledger.record() gates on `tokens > 0` (cli/src/peek/ledger.js)
+    -- so the entire chat was a no-op against the lifetime total and the all-time figure
+    could only ever move UP. Same shape as the whole-conversation routing ratchet and as
+    `baselines.highest_tier` being clamped with max(0.0, ...); both were fixed by making
+    the losing direction a first-class published figure, and so is this.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        m = Metrics(db_path=os.path.join(d, "m.db"))
+        m.record(tier="opus", model="claude-fable-5", original_model="claude-opus-5",
+                 requested_tier="opus", reason="s",
+                 in_tokens=1_000_000, out_tokens=1_000_000, session="c")
+        s = m.summary(session="c")
+        # opus-5 = $30 baseline ; fable-5 = $60 served -> -$30. The MONEY was always
+        # right; it was the token count that stranded it.
+        assert abs(s["dollars"]["saved"] + 30.0) < 1e-6, s["dollars"]
+        assert s["counts"]["models_upcharged"] == 1
+        # The direction that used to be publishable...
+        assert s["tokens"]["downgraded"] == 0
+        # ...and the one that was not.
+        assert s["tokens"]["upcharged"] == 2_000_000
+        # THE PROPERTY A `tokens > 0` GATE DOWNSTREAM ACTUALLY NEEDS: a chat with a real
+        # signed dollar figure must publish a non-zero token count in SOME direction, or
+        # it cannot reach a lifetime total at all.
+        assert s["dollars"]["saved"] != 0.0
+        assert s["tokens"]["downgraded"] + s["tokens"]["upcharged"] > 0
+
+
+def test_downgraded_and_upcharged_tokens_are_not_netted_against_each_other():
+    """THE SIGN HAS TO SURVIVE THE PUBLICATION, not just the arithmetic.
+
+    A single netted token count would zero out a chat whose downgrades and upcharges
+    happen to balance -- reinstating the same `tokens > 0` gate one level up, and doing
+    it as a suppression inside the math where no reader can see it. Two non-negative
+    counts keep the DIRECTION in the key name while `dollars.saved` keeps the SIGN.
+
+    Constructed so the two directions carry IDENTICAL token counts: a netted
+    implementation reads 0 here and both assertions below fail.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        m = Metrics(db_path=os.path.join(d, "m.db"))
+        m.record(tier="haiku", model="claude-haiku-4-5", original_model="claude-opus-5",
+                 requested_tier="opus", reason="down",
+                 in_tokens=1_000_000, out_tokens=1_000_000, session="c")
+        m.record(tier="opus", model="claude-fable-5", original_model="claude-opus-5",
+                 requested_tier="opus", reason="up",
+                 in_tokens=1_000_000, out_tokens=1_000_000, session="c")
+        s = m.summary(session="c")
+        assert s["tokens"]["downgraded"] == 2_000_000
+        assert s["tokens"]["upcharged"] == 2_000_000
+        # opus-5 $30 vs haiku-4-5 $6 = +$24 ; opus-5 $30 vs fable-5 $60 = -$30 -> -$6.
+        assert abs(s["dollars"]["saved"] + 6.0) < 1e-6, s["dollars"]
+        assert s["counts"]["models_changed"] == 1
+        assert s["counts"]["models_upcharged"] == 1
+
+
+def test_tokens_priced_covers_exactly_the_rows_the_dollars_cover():
+    """THE POPULATION THE SPEND SENTENCE NEEDED AND COULD NOT GET.
+
+    The tagline pairs a token count with a dollar figure. Its only token source was
+    `by_tier` -- an UNBOUNDED `GROUP BY` over every row in the session -- while
+    `dollars.spent` covers only `counts.priced` of them, so the two halves of one
+    sentence described different populations and `populationNote()` in
+    cli/src/peek/tagline.js had to LABEL the mismatch ("the token count covers all N
+    calls, the dollar figure only the M that could be priced"). Labelling is right when a
+    figure is genuinely unavailable. This one was available and simply unpublished.
+
+    Same six-row fixture as the reconciliation invariant above, so the two figures are
+    pinned against the SAME population: 2 priceable, 1 unpriceable served model, 1
+    estimated usage, 1 non-2xx, 1 cold-start-after-a-switch.
+    """
+    ts = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc).timestamp()
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        insert_row(path, ts=ts, tzo=0, request_id="p1")            # 1M + 1M
+        insert_row(path, ts=ts, tzo=0, request_id="p2")            # 1M + 1M
+        insert_row(path, ts=ts, tzo=0, served="llama-4-maverick", request_id="u1")
+        insert_row(path, ts=ts, tzo=0, usage_source="estimate", request_id="e1")
+        insert_row(path, ts=ts, tzo=0, status=529, request_id="n1")
+        insert_row(path, ts=ts, tzo=0, served="claude-haiku-4-5", request_id="c1",
+                   in_tok=0, out_tok=1000, cache_read=0, cache_create_5m=200_000)
+
+        s = m.summary(session="c")
+        assert s["counts"]["priced"] == 2
+        # Exactly the two priced rows: 2 x (1M + 1M).
+        assert s["tokens"]["priced"] == 4_000_000, s["tokens"]
+
+        # THE TWO POPULATIONS REALLY DO DIFFER, or this test proves nothing. `by_tier` is
+        # the number the tagline was forced to use, and it is 2.5x larger.
+        by_tier_tokens = sum(v["in_tokens"] + v["out_tokens"]
+                             for v in s["by_tier"].values())
+        assert by_tier_tokens == 10_001_000, s["by_tier"]
+        assert s["tokens"]["priced"] < by_tier_tokens
+        # ...and the published token count belongs to the published dollars: $12 each at
+        # 2026-08-20 over 2M tokens each.
+        assert abs(s["dollars"]["spent"] - 24.0) < 1e-6, s["dollars"]
+
+
+def test_tokens_priced_tracks_every_exclusion_reason():
+    """One row per exclusion reason, added one at a time: `tokens.priced` must fall to
+    zero alongside `counts.priced`. A figure that kept counting tokens for a row the
+    dollars had dropped would be the mismatch again, only now with a key name claiming
+    otherwise -- which is worse than the label it replaces."""
+    ts = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc).timestamp()
+    for kwargs in ({"served": "llama-4-maverick"},          # model_not_in_catalog
+                   {"usage_source": "estimate"},            # estimated_usage
+                   {"status": 529},                         # non_2xx
+                   {"served": "claude-haiku-4-5", "in_tok": 0, "out_tok": 1000,
+                    "cache_read": 0, "cache_create_5m": 200_000}):  # indeterminate
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.db")
+            m = Metrics(db_path=path)
+            insert_row(path, ts=ts, tzo=0, request_id="only", **kwargs)
+            s = m.summary(session="c")
+            assert s["counts"]["priced"] == 0, kwargs
+            assert s["tokens"]["priced"] == 0, (kwargs, s["tokens"])
+            assert s["dollars"]["spent"] == 0.0, kwargs
+        # An UNDATABLE row is the fifth reason and needs a ts the read path can date
+        # but whose offset cannot be reconstructed; it is already covered by
+        # test_one_undatable_row_does_not_take_down_the_whole_audit_log.
+
+
+def test_tokens_priced_is_null_not_zero_when_pricing_is_unavailable(monkeypatch):
+    """There is no priced population without pricing, and `0` would read as "this
+    session ran no tokens" -- a claim, where None is the honest absence of one. Same rule
+    the `tzo` column follows: a missing value is never rendered as a plausible number.
+
+    The dollars in that configuration are the legacy tier-weight ESTIMATE over `by_tier`,
+    and `catalog.priced` already says so, so a consumer has both signals.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        m = Metrics(db_path=os.path.join(d, "m.db"))
+        m.record(tier="haiku", model="claude-haiku-4-5", original_model="claude-opus-5",
+                 requested_tier="opus", reason="s",
+                 in_tokens=1000, out_tokens=500, session="c")
+        assert m.summary(session="c")["tokens"]["priced"] == 1500
+        monkeypatch.setattr(metrics_mod, "_PRICING", False)
+        s = m.summary(session="c")
+        assert s["tokens"]["priced"] is None, s["tokens"]
+        assert s["catalog"]["priced"] is False
+        # The other two token figures are real counters and stay integers; only the
+        # population-scoped one has no answer to give.
+        assert s["tokens"]["downgraded"] == 0
+        assert s["tokens"]["upcharged"] == 0
 
 
 def test_old_db_without_session_column_still_records():
@@ -1377,3 +1535,509 @@ def test_the_durability_block_says_what_it_is_scoped_to():
         with pytest.raises(ValueError):
             m.record(request_id="ms_units", ts=1700000000000.0, **RECORD_KW)
         assert m.summary()["durability"]["rejected_ts"] == 1
+
+
+# ===========================================================================
+# THE MEASUREMENT CONTRACT -- summary()["measurement"] and summary()["freshness"]
+# ===========================================================================
+#
+# WHAT THESE TESTS ARE ABOUT, stated once so no assertion below has to carry it:
+#
+# The product published SAVED $80.52 / SAVINGS 86.4% under a headline that reads as
+# MEASURED, from a store in which `usage_source` is NULL on every one of 94 rows. NULL
+# does not mean the arithmetic is wrong; it means nobody ever confirmed those token
+# counts against a provider response. Four rows carried the entire figure and the other
+# 90 were probes that produced no output at all -- which is also why the Logs tab showed
+# $0.00 on every visible row while Reports showed $80.52, a contradiction in which both
+# surfaces were arithmetically right and neither could say why.
+#
+# None of these tests changes a cent of that arithmetic. They pin the LABELS that say
+# what population it came from.
+
+# 2026-08-20 is the date the other dollar fixtures in this file price at, so these rows
+# resolve against catalog rates the suite already exercises.
+OWNER_TS = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc).timestamp()
+
+# The INPUT-token counts of the owner's synthetic probes, measured directly off
+# ~/.cheaper/metrics.db rather than invented: 90 of its 94 rows carry between 2 and 13
+# input tokens and ZERO output tokens. Both ends of that observed range appear here.
+OWNER_PROBE_IN_TOKENS = (2, 13, 7, 2, 9, 13, 3, 11, 2)
+
+
+def seed_owner_shaped(path, *, ts=OWNER_TS, probe_usage=None, money_usage=None,
+                      session="c"):
+    """The owner's live store, in miniature and in its real SHAPES.
+
+    Measured against ~/.cheaper/metrics.db, not imagined:
+
+      * 94 rows, ``usage_source`` NULL on EVERY ONE. The gateway's measured path had
+        never fired against that database, so not one call carried provider-reported
+        usage. Both ``usage`` parameters default to None to reproduce exactly that.
+      * 90 rows are synthetic probes: 2-13 INPUT tokens, ZERO output. They are NOT
+        zero-TOKEN rows, which is why the contract's ``zero_token_calls`` is 0 on that
+        store while ``zero_output_calls`` is 90. Getting this wrong is the easiest way
+        to write a green test that describes a population which does not exist.
+      * 4 rows carry the entire $80.52; the heaviest is 1,200,000 in / 900,000 out.
+      * 63 of 94 rows sit at a tier other than the priciest, which is the whole of what
+        ``downgrade_rate`` (67.0%) measures.
+
+    PROPORTIONS are preserved rather than volume: 9 probes to 2 output-bearing rows.
+    One output-bearing row is a genuine downgrade (opus requested, sonnet served) and
+    one is not (opus requested, opus served) -- mirroring the owner's 2-of-4 -- so the
+    honest rate and the published one are FORCED apart instead of coinciding by luck.
+    """
+    for i, n_in in enumerate(OWNER_PROBE_IN_TOKENS):
+        insert_row(path, ts=ts, tzo=0, tier="haiku",
+                   served="claude-haiku-4-5", base="claude-opus-5",
+                   in_tok=n_in, out_tok=0, usage_source=probe_usage,
+                   session=session, request_id="probe%d" % i)
+    # The row that carries the money, and the only downgrade that produced a completion.
+    insert_row(path, ts=ts, tzo=0, tier="sonnet",
+               served="claude-sonnet-5", base="claude-opus-5",
+               in_tok=1_200_000, out_tok=900_000, usage_source=money_usage,
+               session=session, request_id="heavy")
+    # Output-bearing, priced, and NOT a downgrade: served == requested, so it moves the
+    # denominator without moving the numerator.
+    insert_row(path, ts=ts, tzo=0, tier="opus",
+               served="claude-opus-5", base="claude-opus-5",
+               in_tok=200_000, out_tok=80_000, usage_source=money_usage,
+               session=session, request_id="kept")
+
+
+def test_a_store_nobody_ever_measured_publishes_its_dollars_as_unmeasured():
+    """THE HEADLINE DEFECT, pinned.
+
+    Every row NULL -> `dollars_basis` must be "unmeasured", and the ONE key a renderer
+    may print as a measured saving must be None. The figure is still published, under a
+    name that cannot be rendered without saying what it is.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path)
+        s = m.summary(session="c")
+
+        mm = s["measurement"]
+        assert mm["dollars_basis"] == "unmeasured", mm
+        assert mm["measured_calls"] == 0, mm
+        assert mm["unmeasured_calls"] == 11, mm
+        assert mm["priced_calls"] == 11, mm
+
+        # THE ARITHMETIC IS UNTOUCHED. If this ever fails, the labelling turned into a
+        # re-computation and the contract was broken in the other direction.
+        assert s["dollars"]["saved"] > 1.0, s["dollars"]
+
+        h = mm["headline"]
+        # The lazy path renders nothing, which is correct for this population.
+        assert h["saved"] is None, h
+        # The figure is available, under a name a renderer has to type on purpose.
+        assert h["unsubstantiated_saved"] == s["dollars"]["saved"], h
+        assert h["withheld_reason"] == "unmeasured_usage", h
+        assert "did not MEASURE" in h["acknowledgement"], h
+        assert "provider-reported usage" in h["acknowledgement"], h
+
+
+def test_one_confirmed_row_among_unconfirmed_ones_is_mixed_never_measured():
+    """A population that is PART measured cannot be described as measured. The two
+    halves are not split apart either -- doing so would re-run the dollar arithmetic
+    rather than label it -- so the mixed case withholds the headline exactly like the
+    unmeasured one and says which it is."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        # The nine probes confirmed, the two money rows not: the money is precisely the
+        # part nobody measured, which is the shape that matters.
+        seed_owner_shaped(path, probe_usage="body", money_usage=None)
+        s = m.summary(session="c")
+
+        mm = s["measurement"]
+        assert mm["dollars_basis"] == "mixed", mm
+        assert mm["measured_calls"] == 9, mm
+        assert mm["unmeasured_calls"] == 2, mm
+        assert mm["headline"]["saved"] is None, mm["headline"]
+        assert mm["headline"]["withheld_reason"] == "mixed_usage", mm["headline"]
+        assert "9 priced call(s)" in mm["headline"]["acknowledgement"]
+        assert "with 2 that did not" in mm["headline"]["acknowledgement"]
+
+
+def test_a_store_in_which_every_priced_row_was_confirmed_is_measured():
+    """The positive control. Without it, an implementation that answered "unmeasured"
+    unconditionally would satisfy every other test in this section."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path, probe_usage="body", money_usage="body")
+        s = m.summary(session="c")
+
+        mm = s["measurement"]
+        assert mm["dollars_basis"] == "measured", mm
+        assert mm["measured_calls"] == 11 and mm["unmeasured_calls"] == 0, mm
+        h = mm["headline"]
+        # NOW the headline is publishable, and it is the same number `dollars` carries.
+        assert h["saved"] == s["dollars"]["saved"], h
+        assert h["unsubstantiated_saved"] is None, h
+        assert h["withheld_reason"] == "" and h["acknowledgement"] == "", h
+
+
+def test_an_estimated_row_is_unmeasured_even_though_it_never_reaches_the_dollars():
+    """The contract counts 'estimate' as unmeasured alongside NULL. Those rows are
+    already refused by `row_is_priceable`, so they can never move `dollars_basis` on
+    their own -- but they are rows, they are examined, and a census that skipped them
+    would stop partitioning `counts.examined`."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        insert_row(path, ts=OWNER_TS, tzo=0, request_id="b1", usage_source="body")
+        insert_row(path, ts=OWNER_TS, tzo=0, request_id="e1", usage_source="estimate")
+        s = m.summary(session="c")
+
+        mm = s["measurement"]
+        assert mm["measured_calls"] == 1 and mm["unmeasured_calls"] == 1, mm
+        assert mm["measured_calls"] + mm["unmeasured_calls"] == s["counts"]["examined"]
+        # The estimated row contributed no dollar, so the priced population is entirely
+        # measured and the headline is publishable.
+        assert s["counts"]["unpriced"]["estimated_usage"] == 1
+        assert mm["priced_calls"] == 1, mm
+        assert mm["dollars_basis"] == "measured", mm
+
+
+@pytest.mark.parametrize("rows,label", [
+    (0, "an empty store"),
+    (1, "a store in which every row was refused"),
+])
+def test_dollars_basis_is_none_only_when_no_row_put_a_dollar_in(rows, label):
+    """"none" is reserved for "there is no dollar figure to describe" and must never be
+    used for "we have dollars but did not measure them" -- the two read identically to a
+    consumer that only checks `!= "measured"`, and completely differently to one that
+    hides the panel on "none"."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        for i in range(rows):
+            # 529 overloaded: recorded, counted, never priced.
+            insert_row(path, ts=OWNER_TS, tzo=0, status=529, request_id="n%d" % i)
+        s = m.summary(session="c")
+
+        mm = s["measurement"]
+        assert mm["priced_calls"] == 0, (label, mm)
+        assert mm["dollars_basis"] == "none", (label, mm)
+        assert s["dollars"]["saved"] == 0.0, (label, s["dollars"])
+        h = mm["headline"]
+        # NOT 0.0. "we measured a saving of $0.00" and "nothing here could be priced"
+        # are different claims, and only one of them is true.
+        assert h["saved"] is None, (label, h)
+        assert h["unsubstantiated_saved"] is None, (label, h)
+        assert h["withheld_reason"] == "no_priced_calls", (label, h)
+        assert "not the same claim as a saving of $0.00" in h["acknowledgement"]
+
+
+def test_the_legacy_tier_weight_estimate_is_labelled_unmeasured_not_none(monkeypatch):
+    """Without the catalog, `dollars` degrades to the legacy tier-weight ESTIMATE over
+    `by_tier` -- a real, non-zero, published figure resting on no priced row at all.
+    Calling that "none" would let a consumer read "no claim is being made" with a claim
+    sitting right beside it."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path)
+        monkeypatch.setattr(metrics_mod, "_PRICING", False)
+        s = m.summary(session="c")
+
+        assert s["catalog"]["priced"] is False
+        assert s["dollars"]["saved"] > 0.0, s["dollars"]
+        mm = s["measurement"]
+        assert mm["dollars_basis"] == "unmeasured", mm
+        assert mm["priced_calls"] == 0, mm
+        # The census does NOT live inside the pricing loop, so the labels survive the
+        # configuration in which they matter most.
+        assert mm["measured_calls"] == 0 and mm["unmeasured_calls"] == 11, mm
+        assert mm["zero_output_calls"] == 9, mm
+        h = mm["headline"]
+        assert h["saved"] is None, h
+        # ...and the sentence describes where the figure actually came from rather than
+        # claiming "arithmetic over 0 priced call(s)".
+        assert "legacy TIER-WEIGHT ESTIMATE" in h["acknowledgement"], h
+
+
+def test_zero_token_calls_counts_rows_with_no_tokens_at_all_not_the_probes():
+    """THE CONTRACT'S KEY, and the distinction that makes it useful.
+
+    `zero_token_calls` is in+out == 0. On the owner's store that is ZERO rows: the 90
+    probes each carry 2-13 INPUT tokens. Asserting 90 here would have been the natural
+    mistake and would have described a population that does not exist.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path)
+        mm = m.summary(session="c")["measurement"]
+        assert mm["zero_token_calls"] == 0, mm
+        assert mm["zero_output_calls"] == 9, mm
+
+    # ...and a row that really does carry nothing IS counted, so the key is not simply
+    # stuck at zero.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path)
+        insert_row(path, ts=OWNER_TS, tzo=0, in_tok=0, out_tok=0, request_id="empty",
+                   tier="haiku", served="claude-haiku-4-5")
+        mm = m.summary(session="c")["measurement"]
+        assert mm["zero_token_calls"] == 1, mm
+        # A zero-TOKEN row is also a zero-OUTPUT row. The two counts overlap on purpose;
+        # they are not a partition of anything and must not be added.
+        assert mm["zero_output_calls"] == 10, mm
+        assert mm["zero_output_calls"] + mm["output_bearing_calls"] == 12, mm
+
+
+def test_the_logs_and_reports_contradiction_is_explained_by_a_published_count():
+    """WHY ONE SCREEN SHOWS $0.00 ON EVERY ROW WHILE ANOTHER SHOWS $80.52.
+
+    Both are arithmetically right. 90 of 94 rows produced no output tokens, so each
+    costs a few input tokens and renders as $0.00; the 4 that did produce output carry
+    the whole figure. Nothing here changes either number -- what is asserted is that the
+    counts a renderer needs to SAY that are now on the payload, and that they really do
+    describe the split.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        # The probes ALONE. Their entire combined saving is under one cent, which is
+        # exactly why every one of them renders as $0.00.
+        path = os.path.join(d, "probes.db")
+        probes_only = Metrics(db_path=path)
+        for i, n_in in enumerate(OWNER_PROBE_IN_TOKENS):
+            insert_row(path, ts=OWNER_TS, tzo=0, tier="haiku",
+                       served="claude-haiku-4-5", base="claude-opus-5",
+                       in_tok=n_in, out_tok=0, usage_source=None,
+                       request_id="probe%d" % i)
+        probes = probes_only.summary(session="c")
+        assert probes["counts"]["priced"] == 9
+        assert round(probes["dollars"]["saved"], 2) == 0.0, probes["dollars"]
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path)
+        s = m.summary(session="c")
+
+        mm = s["measurement"]
+        # 9 of 11 rows returned no output tokens -- the sentence the Logs/Reports
+        # contradiction needs, now backed by figures on the payload.
+        assert mm["zero_output_calls"] == 9, mm
+        assert mm["output_bearing_calls"] == 2, mm
+        assert mm["examined_calls"] == s["counts"]["examined"] == 11, mm
+        assert mm["zero_output_calls"] + mm["output_bearing_calls"] == mm["examined_calls"]
+        # ...and the two output-bearing rows really do carry essentially all of it.
+        assert s["dollars"]["saved"] > 1.0, s["dollars"]
+        assert probes["dollars"]["saved"] < 0.01, probes["dollars"]
+
+
+def test_the_downgrade_rate_gets_a_denominator_that_is_not_mostly_empty_probes():
+    """DOWNGRADE RATE read 67.0% and MODELS CHANGED read 62, both dominated by rows that
+    moved a model but produced no completion and no money.
+
+    POSITION: publish the rate over rows that actually produced output, WITH its
+    denominator, beside the existing figure rather than restating it. The existing key
+    is compared across runtimes by the parity gates; silently redefining it here would
+    make the two halves disagree about a number neither of them got wrong.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path)
+        s = m.summary(session="c")
+
+        # UNCHANGED, to the tenth: 10 of 11 rows sit below the priciest tier.
+        assert s["downgrade_rate"] == round(10 / 11 * 100, 1), s["downgrade_rate"]
+        assert s["counts"]["models_changed"] == 10, s["counts"]
+
+        mm = s["measurement"]
+        # Of the two rows that produced a completion, exactly one was downgraded.
+        assert mm["output_bearing_calls"] == 2, mm
+        assert mm["downgraded_output_bearing"] == 1, mm
+        assert mm["downgrade_rate_output_bearing"] == 50.0, mm
+        # THE TWO RATES MUST DIFFER, or this test proves nothing about the complaint.
+        assert mm["downgrade_rate_output_bearing"] != s["downgrade_rate"]
+        # A subset by construction: it is incremented inside the branch that increments
+        # models_changed and can never exceed it.
+        assert mm["downgraded_output_bearing"] <= s["counts"]["models_changed"]
+
+
+def test_a_rate_with_no_denominator_is_None_never_zero():
+    """0.0 would assert "we routed these calls and downgraded none of them" about a
+    population that does not exist. Same rule `tokens.priced` follows."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        for i, n_in in enumerate(OWNER_PROBE_IN_TOKENS):
+            insert_row(path, ts=OWNER_TS, tzo=0, tier="haiku",
+                       served="claude-haiku-4-5", base="claude-opus-5",
+                       in_tok=n_in, out_tok=0, request_id="probe%d" % i)
+        mm = m.summary(session="c")["measurement"]
+        assert mm["output_bearing_calls"] == 0, mm
+        assert mm["downgrade_rate_output_bearing"] is None, mm
+        # ...while the legacy figure happily reports 100% over the same empty probes.
+        assert m.summary(session="c")["downgrade_rate"] == 100.0
+
+
+def test_the_measurement_census_partitions_exactly_the_examined_rows():
+    """`measured_calls + unmeasured_calls == counts.examined`, for every provenance mix
+    and under the `max_rows` cap. A census over a different population than the counts
+    block would be a third denominator nobody announced."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        seed_owner_shaped(path, probe_usage="body", money_usage="estimate")
+        for cap in (11, 5, 1):
+            s = m.summary(session="c", max_rows=cap)
+            mm = s["measurement"]
+            assert s["counts"]["examined"] == min(11, cap), (cap, s["counts"])
+            assert mm["examined_calls"] == s["counts"]["examined"], (cap, mm)
+            assert mm["measured_calls"] + mm["unmeasured_calls"] == mm["examined_calls"], \
+                (cap, mm)
+            assert mm["zero_output_calls"] + mm["output_bearing_calls"] == \
+                mm["examined_calls"], (cap, mm)
+            # The dollar population is counted at the accumulator, so it agrees with the
+            # subtraction `counts.priced` performs -- two derivations, one answer.
+            assert mm["priced_calls"] == s["counts"]["priced"], (cap, mm)
+
+
+# --- freshness -------------------------------------------------------------
+
+def test_freshness_is_about_the_data_never_about_a_socket():
+    """29 HOURS OLD IS NOT LIVE.
+
+    The Monitor's green dot was read off /ws being connected. /ws only pushes when a
+    request is ROUTED, so an idle gateway produced an open, healthy, silent socket that
+    rendered identically to a busy one -- and the owner's newest row was 29 hours old
+    while the dot said live. `freshness.live` answers the question the dot was read as
+    answering, and it answers it from the DATA.
+    """
+    stale_age = 29 * 3600.0
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        newest = time.time() - stale_age
+        insert_row(path, ts=newest - 3600, tzo=0, request_id="older")
+        insert_row(path, ts=newest, tzo=0, request_id="newest")
+        f = m.summary(session="c")["freshness"]
+
+        assert f["live"] is False, f
+        assert f["newest_ts"] == pytest.approx(newest, abs=1e-6), f
+        # The NEWEST row, not the oldest and not the last one inserted.
+        assert f["age_seconds"] == pytest.approx(stale_age, abs=30), f
+        assert f["window_seconds"] == metrics_mod.LIVE_WINDOW_S
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        # A call that landed a moment ago, with 29-hour-old history behind it: the flag
+        # tracks the NEWEST row, so history cannot drag a live gateway to false.
+        insert_row(path, ts=time.time() - stale_age, tzo=0, request_id="old")
+        insert_row(path, ts=time.time(), tzo=0, request_id="now")
+        f = m.summary(session="c")["freshness"]
+        assert f["live"] is True, f
+        assert f["age_seconds"] < 5.0, f
+
+
+@pytest.mark.parametrize("offset,expected", [
+    (-5.0, True),           # a clock a few seconds ahead is still live traffic
+    (0.0, True),
+    (metrics_mod.LIVE_WINDOW_S - 5, True),
+    (metrics_mod.LIVE_WINDOW_S + 5, False),
+    (600.0, False),
+])
+def test_the_live_window_is_the_published_one_and_is_symmetric(offset, expected):
+    """`live` is derived from the ROUNDED, PUBLISHED age, so a consumer re-deriving
+    `age_seconds <= window_seconds` from this payload lands on the same answer.
+
+    SYMMETRIC: a machine whose clock runs a few seconds ahead writes rows dated in the
+    future and those rows are genuinely live. An unbounded future is not, and the signed
+    `age_seconds` is what lets a reader tell the two apart.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        insert_row(path, ts=time.time() - offset, tzo=0, request_id="only")
+        f = m.summary(session="c")["freshness"]
+        assert f["live"] is expected, (offset, f)
+        # The published pair must agree with the published flag.
+        assert (abs(f["age_seconds"]) <= f["window_seconds"]) is f["live"], f
+
+
+def test_a_clock_running_ahead_publishes_a_negative_age_never_a_clamped_zero():
+    """`age_seconds` is SIGNED and UNCLAMPED.
+
+    A row dated in the future means this machine's clock is behind the writer's.
+    `max(0.0, ...)` would erase the only signal that says so and leave a skewed store
+    byte-indistinguishable from one that took a call this instant -- the same
+    "plausible number in place of a real state" substitution the `tzo` column exists to
+    prevent, one block down.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        insert_row(path, ts=time.time() + 45.0, tzo=0, request_id="ahead")
+        f = m.summary(session="c")["freshness"]
+        assert f["age_seconds"] < -40.0, f
+        # ...and the skew is DISCLOSED without calling a live gateway dead: 45 seconds
+        # ahead is still inside the window.
+        assert f["live"] is True, f
+
+
+def test_an_empty_store_is_not_live_and_says_so_with_None_not_zero():
+    """An age of 0 would say "a row arrived this instant". There is no row."""
+    with tempfile.TemporaryDirectory() as d:
+        m = Metrics(db_path=os.path.join(d, "m.db"))
+        f = m.summary()["freshness"]
+        assert f["newest_ts"] is None and f["age_seconds"] is None, f
+        assert f["live"] is False, f
+
+
+def test_freshness_is_scoped_by_session_like_every_other_figure_here():
+    """A per-chat summary answers about THAT chat's rows. Reading the whole ledger's
+    newest row into a scoped summary would report a chat as live because some other
+    chat is busy."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        insert_row(path, ts=time.time(), tzo=0, session="busy", request_id="a")
+        insert_row(path, ts=time.time() - 29 * 3600, tzo=0, session="idle",
+                   request_id="b")
+        assert m.summary(session="busy")["freshness"]["live"] is True
+        assert m.summary(session="idle")["freshness"]["live"] is False
+        # Unscoped, the ledger as a whole IS live -- one busy chat is traffic.
+        assert m.summary()["freshness"]["live"] is True
+
+
+def test_freshness_is_not_read_off_the_capped_detail_page():
+    """`MAX(ts)` is asked of SQLite DIRECTLY rather than taken from `detail[0]`.
+
+    `detail` is `ORDER BY ts DESC LIMIT max_rows`, so `detail[0]` happens to be the
+    newest row for every cap ABOVE zero -- which is exactly what makes the shortcut
+    tempting and exactly why the boundary has to be pinned. At `max_rows=0` the page is
+    empty while the store is not, and a freshness block sourced from that page would
+    report "no rows, not live" about a gateway taking traffic this second. It is also an
+    ordering detail nothing states: SQLite's NULL placement under DESC is what makes
+    `detail[0]` the newest, and `MAX()` ignores NULLs by definition.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        newest = time.time()
+        insert_row(path, ts=newest, tzo=0, request_id="newest")
+        for i in range(5):
+            insert_row(path, ts=newest - 29 * 3600 - i, tzo=0,
+                       request_id="old%d" % i)
+
+        # Truncated, but the newest row is still examined.
+        s = m.summary(session="c", max_rows=2)
+        assert s["counts"]["examined"] == 2 and s["counts"]["truncated"] is True
+        assert s["freshness"]["newest_ts"] == pytest.approx(newest, abs=1e-6)
+        assert s["freshness"]["live"] is True
+
+        # ...and the boundary the shortcut cannot survive: NOTHING is examined, six
+        # rows are in the store, and the newest of them arrived a moment ago.
+        s0 = m.summary(session="c", max_rows=0)
+        assert s0["counts"]["examined"] == 0 and s0["total"] == 6
+        assert s0["freshness"]["newest_ts"] == pytest.approx(newest, abs=1e-6), s0
+        assert s0["freshness"]["live"] is True, s0["freshness"]

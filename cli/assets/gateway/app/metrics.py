@@ -289,6 +289,120 @@ def _period_starts(now: datetime | None = None) -> dict:
     }
 
 
+# --- IS THE DATA LIVE? --------------------------------------------------------
+#
+# A row that ARRIVED within this many seconds of now is the only evidence this module
+# accepts for "traffic is flowing". It is a statement about DATA, never about a socket.
+#
+# The Monitor rendered a green "live" dot off the /ws connection being open. /ws only
+# pushes when a request is ROUTED, so an idle gateway pushes nothing -- correct
+# behaviour, dishonestly presented: a connected socket that has delivered nothing for
+# 29 hours was indistinguishable from one delivering a call a second. A connection is
+# evidence that the dashboard can HEAR the gateway. It is not evidence that the gateway
+# has anything to say. `freshness.live` answers the second question, which is the one
+# the dot was read as answering.
+#
+# SYMMETRIC WINDOW, on purpose. `live` asks whether the newest row is within
+# LIVE_WINDOW_S of now IN EITHER DIRECTION: a machine whose clock runs a few seconds
+# ahead writes rows dated in the future and those rows are genuinely live traffic. An
+# UNBOUNDED future is not -- a row dated next year is a corrupt timestamp, and reading
+# it as "live" would resurrect the same false-confidence shape one layer down. The
+# signed `age_seconds` rides out beside the flag so a reader can tell the two apart.
+LIVE_WINDOW_S = 120.0
+
+
+# The acknowledgement a renderer MUST carry when it prints an unsubstantiated figure.
+# Parametrised by COUNTS rather than by the dollar amount: counts are exact and carry no
+# rounding hazard, where "$0.0001" in a sentence about a real claim reads as "$0.00" and
+# turns the disclosure into the very understatement it exists to prevent.
+_ACK_UNMEASURED = (
+    "This figure is arithmetic over {priced} priced call(s), none of which carried "
+    "provider-reported usage (usage_source is not 'body'). Nobody confirmed those token "
+    "counts against a provider response, so Cheaper did not MEASURE this saving and "
+    "does not claim it as one.")
+_ACK_MIXED = (
+    "This figure mixes {measured} priced call(s) that carried provider-reported usage "
+    "with {unmeasured} that did not. A mixed population cannot be labelled measured, "
+    "and the two halves are not separated here because doing so would re-run the dollar "
+    "arithmetic rather than label it.")
+_ACK_NONE = (
+    "No call could be priced, so there is no saving to report. That is not the same "
+    "claim as a saving of $0.00.")
+# The `_PRICING`-unavailable arm: there is a published figure and there are ZERO priced
+# rows behind it, so _ACK_UNMEASURED's "arithmetic over N priced call(s)" would read
+# "over 0" and describe nothing. The figure is real; it just comes from somewhere else.
+_ACK_LEGACY_ESTIMATE = (
+    "The pricing catalog is unavailable, so this figure is the legacy TIER-WEIGHT "
+    "ESTIMATE over every recorded row -- not a per-row price, and not a measurement. "
+    "`catalog.priced` is false for the same reason.")
+
+
+def _headline(dollars_basis: str, saved: float, priced: int, measured: int) -> dict:
+    """The ONE surface on this payload a renderer may print as a MEASURED saving.
+
+    WHY THIS EXISTS AT ALL, AND WHY `dollars.saved` IS NOT NULLED INSTEAD
+    --------------------------------------------------------------------
+    The owner's store holds 94 rows with ``usage_source`` NULL on every one of them --
+    the gateway's measured path has never fired against it -- and four of those rows
+    carry the entire $80.52 the dashboard prints under a headline that reads as
+    measured. `usage_source IS NULL` does not mean the arithmetic is wrong; it means
+    NOBODY EVER CONFIRMED THOSE TOKEN COUNTS AGAINST A PROVIDER RESPONSE. The numbers
+    are whatever the request body implied, not what was billed.
+
+    Two honest treatments were available and the choice is not obvious:
+
+      * WITHHOLD (invariant 4: unpriceable -> no claim, labelled, counted). Invariant 4
+        governs rows the module CANNOT COMPUTE -- no catalog rate, no derivable day, an
+        undetermined counterfactual. These rows are not that. Every input to the
+        subtraction is present and every rate resolves; what is missing is PROVENANCE on
+        the inputs. Withholding a computable figure teaches the reader nothing about why
+        it is doubted, and it would also have meant re-computing `dollars`, which the
+        shared contract forbids in terms ("additive labelling, not a re-computation") --
+        `dollars.saved` is consumed by `cheaper peek --tagline`, by `baselines`, by the
+        period roll-up and by the cross-runtime parity gates, and silently blanking it
+        would break four consumers to fix one renderer.
+      * PUBLISH LABELLED. Chosen. The arithmetic stays exactly where it was and this
+        block states, in the payload, what population it came from.
+
+    A LABEL NOBODY IS FORCED TO READ IS NOT A FIX, so the label is load-bearing rather
+    than advisory:
+
+      * `saved` -- the ONLY key here a consumer may render as a measured saving -- is
+        ``None`` unless every priced row carried ``usage_source == 'body'``. The lazy
+        path (read the obvious key, print it) therefore renders nothing, which is the
+        correct output for an unmeasured population.
+      * the figure is still available, under `unsubstantiated_saved`. A renderer that
+        wants to show it has to TYPE THAT WORD, which makes showing it a decision
+        somebody made rather than a default nobody noticed.
+      * `acknowledgement` is the sentence that must appear beside it. Non-empty exactly
+        when `saved` is None.
+
+    RESIDUAL RISK, STATED RATHER THAN HIDDEN: a legacy consumer reading `dollars.saved`
+    directly still gets the unlabelled number. That is the price of not re-computing,
+    and it is why `measurement.dollars_basis` exists as a sibling of the dollars -- one
+    scalar, checkable in a conditional, that says whether `dollars` may be described as
+    measured. dashboard.html and report.html are the two renderers that must consult it.
+    """
+    if dollars_basis == "measured":
+        return {"saved": saved, "unsubstantiated_saved": None,
+                "withheld_reason": "", "acknowledgement": ""}
+    if dollars_basis == "mixed":
+        return {"saved": None, "unsubstantiated_saved": saved,
+                "withheld_reason": "mixed_usage",
+                "acknowledgement": _ACK_MIXED.format(
+                    measured=measured, unmeasured=max(0, priced - measured))}
+    if dollars_basis == "none":
+        # `saved` is 0.0 here and publishing it would say "we measured a saving of
+        # $0.00" about a window in which nothing was priced at all -- the exact
+        # "$0 vs we weren't watching" collapse reporting.py refuses one layer up.
+        return {"saved": None, "unsubstantiated_saved": None,
+                "withheld_reason": "no_priced_calls", "acknowledgement": _ACK_NONE}
+    return {"saved": None, "unsubstantiated_saved": saved,
+            "withheld_reason": "unmeasured_usage",
+            "acknowledgement": (_ACK_LEGACY_ESTIMATE if priced == 0
+                                else _ACK_UNMEASURED.format(priced=priced))}
+
+
 # How many times record() will re-attempt a write that SQLite refused with
 # OperationalError, and how long it waits between attempts (doubling each time, so
 # 50ms + 100ms on top of the 5s busy timeout each attempt already carries).
@@ -754,8 +868,72 @@ class Metrics:
                 "COALESCE(status,0), COALESCE(usage_source,''), tzo "
                 "FROM decisions" + where + " ORDER BY ts DESC LIMIT ?",
                 sp + (max_rows,)).fetchall()
+            # The newest row's instant, asked of SQLite DIRECTLY rather than read off
+            # `detail[0]`. `detail` is capped at `max_rows` and `MAX(ts)` is not, so the
+            # two agree today and would silently diverge the moment a caller passed a
+            # small cap -- and this is the one figure on the summary whose whole job is
+            # to say whether anything is arriving. It is also NULL-safe in a way the
+            # ORDER BY is not: SQLite sorts NULLs LAST under DESC, so `detail[0]` happens
+            # to be the newest non-NULL row, but only by an ordering detail nothing
+            # states. `MAX()` ignores NULLs by definition.
+            newest_ts = c.execute(
+                "SELECT MAX(ts) FROM decisions" + where, sp).fetchone()[0]
         by_tier = {t: {"count": n, "in_tokens": it or 0, "out_tokens": ot or 0}
                    for (t, n, it, ot) in rows}
+
+        # --- THE MEASUREMENT CENSUS ------------------------------------------------
+        #
+        # WHAT POPULATION DO THE DOLLARS ABOVE ACTUALLY DESCRIBE? Every figure on this
+        # summary was published without an answer, and on the owner's live store the
+        # answer turns out to be "four rows nobody ever measured".
+        #
+        # Counted in its OWN pass, deliberately:
+        #   * it runs whether or not `_PRICING` is available, so the labels never vanish
+        #     in the one configuration where the dollars are a tier-weight ESTIMATE and
+        #     the labelling matters most;
+        #   * it touches no dollar accumulator, which is what makes this additive
+        #     labelling rather than a re-computation of anything.
+        #
+        # SCOPE is exactly `counts.examined` -- the same `detail` rows every aggregate
+        # below is built from, session-scoped and capped at `max_rows` -- so
+        # `measured_calls + unmeasured_calls == counts.examined` by construction. The
+        # tuple is unpacked by name rather than indexed so that a change to the SELECT
+        # above breaks here loudly instead of quietly re-pointing a column.
+        measured_calls = 0
+        unmeasured_calls = 0
+        zero_token_calls = 0
+        zero_output_calls = 0
+        output_bearing_calls = 0
+        for (_ts, _tier, _om, _it, _ot, _src, _rtier, _reff, _served,
+             _cr, _c5, _c1, _status, _usrc, _tzo) in detail:
+            # NOT `in ('', 'estimate', None)`. The test is "did a provider confirm this",
+            # so the ONLY passing value is 'body' and everything else -- NULL, '', the
+            # documented 'estimate', and any value a future writer invents -- fails
+            # closed into `unmeasured`. record() already normalises unknown inputs to '',
+            # but summary() reads a FILE, not record()'s output, and the store on disk
+            # predates that normalisation.
+            if (_usrc or "").strip().lower() == "body":
+                measured_calls += 1
+            else:
+                unmeasured_calls += 1
+            _in = _it or 0
+            _out = _ot or 0
+            # THE CONTRACT'S KEY, computed exactly as the contract defines it: in+out
+            # == 0. Worth stating that on the store this work was commissioned against
+            # it is ZERO -- the 90 synthetic probes carry 2-13 INPUT tokens and no
+            # output, so they are not zero-TOKEN rows at all. They are the rows below.
+            if _in + _out == 0:
+                zero_token_calls += 1
+            # ...and THIS is the count that explains the Logs/Reports contradiction the
+            # user actually sees: 90 of 94 rows produced no output tokens, so their cost
+            # is a few input tokens each and every one of them renders as $0.00, while
+            # the four rows that did produce output carry the whole $80.52. Both surfaces
+            # are arithmetically right; nothing here changes either. What was missing was
+            # any figure a renderer could use to SAY so.
+            if _out == 0:
+                zero_output_calls += 1
+            else:
+                output_bearing_calls += 1
 
         # --- Legacy tier-weight estimate (kept for back-compat) ---
         top = max(self.price, key=self.price.get)
@@ -776,6 +954,60 @@ class Metrics:
         models_changed = 0
         models_upcharged = 0
         tokens_downgraded = 0
+        # --- the two token counts the CLI could not get from here ------------------
+        #
+        # tokens_upcharged  THE OTHER HALF OF tokens_downgraded, and its absence was a
+        #   RATCHET. `tokens_downgraded` only accumulates on the `saved > 0` branch, so a
+        #   chat that was PURELY an upcharge published `tokens.downgraded == 0`. The
+        #   tagline feeds that number to `ledger.record()` as `tokensCredited`, and
+        #   ledger.record() gates on `tokens > 0` (cli/src/peek/ledger.js) -- so the
+        #   whole chat, negative dollars and all, was a no-op against the lifetime total.
+        #   The ledger could only ever move up. That is the third appearance of this
+        #   exact shape in this repo (the whole-conversation routing ratchet, and
+        #   `baselines.highest_tier` being clamped with max(0.0, ...)), and it is fixed
+        #   the same way each time: publish the losing direction as a first-class figure.
+        #
+        #   NON-NEGATIVE, AND DELIBERATELY NOT NETTED AGAINST `tokens_downgraded`. The
+        #   DIRECTION lives in the key name and the SIGN lives in `dollars.saved`, which
+        #   is already signed. Publishing a single netted count would zero out a chat
+        #   whose downgrades and upcharges happen to balance and re-open the same gate --
+        #   a suppression done in the arithmetic, which is the one place it must never
+        #   happen. A consumer that wants "tokens this chat routed at all" adds the two.
+        #
+        # tokens_priced  THE TOKEN HALF OF THE DOLLAR POPULATION. The tagline's spend
+        #   sentence pairs a token count with a dollar figure, and its only available
+        #   token source was `by_tier`, which is an UNBOUNDED `GROUP BY` over every row
+        #   in the session while `dollars.spent` covers only `counts.priced` of them. The
+        #   two halves of one sentence therefore described different populations, and the
+        #   CLI could do nothing about it but LABEL the mismatch (`populationNote()` in
+        #   cli/src/peek/tagline.js prints "the token count covers all N calls, the dollar
+        #   figure only the M that could be priced"). A label is the right move when the
+        #   figure genuinely is not available; it was available, it just was not
+        #   published. Accumulated beside `dollars["spent"]` below, off the same `continue`
+        #   guards, so it covers EXACTLY the rows in `counts.priced` by construction
+        #   rather than by two implementations agreeing.
+        tokens_upcharged = 0
+        tokens_priced = 0
+        # --- the DOLLAR population, counted rather than subtracted ------------------
+        #
+        # `counts.priced` is `examined - sum(unpriced.values())`, an inference. These two
+        # are incremented on the SAME line as `dollars["spent"]`, after every `continue`
+        # above it, so they cannot describe a different set of rows than the money does.
+        #
+        # The distinction between them is the whole point of the block: `priced_calls` is
+        # how many rows put a dollar into the total, `priced_measured` is how many of
+        # THOSE carried usage a provider actually reported. On the owner's store the pair
+        # is (4, 0) -- the entire headline rests on four rows nobody measured.
+        #
+        # `counts.priced` is NOT reused here for a second reason: with `_PRICING` False
+        # it reports `examined` even though the loop never ran, so it would claim a
+        # priced population in the one configuration that has none.
+        priced_calls = 0
+        priced_measured = 0
+        # Money-saving model switches ON ROWS THAT PRODUCED OUTPUT -- the honest
+        # denominator for a downgrade rate. See the `measurement` block for why the
+        # existing `downgrade_rate` is left exactly as it is.
+        downgraded_output_bearing = 0
         downgraded_by_tier = {"haiku": 0, "sonnet": 0, "opus": 0}
         # Per-MODEL histograms. The tagline names the models it credits, because
         # "haiku tier instead of opus" was never checkable by the reader and, once the
@@ -892,6 +1124,19 @@ class Metrics:
                     dollars["billed_top"] += billed_top
                 dollars["saved"] += saved
                 dollars["spent"] += spent
+                # Accumulated HERE, on the same line as the dollars and after every
+                # `continue` above, because that adjacency is the whole guarantee: the
+                # rows behind `tokens.priced` are the rows behind `dollars.spent`, and
+                # neither can drift from the other without this statement moving.
+                tokens_priced += it + ot
+                # Same adjacency, same guarantee, for the measurement labels: a row that
+                # moved the dollars is counted here, and it is counted as MEASURED only
+                # when a provider reported its usage. `dollars_basis` is derived from
+                # nothing else, so the label cannot describe a different population than
+                # the figure it labels.
+                priced_calls += 1
+                if (usrc or "").strip().lower() == "body":
+                    priced_measured += 1
                 if saved > 0:
                     dollars["gross"] += saved
                 elif saved < 0:
@@ -908,8 +1153,19 @@ class Metrics:
                     tokens_downgraded += it + ot
                     downgraded_by_tier[tier] = downgraded_by_tier.get(tier, 0) + 1
                     downgraded_by_model[served] = downgraded_by_model.get(served, 0) + 1
+                    # The same downgrade, restricted to calls that actually produced a
+                    # completion. Incremented HERE, inside the existing branch, so it can
+                    # only ever count rows `models_changed` already counted -- a subset by
+                    # construction, never a parallel definition that could disagree.
+                    if ot > 0:
+                        downgraded_output_bearing += 1
                 elif changed and saved < 0:
                     models_upcharged += 1
+                    # Mirrors `tokens_downgraded` on the branch above, token for token
+                    # and condition for condition. Anything that counts as a downgrade
+                    # in one direction has to count as an upcharge in the other, or the
+                    # ledger is asymmetric again in a way no reader can see.
+                    tokens_upcharged += it + ot
                     upcharged_by_model[served] = upcharged_by_model.get(served, 0) + 1
                 # The baseline is the priciest model actually REQUESTED this session,
                 # ranked on a fixed 1M-in/1M-out basket. Price, not tier: capability
@@ -980,6 +1236,55 @@ class Metrics:
                        "saved": round(saved_u, 4), "spent": round(spent_u, 4),
                        "billed_top": round(billed_top_u, 4), "savings_pct": round(pct_u, 1)}
 
+        # --- WHAT KIND OF NUMBER IS `dollars`? -------------------------------------
+        #
+        # ONE SCALAR, checkable in a single conditional, that says whether the dollars on
+        # this payload may be described as measured. "measured" requires EVERY priced row
+        # to have carried provider-reported usage; anything short of that is named.
+        #
+        # `row_is_priceable` already refuses `usage_source == 'estimate'`, so a priced row
+        # is either 'body' or UNKNOWN (NULL/''). That is precisely why this is needed: an
+        # unknown row sails through the exclusion gate and lands in the dollars looking
+        # identical to a confirmed one. The gate answers "may this row be priced"; this
+        # answers "may the result be called a measurement", and they are different
+        # questions with different answers on all 94 of the owner's rows.
+        #
+        # The `_PRICING`-unavailable arm is NOT "none". In that configuration `dollars` is
+        # the legacy tier-weight ESTIMATE over `by_tier` -- a real, non-zero, published
+        # figure derived from no priced row at all -- and calling that "none" would let a
+        # consumer read "no claim is being made" while a claim sits right beside it.
+        # "unmeasured" is what it is. "none" is reserved for the case where there is no
+        # dollar figure to describe, which is exactly `dollars.saved == 0.0` on both arms.
+        if _PRICING:
+            if priced_calls == 0:
+                dollars_basis = "none"
+            elif priced_measured == priced_calls:
+                dollars_basis = "measured"
+            elif priced_measured == 0:
+                dollars_basis = "unmeasured"
+            else:
+                dollars_basis = "mixed"
+        else:
+            dollars_basis = "unmeasured" if total else "none"
+
+        # --- HOW OLD IS THE NEWEST ROW? ---------------------------------------------
+        #
+        # `age_seconds` is SIGNED and unclamped. A negative age is a clock running ahead
+        # of this process, and clamping it to 0 would erase the one signal that says so.
+        #
+        # `live` is derived from the ROUNDED, PUBLISHED age rather than from the raw
+        # float, so a consumer that re-derives `age_seconds <= window_seconds` from this
+        # payload lands on the same answer this module did. Two readers of one block
+        # disagreeing about their own contents is the defect class this file spends most
+        # of its comments on.
+        if newest_ts is None:
+            age_seconds = None
+            live = False        # no rows at all is not "live"; it is "nothing to see"
+        else:
+            newest_ts = float(newest_ts)
+            age_seconds = round(time.time() - newest_ts, 3)
+            live = -LIVE_WINDOW_S <= age_seconds <= LIVE_WINDOW_S
+
         by_tool = sorted(
             ({"tool": a["tool"], "calls": a["calls"], "saved": round(a["saved"], 4),
               "spent": round(a["spent"], 4),
@@ -1029,6 +1334,128 @@ class Metrics:
                 # under-reported. Say when the figures are a sample.
                 "truncated": total > max_rows,
             },
+            # --- CAN THESE DOLLARS BE CALLED A MEASUREMENT? ------------------------
+            #
+            # Additive labelling of the figures above. NOTHING in this block changes an
+            # existing key or a cent of existing arithmetic; every value is a count over
+            # the same rows, or a name for what those rows are.
+            #
+            # It exists because the product published $80.52 as a measured saving from a
+            # store in which `usage_source` is NULL on every one of 94 rows -- i.e. the
+            # gateway's measured path had never fired even once against that database.
+            # The dollars were not wrong. The CLAIM around them was, and no field on this
+            # payload could contradict it.
+            "measurement": {
+                # --- the shared contract. These five names are fixed; the dashboard half
+                # --- is built against them and must not have to guess at a spelling.
+                #
+                # Scope for the three counts: `counts.examined`, i.e. the session-scoped
+                # rows this summary actually read (capped at `max_rows`).
+                # `measured_calls + unmeasured_calls == counts.examined`, always.
+                "measured_calls": measured_calls,
+                # Everything that is not 'body': NULL, '', 'estimate', and anything a
+                # future writer invents. Fails closed -- an unrecognised provenance is
+                # never promoted to a measurement.
+                "unmeasured_calls": unmeasured_calls,
+                # measured | unmeasured | mixed | none. THE one field a renderer checks
+                # before describing `dollars` as measured. See the derivation above.
+                "dollars_basis": dollars_basis,
+                # Rows that actually put a dollar into `dollars`, counted at the
+                # accumulator rather than inferred by subtraction.
+                "priced_calls": priced_calls,
+                # Rows carrying NO TOKENS AT ALL (in + out == 0), which can only ever
+                # price to $0. Named by the contract and computed exactly as the contract
+                # defines it -- and worth recording that on the store this was
+                # commissioned against it is 0, because the 90 synthetic probes there
+                # carry 2-13 input tokens each. `zero_output_calls` is the count that
+                # describes them, and it is the one the Logs/Reports contradiction needs.
+                "zero_token_calls": zero_token_calls,
+
+                # --- beyond the contract: the material the three reported symptoms need
+                # --- a renderer to be able to state. Additive; the contract names above
+                # --- keep exactly the semantics the contract gives them.
+                #
+                # The denominator for the three counts above, mirrored here so this block
+                # reconciles without a reader having to cross-reference `counts`.
+                "examined_calls": min(total, max_rows),
+                # THE LOGS/REPORTS CONTRADICTION, IN DATA. Logs shows $0.00 on 90 of 94
+                # rows while Reports shows $80.52, and BOTH ARE ARITHMETICALLY RIGHT: 90
+                # rows produced no output tokens, so each costs a few input tokens and
+                # renders as $0.00, and the 4 rows that did produce output carry the
+                # entire figure. The arithmetic is untouched -- what is added is the pair
+                # of counts that lets a surface say "90 of 94 calls returned no output
+                # tokens and therefore no measurable cost" instead of leaving a user to
+                # reconcile two screens that look like they disagree.
+                "zero_output_calls": zero_output_calls,
+                "output_bearing_calls": output_bearing_calls,
+                # --- THE DOWNGRADE RATE'S DENOMINATOR ---------------------------------
+                #
+                # `downgrade_rate` (top level) reads 67.0% and `counts.models_changed`
+                # reads 62, both dominated by probes that moved a model but moved no
+                # output and no money. A rate whose denominator is mostly empty probes is
+                # not informative.
+                #
+                # POSITION TAKEN: report the rate over rows that actually produced a
+                # completion, AND publish its denominator, rather than silently redefine
+                # the existing key. Two reasons the existing `downgrade_rate` is left
+                # untouched: the shared contract forbids changing an existing key, and
+                # that key is compared across runtimes by the parity gates -- restating it
+                # here would make the gates disagree about a number neither side got
+                # wrong. So the honest rate is published BESIDE it, named for its
+                # population.
+                #
+                # WHY "produced output" is the line, and not "carried tokens": a call that
+                # returned zero output tokens produced no completion. It is a probe, a
+                # handshake or a health check, and crediting it as a downgrade counts a
+                # routing decision that saved nothing. `in + out > 0` would keep all 90
+                # probes in the denominator and change nothing about the complaint.
+                #
+                # A SUBSET BY CONSTRUCTION: `downgraded_output_bearing` is incremented
+                # inside the branch that increments `counts.models_changed`, so it can
+                # never exceed it or drift from its definition.
+                "downgraded_output_bearing": downgraded_output_bearing,
+                # None, never 0.0, when nothing produced output: no denominator, no rate.
+                # 0.0 would assert "we routed these calls and downgraded none of them"
+                # about a population that does not exist.
+                "downgrade_rate_output_bearing": (
+                    round(downgraded_output_bearing / output_bearing_calls * 100, 1)
+                    if output_bearing_calls else None),
+                # The headline a renderer may print, and the acknowledgement it must
+                # print alongside. See _headline() for why `dollars.saved` itself is left
+                # alone and what this buys instead.
+                "headline": _headline(dollars_basis, dollars["saved"],
+                                      priced_calls, priced_measured),
+            },
+            # --- IS ANYTHING ARRIVING? ----------------------------------------------
+            #
+            # About the DATA, never about the socket. The Monitor's green dot and its
+            # "Active sessions" panel were read off /ws being connected; /ws only pushes
+            # when a request is routed, so an idle gateway produced an open, healthy,
+            # silent socket that rendered identically to a busy one. On the owner's store
+            # the newest row is 29 HOURS old and `live` is False -- which is the truthful
+            # answer, and the one the dot was never able to give.
+            #
+            # SCOPE, because it is easy to misread: this describes the rows THIS GATEWAY
+            # RECORDED. A client that talks straight to api.anthropic.com (Claude Desktop
+            # for macOS, for one) never reaches this proxy, so its traffic is structurally
+            # invisible here and its absence from this block is not a fault in it. The
+            # gateway can only see a client whose base URL points at the gateway.
+            # `live: false` means "nothing is flowing THROUGH CHEAPER", never "you are
+            # not working".
+            "freshness": {
+                # Epoch seconds of the most recent row, session-scoped like everything
+                # else here, and NOT capped by `max_rows`. None when there are no rows.
+                "newest_ts": newest_ts,
+                # Signed and unclamped: negative means this machine's clock is behind the
+                # writer's, which is a fact worth seeing rather than rounding away.
+                "age_seconds": age_seconds,
+                # A row arrived within `window_seconds` of now. False on an empty store.
+                "live": live,
+                # Published so a renderer can name the window it is asserting about
+                # ("no calls in the last 2 minutes") instead of hardcoding a second copy
+                # of this number and drifting from it.
+                "window_seconds": LIVE_WINDOW_S,
+            },
             # --- what NEVER REACHED the ledger ------------------------------------
             #
             # Everything in `counts` above describes rows that ARE in the store. These
@@ -1072,7 +1499,32 @@ class Metrics:
                 "rejected_ts": self.rejected_ts,
             },
             "tokens": {"saved_reasoning_potential": tokens_saved_potential,
-                       "downgraded": tokens_downgraded},
+                       "downgraded": tokens_downgraded,
+                       # The DOWNGRADE's mirror image. Non-negative, never netted against
+                       # `downgraded`: the direction is the key name and the sign is
+                       # `dollars.saved`. A consumer wanting "tokens this chat routed"
+                       # adds the two -- which is what stops a purely-upcharged chat
+                       # publishing a zero token count and being dropped by a `tokens > 0`
+                       # gate downstream.
+                       "upcharged": tokens_upcharged,
+                       # Tokens over EXACTLY the rows in `counts.priced` -- the same rows
+                       # `dollars.spent` covers. Publishing it is what lets a caller pair
+                       # a token count with a dollar figure from ONE population instead of
+                       # labelling the mismatch.
+                       #
+                       # `None`, not 0, when pricing is unavailable: there is no priced
+                       # population in that configuration (the dollars degrade to the
+                       # legacy tier-weight estimate over `by_tier`, and `catalog.priced`
+                       # already says so), and a 0 would read as "this session ran no
+                       # tokens" -- a claim, where None is the honest absence of one. Same
+                       # rule as `tzo`: a missing value is never quietly rendered as a
+                       # plausible number.
+                       #
+                       # NOT the same thing as the `by_tier` token totals, and it must not
+                       # be substituted for them: `by_tier` is unbounded and covers every
+                       # row, this is capped at `max_rows` and excludes every unpriced
+                       # reason. `counts.truncated` says when the cap bit.
+                       "priced": tokens_priced if _PRICING else None},
             # Savings rolled up per wall-clock period for the Reports "by period" block.
             # Keys: today, week, month, quarter, year, all.
             "periods": {k: {"saved": round(v["saved"], 4),

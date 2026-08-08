@@ -22,10 +22,15 @@ const HELP = `
     gateway start       Start the routing gateway (proxy + monitor).
     gateway stop        Stop the gateway.
     gateway status      Is the gateway running?
-    dashboard | reports | logs | monitor
-                        Open the live localhost dashboard at that tab in your
-                        browser (starts the gateway if needed). launch = Dashboard.
-                        Every one also PRINTS, so nothing is browser-only:
+    dashboard           Open the live localhost dashboard in your browser
+                        (starts the gateway if needed). launch = Dashboard.
+                        --json              the same data, for scripts
+                        No --terminal view yet — asking for one prints a pointer
+                        to --json instead of silently opening the browser.
+    reports | logs | monitor
+                        Open that tab of the same localhost dashboard in your
+                        browser (starts the gateway if needed). Every one also
+                        PRINTS, so nothing is browser-only:
                         --terminal          render the same view in the terminal
                         --json              the same data, for scripts
                         monitor --json [--watch]  raw /metrics, single-shot or streamed
@@ -86,7 +91,7 @@ const HELP = `
 // spaces — that gap is what separates a name from its description in this layout.
 //
 // A head containing `|` is an ALIAS LIST and every branch of it is a command name
-// (`dashboard | reports | logs | monitor` → all four). Otherwise only the FIRST token
+// (`reports | logs | monitor` → all three). Otherwise only the FIRST token
 // names the command, and the rest is argument syntax: `import --since D` declares
 // `import`, `install [skill …]` declares `install`, and `gateway start` declares
 // `gateway` — not `start`, and not `status` for `gateway status`, which would
@@ -151,8 +156,16 @@ async function main() {
       return require('../src/reports').run(rest);
     case 'logs':
       return require('../src/logs').run(rest);
+    // `dashboard` is the ONE alias with no in-terminal renderer (see dashboard.js: only
+    // `collect()`'s three panels exist, never composed into a terminal view). Routing
+    // `--terminal`/`--tty` here too — rather than falling through to the browser-opening
+    // branch below — matters because it used to be a SILENT no-op: a user who typed
+    // `dashboard --terminal` out of habit from the other three got the browser instead,
+    // with no indication their flag was ignored. dashboard.run() now notices the flag
+    // and says so explicitly instead of guessing what they meant.
     case 'dashboard':
-      if (rest.includes('--json')) return require('../src/dashboard').run(rest);
+      if (rest.includes('--json') || rest.includes('--terminal') || rest.includes('--tty'))
+        return require('../src/dashboard').run(rest);
       return require('../src/launch').run(rest, { tab: 'dashboard' });
     case 'launch':
     case 'init':

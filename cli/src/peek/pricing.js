@@ -31,7 +31,7 @@
 //   - what a call HISTORICALLY cost  -> priced at that call's own day (`opts.at`)
 //   - what adopting Cheaper WOULD save -> both legs priced at TODAY
 
-const { TIERS, rank, modelTier, routeDecision } = require('./classify');
+const { TIERS, rank, modelTier, routeDecision, mapFamily } = require('./classify');
 const { resolveModel, ratesFor, normalizeId, CATALOG_AS_OF } = require('./models');
 
 // tier name (haiku|sonnet|opus) -> pricing bucket (cheap|mid|top)
@@ -66,6 +66,43 @@ const ROUTE_TARGET = {
 };
 // Back-compat alias; sync-prices.js and the gateway JSON still read this name.
 const REPRESENTATIVE = ROUTE_TARGET;
+
+// ---- WHICH OF THOSE ROUTES THE GATEWAY CAN ACTUALLY TAKE -------------------
+//
+// ROUTE_TARGET declares cheap/mid/top for SIX vendors, and estimateCall priced a
+// downgrade for every one of them. The gateway exposes exactly TWO endpoints that rewrite
+// `body["model"]` — i.e. that route anything at all:
+//
+//   POST /v1/messages          app.py:491  -> Anthropic  (UPSTREAM, CFG.models)
+//   POST /v1/chat/completions  app.py:812  -> OpenAI     (OPENAI_UPSTREAM, OPENAI_MODELS)
+//
+// Everything else falls through to the catch-all proxy at app.py:1151, which forwards the
+// request verbatim to UPSTREAM. That proxy is NOT "read-only reporting" — it relays real
+// traffic, including POSTs — but it never reads or writes `body["model"]`, so no tier is
+// chosen, no substitution happens, and no dollar moves. For estimation purposes a vendor
+// with no rewriting endpoint is a vendor Cheaper cannot save money on TODAY.
+//
+// MEASURED 2026-08-08: 28 of the 75 catalog ids (37.3%) sit in a family that HAS a peek
+// route target and NO gateway endpoint, and 4 of ROUTE_TARGET's 6 families (google, xai,
+// deepseek, mistral) are unroutable in their entirety.
+//
+// THE FAMILIES ARE NOT DELETED. The counterfactual "what would Gemini Pro work cost on
+// Gemini Flash" is a real and interesting number — it is simply not a saving the user can
+// bank this week, so scan.js reports it in a SEPARATE bucket and keeps it out of the
+// headline. Deleting the targets would answer a good question with silence; leaving them
+// in the headline answers a different question than the one the headline asks.
+//
+// Overridable from the live gateway (`routableFamilies`, /healthz `routable_families`) so
+// that adding a third front end does not require editing this constant — see
+// freshness.js::routerConfigFrom.
+const ROUTABLE_FAMILIES = Object.freeze(['anthropic', 'openai']);
+
+// Is this vendor one the gateway can rewrite a model id for today?
+// `families` defaults to the shipped pair; a live gateway may report its own.
+function isRoutableFamily(family, families) {
+  const list = Array.isArray(families) && families.length ? families : ROUTABLE_FAMILIES;
+  return list.includes(String(family || '').toLowerCase());
+}
 
 // THE SAME TABLE, KEYED BY TIER NAME (haiku|sonnet|opus) INSTEAD OF BY PRICE BUCKET.
 //
@@ -132,6 +169,27 @@ function detectFamily(modelId) {
   if (/(llama|meta-llama)/.test(m)) return 'meta';
   if (/(mistral|mixtral|codestral|ministral|magistral|devstral)/.test(m)) return 'mistral';
   return null; // unrecognized -> unpriceable
+}
+
+// Are these two ids the SAME MODEL — i.e. would pricing them separately be pricing one
+// model twice? This is what decides whether the router really substituted anything, and
+// it cannot be `===`: one side is a route-target id (from ROUTE_TARGET, or from an
+// operator's /healthz map) and the other is whatever the provider wrote into a transcript
+// — the same model spelled with a vendor prefix, a dated snapshot, or a catalogued alias.
+// Reading `us.anthropic.claude-opus-5-20260101` and `claude-opus-5` as two models would
+// book a dollar difference between a model and itself.
+//
+// Catalog entry first, because that is the equivalence PRICE is computed from and it
+// covers aliases the id text cannot. Both-unresolvable falls back to the normalised id,
+// which is all an uncatalogued operator target leaves to compare. One resolvable and one
+// not is never the same model: a catalogued id and an uncatalogued one price differently
+// by construction.
+function sameModel(a, b) {
+  const ea = resolveModel(a);
+  const eb = resolveModel(b);
+  if (ea && eb) return ea.id === eb.id;
+  if (ea || eb) return false;
+  return normalizeId(a) === normalizeId(b);
 }
 
 // True when we hold published rates for this exact model. Callers use this to skip a
@@ -232,6 +290,23 @@ function costOf(family, tierName, inTok, outTok) {
   return costOfDetailed(family, tierName, { inFresh: inTok, outTok });
 }
 
+// The tier -> model-id map a row's counterfactual is priced against.
+//
+// The live map is used ONLY for the family it actually serves. /healthz `models` is
+// CFG.models, the /v1/messages (Anthropic) map; a future `openai_models` would be the
+// /v1/chat/completions one. Applying an Anthropic map to a Gemini row would price that
+// row's counterfactual as Claude — the cross-vendor substitution this whole file exists
+// to refuse — so a live map is accepted only when mapFamily() says it serves this row's
+// own family, and otherwise the shipped ROUTE_TARGET for that family is used.
+function routeTargetsFor(family, router) {
+  const shipped = ROUTE_TARGET_BY_TIER[family] || null;
+  if (!router) return shipped;
+  for (const live of [router.models, router.openaiModels]) {
+    if (live && mapFamily(live) === family) return live;
+  }
+  return shipped;
+}
+
 // Core per-call estimate for the PROSPECTIVE report ("what you would save if you
 // adopted Cheaper"). contentTierName is the tier the classifier picked from the
 // prompt text. Prices the actual leg against the real model and the counterfactual
@@ -269,18 +344,40 @@ function costOf(family, tierName, inTok, outTok) {
 // removes it from every total. The signed delta is returned and split into `gross` /
 // `extra` here (the shape derive.js::foldRows uses) so the caller can report the
 // anti-saving instead of losing it.
+//
+// THE ROUTER IT PRICES IS THE ROUTER YOU ARE RUNNING — when we can find out.
+//
+// `opts.router` is a resolved configuration from freshness.js::routerConfig(), which
+// reads the live /healthz. Omitted, every knob falls back to the shipped default — which
+// is exactly what this function did unconditionally before, so an omitted config is not a
+// behaviour change, it is the old behaviour with a name. What changed is that the caller
+// can now KNOW it is assuming: `router.assumed` lists every guessed knob and
+// `router.labelled` says whether a qualifier is owed next to the dollars.
 function estimateCall(actualModel, inTok, outTok, contentTierName, opts) {
   // null/'' from a row with no derivable calendar day falls back to today, matching
   // resolveModel's own default — an undatable row is not a reason to invent a date.
   const at = (opts && opts.at) || undefined;
+  const router = (opts && opts.router) || null;
   const family = detectFamily(actualModel);
   const actualTier = modelTier(actualModel); // haiku|sonnet|opus, or null
   const priceable = isPriceable(actualModel, { at });
   if (!family || !actualTier || !priceable) {
     return { family: family || 'other', actualTier: null, effTier: null,
              routedTier: null, routedModel: null, passthrough: true,
+             // An unpriceable row is not "unroutable" — those are different exclusions
+             // with different remedies (catalog a price vs. ship an endpoint), and
+             // scan.js counts them in different buckets. `routable` here answers only
+             // "could the gateway rewrite this vendor's model id", which is knowable from
+             // the family alone and stays knowable when the price is not.
+             routable: isRoutableFamily(family, router && router.routableFamilies),
              actualCost: 0, baselineCost: 0, newCost: 0,
-             saved: 0, gross: 0, extra: 0, downgraded: false, priceable: false };
+             saved: 0, gross: 0, extra: 0,
+             // Shape parity with the priced return below, so a consumer never has to
+             // test for the presence of a field before reading it. No route is modelled
+             // for a row we cannot price, so nothing was substituted and no routed-leg
+             // figure is missing.
+             substituted: false, routedPriceable: true,
+             downgraded: false, priceable: false };
   }
   const effRank = Math.min(rank(actualTier), rank(contentTierName));
   const effTier = TIERS[effRank];
@@ -320,27 +417,113 @@ function estimateCall(actualModel, inTok, outTok, contentTierName, opts) {
   // detectFamily but absent from ROUTE_TARGET) is a PASSTHROUGH, never a fallback to
   // some other vendor's map: routeDecision() defaults `models` to the Anthropic targets,
   // which would silently price a Llama call's counterfactual as Claude.
-  const targets = ROUTE_TARGET_BY_TIER[family];
+  //
+  // THE FOUR REMAINING STAGES ARE NOW DRIVEN, NOT DEFAULTED. routeDecision() has always
+  // accepted minTier / allowUpgradeAboveRequested / longRequestChars; peek passed none of
+  // them, so a gateway running ROUTER_MIN_TIER=sonnet or ROUTER_ALLOW_UPGRADE=true was
+  // estimated as if it were shipped-default. They come from the live /healthz when the
+  // gateway is up and from the shipped defaults when it is not — and in the second case
+  // `router.assumed` records that, so the number can be labelled.
+  const targets = routeTargetsFor(family, router);
+  // Only knobs with a REAL value are put on the cfg object. routeDecision merges with
+  // Object.assign, and `{minTier: undefined}` overwrites the default with undefined
+  // rather than falling through to it — harmless today because every consumer happens to
+  // be null-tolerant, and exactly the kind of accident that stops being harmless the next
+  // time someone adds a knob. So the absent case is expressed by absence.
+  const routeCfg = { models: targets, triageTier: contentTierName };
+  if (router) {
+    if (router.minTier != null) routeCfg.minTier = router.minTier;
+    if (router.allowUpgradeAboveRequested != null) {
+      routeCfg.allowUpgradeAboveRequested = router.allowUpgradeAboveRequested;
+    }
+    if (Number.isFinite(Number(router.longRequestChars))) {
+      routeCfg.longRequestChars = Number(router.longRequestChars);
+    }
+  }
   const decision = targets
-    ? routeDecision(null, actualModel, { models: targets, triageTier: contentTierName })
+    ? routeDecision(null, actualModel, routeCfg)
     : { tier: null, model: actualModel, reason: 'no route targets for family ' + family };
   const routedTier = decision.tier;            // null => PASSTHROUGH
-  // The cheaper leg is a different model, so it is priced as that tier's target in the
-  // SAME family — never cross-vendor.
-  const newCost = (routedTier == null || routedTier === actualTier)
-    ? baselineCost
-    : costOfModel(decision.model, toks) || 0;
+  // The routed leg is priced as the model the gateway would really SERVE, in the SAME
+  // family — never cross-vendor.
+  //
+  // THE TEST IS "IS IT A DIFFERENT MODEL", NOT "IS IT A DIFFERENT TIER". This line used
+  // to read `routedTier == null || routedTier === actualTier`, which assumed a same-tier
+  // route costs the same as no route. It does not. The gateway rewrites `body["model"]`
+  // to `models[tier]` whenever it routes — unconditionally, at app.py:516 for
+  // /v1/messages and app.py:835 for /v1/chat/completions — so a same-TIER route is still
+  // a MODEL SUBSTITUTION at a different price, and the old line booked $0.00 for it.
+  //
+  // MEASURED 2026-08-08 over the 75-model catalog with the shipped ROUTE_TARGET map: 63
+  // same-tier substitutions priced as exactly $0.00. At a 1M-in/1M-out basket all 63
+  // UNDERSTATED the saving, by $1,851.20 in total (o1-pro -> gpt-5.6-sol alone is
+  // $715.00; gpt-5.5-pro and gpt-5.4-pro -> gpt-5.6-sol are $175.00 each). At an
+  // input-heavy 100k-in/10k-out basket 60 understated and 3 OVERSTATED — so it could
+  // also HIDE a real anti-saving, a route that costs the user more reading as a neutral
+  // $0.00, which is the suppression the signed-delta note above exists to forbid.
+  //
+  // It became load-bearing when `opts.router` arrived: peek now adopts the gateway's real
+  // tier -> id map from /healthz, so same-tier-but-different-model is the COMMON case
+  // rather than a rarity. With the gateway's shipped OpenAI map
+  // {haiku: gpt-4o-mini, sonnet: gpt-4o, opus: o3}, a caller on `gpt-5.6-terra` with
+  // sonnet-tier content is served `gpt-4o` — $0.35 against $0.32 on a 100k/10k call, an
+  // anti-saving this line reported as $0.00.
+  //
+  // The guard is now the only case where no dollar can move: the router served the
+  // caller's OWN model. `sameModel` and not `===` because `decision.model` comes from a
+  // route map (an operator's, via /healthz) and `actualModel` from a transcript, so the
+  // two spell the same model differently — a dated snapshot, a vendor prefix, an alias.
+  const substituted = routedTier != null && !sameModel(decision.model, actualModel);
+
+  // AN UNPRICEABLE TARGET IS NOT A FREE ONE. This used to be
+  // `costOfModel(decision.model, toks) || 0`, and `|| 0` is the exact move this file's
+  // header forbids: a model with no catalog entry priced at ZERO, which makes `saved`
+  // the WHOLE baseline — a 100% saving invented out of a missing rate. Not hypothetical
+  // and not new; it is reachable today through any live map whose slot names a model the
+  // catalog has never seen. MEASURED: an operator map with sonnet -> 'claude-internal-v9'
+  // turns a 1M/1M `claude-opus-5` row into a $30.00 saving, all of it fabricated.
+  // Widening the branch above multiplies the ways in, so it is closed here rather than
+  // left for the next change to trip over.
+  //
+  // The honest answer when we cannot price the counterfactual is that NO dollar figure is
+  // available for it — so the row books no movement and says so in `routedPriceable`,
+  // rather than booking a saving nobody can check. (With the shipped ROUTE_TARGET this is
+  // unreachable: every target is catalogued, and policy_parity.test.js pins that.)
+  const routedCost = substituted ? costOfModel(decision.model, toks) : null;
+  const routedPriceable = !substituted || routedCost != null;
+  const newCost = routedCost == null ? baselineCost : routedCost;
   const saved = baselineCost - newCost;   // SIGNED: a costlier route is negative
   return { family, actualTier, effTier, routedTier, routedModel: decision.model,
            passthrough: routedTier == null,
+           // Can the gateway rewrite this vendor's model id at all? The dollars above are
+           // computed either way — the counterfactual is real arithmetic about real
+           // published rates — but only a routable row's dollars are a saving the user can
+           // bank today, so scan.js keeps the two apart and the headline takes only the
+           // first. This is NOT a clamp and NOT a suppression: nothing is zeroed, the
+           // signed delta and the gross/extra split are untouched, and the unroutable
+           // rows are reported in full under their own names.
+           routable: isRoutableFamily(family, router && router.routableFamilies),
            actualCost, baselineCost, newCost, saved,
            gross: Math.max(0, saved), extra: Math.max(0, -saved),
+           // Did the router serve a DIFFERENT model id than the caller named? Distinct
+           // from `downgraded`, which is strictly about TIER rank: a same-tier
+           // substitution moves real dollars (63 of them in today's catalog) while
+           // downgrading nothing, so a surface that counts downgrades and a surface that
+           // sums dollars are now answering two different questions and must not be
+           // wired to one flag.
+           substituted,
+           // False ONLY when a route really was taken and its target has no published
+           // rate — so `newCost === baselineCost` here means "no figure available",
+           // NOT "measured no change". The two zeros must stay distinguishable; that is
+           // the same rule `priceable` exists for on the actual leg.
+           routedPriceable,
            downgraded: routedTier != null && rank(routedTier) < rank(actualTier),
            priceable: true };
 }
 
 module.exports = {
   BUCKET, ROUTE_TARGET, ROUTE_TARGET_BY_TIER, REPRESENTATIVE, CATALOG_AS_OF,
-  detectFamily, isPriceable, representativeFor, rate,
+  ROUTABLE_FAMILIES, isRoutableFamily, routeTargetsFor,
+  detectFamily, isPriceable, representativeFor, rate, sameModel,
   costOf, costOfDetailed, costOfModel, normalizeTokens, estimateCall,
 };

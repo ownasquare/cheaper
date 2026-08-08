@@ -190,7 +190,16 @@ test('end-to-end scan over a synthetic fixture home', () => {
     assert.equal(h.calls, 2);
     assert.equal(h.downgradable, 1);                 // only the trivial one
     assert.equal(h.bySource.subagent, 1);            // the security call was a sidechain
-    assert.ok(h.dollarsSaved > 80 && h.dollarsSaved < 90);
+    // WAS `> 80 && < 90` — the trivial row's $84.00 and NOTHING for the security row,
+    // because estimateCall priced a same-tier route as no route at all. The security row
+    // is still not a DOWNGRADE (h.downgradable is 1, asserted above: its tier does not
+    // move), but the gateway still rewrites body["model"] — a claude-opus-4 caller is
+    // served claude-opus-5, same opus tier, $90.00 -> $30.00 on this 1M/1M call. That
+    // $60.00 was real and bankable and peek reported $0.00 for it.
+    //
+    // Pinned exactly rather than as a band: both legs are catalog arithmetic, and a band
+    // is what let a whole missing row hide inside "about 84".
+    assert.ok(Math.abs(h.dollarsSaved - 144) < 1e-9, 'dollarsSaved=' + h.dollarsSaved);
     assert.ok(rep.totals.dollarsSaved > 0);
   } finally {
     if (saved === undefined) delete process.env.CHEAPER_PEEK_HOME;
@@ -1449,15 +1458,37 @@ test('peek scan: an anti-saving survives into the totals instead of being clampe
     const { scan } = require('../src/peek/scan');
     const rep = scan({ only: 'claude-code' });
     const h = rep.harnesses.find((x) => x.key === 'claude-code');
-    assert.equal(h.downgradable, 1);
-    // The clamp reported this as a flat 0 and the loss left the report entirely.
-    assert.ok(h.dollarsSaved < 0, 'net must stay negative, got ' + h.dollarsSaved);
-    assert.ok(Math.abs(h.dollarsSaved + 0.015) < 1e-9, 'dollarsSaved=' + h.dollarsSaved);
-    assert.equal(h.dollarsGross, 0);
-    assert.ok(Math.abs(h.dollarsExtra - 0.015) < 1e-9, 'dollarsExtra=' + h.dollarsExtra);
-    assert.equal(h.offsetCalls, 1);
-    assert.ok(rep.totals.dollarsSaved < 0, 'totals=' + rep.totals.dollarsSaved);
-    assert.ok(rep.totals.savedPct < 0, 'savedPct must carry the sign: ' + rep.totals.savedPct);
+
+    // THE FIXTURE IS A GOOGLE MODEL, AND THAT NOW DECIDES WHICH BUCKET IT LANDS IN.
+    // This test originally asserted the anti-saving in the HEADLINE, because at the time
+    // every vendor was treated as routable. It is not: the gateway exposes exactly two
+    // routing endpoints (/v1/messages -> Anthropic, /v1/chat/completions -> OpenAI), so a
+    // downgrade peek "found" for gemini is a saving nobody can bank today, and the
+    // headline was over-claiming by including it.
+    //
+    // The invariant this test exists for is UNCHANGED and still asserted below: an
+    // anti-saving SURVIVES with its sign instead of being clamped to a flat 0 (the old
+    // Math.max(0, ...) reported this loss as zero and it left the report entirely). What
+    // moved is only WHERE it survives. The routable/headline half of the same invariant is
+    // pinned by test/policy_parity.test.js:970 'a ROUTABLE anti-saving still reaches the
+    // headline, unclamped' — so the sign rule is covered on BOTH paths, not relocated.
+    assert.equal(h.downgradable, 0, 'an unroutable vendor may not enter the headline');
+    assert.equal(h.downgradableUnroutable, 1);
+    assert.ok(h.dollarsSavedUnroutable < 0,
+      'net must stay negative, got ' + h.dollarsSavedUnroutable);
+    assert.ok(Math.abs(h.dollarsSavedUnroutable + 0.015) < 1e-9,
+      'dollarsSavedUnroutable=' + h.dollarsSavedUnroutable);
+    assert.equal(h.dollarsGrossUnroutable, 0);
+    assert.ok(Math.abs(h.dollarsExtraUnroutable - 0.015) < 1e-9,
+      'dollarsExtraUnroutable=' + h.dollarsExtraUnroutable);
+    assert.equal(h.offsetCallsUnroutable, 1);
+    assert.ok(rep.totals.dollarsSavedUnroutable < 0,
+      'totals=' + rep.totals.dollarsSavedUnroutable);
+
+    // MOVED, NOT DELETED. The row is excluded from the SAVING, never from the BILL — the
+    // user really paid for this call, so both spend legs must still see it. A fix that
+    // dropped the row instead of relocating it passes every assertion above and fails here.
+    assert.ok(h.dollarsActual > 0, 'the call still cost real money: ' + h.dollarsActual);
   } finally {
     if (saved === undefined) delete process.env.CHEAPER_PEEK_HOME;
     else process.env.CHEAPER_PEEK_HOME = saved;

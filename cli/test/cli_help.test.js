@@ -81,11 +81,122 @@ test('a multi-line entry keeps all of its continuation lines', () => {
     'and the NEXT entry must not bleed in\n' + r.out);
 });
 
-test('an alias list is shared by all four of its commands', () => {
-  for (const cmd of ['dashboard', 'reports', 'logs', 'monitor']) {
+test('an alias list is shared by reports/logs/monitor; dashboard has its own entry', () => {
+  for (const cmd of ['reports', 'logs', 'monitor']) {
     const r = run([cmd, '--help']);
-    assert.ok(r.out.includes('Open the live localhost dashboard'), cmd + '\n' + r.out);
+    assert.ok(r.out.includes('Open that tab of the same localhost dashboard'), cmd + '\n' + r.out);
   }
+  const d = run(['dashboard', '--help']);
+  assert.ok(d.out.includes('Open the live localhost dashboard in your browser'), d.out);
+  // dashboard must NOT pull in the alias group's text (it is a separate entry now —
+  // it used to be grouped with reports/logs/monitor even though it does not share
+  // their behaviour, see the next two tests).
+  assert.ok(!d.out.includes('Open that tab of the same localhost dashboard'), d.out);
+});
+
+// `dashboard` was documented as if it shared `--terminal` support with reports/logs/
+// monitor. It never did: dashboard.js's parseArgs recognised only --json, so
+// `dashboard --terminal` silently opened the browser instead of doing what the other
+// three do. HELP must not claim a capability the command does not have.
+test('HELP does not claim --terminal support for dashboard, but does for its siblings', () => {
+  const d = run(['dashboard', '--help']).out;
+  assert.ok(d.includes('No --terminal view yet'), d);
+  assert.ok(!/--terminal\s+render the same view/.test(d),
+    'dashboard\'s entry must not promise a terminal renderer it does not have\n' + d);
+  for (const cmd of ['reports', 'logs', 'monitor']) {
+    const r = run([cmd, '--help']).out;
+    assert.ok(/--terminal\s+render the same view in the terminal/.test(r), cmd + '\n' + r);
+  }
+});
+
+// Regression for the SILENT no-op: before this fix, dispatch never routed
+// `dashboard --terminal`/`--tty` to dashboard.js at all, so it fell through to the
+// same branch as a bare `cheaper dashboard` — starting the gateway (filesystem
+// writes under ~/.cheaper, up to a 15s health-check wait) and opening a real browser,
+// with no indication the flag did anything different from omitting it.
+//
+// PROVED BY MUTATION: reverting bin/cheaper.js's `dashboard` case to
+// `if (rest.includes('--json'))` (dropping the --terminal/--tty arms) makes this test
+// fail — it starts routing through launch.js again, which writes into SANDBOX and
+// answers something other than the honest "no --terminal view yet" text below.
+test('`cheaper dashboard --terminal` answers honestly instead of silently opening the browser', () => {
+  const r = run(['dashboard', '--terminal']);
+  assert.strictEqual(r.status, 0, r.out);
+  assert.ok(r.out.includes('no --terminal view yet'), r.out);
+  assert.ok(r.out.toLowerCase().includes('--json'), r.out);
+  assert.deepStrictEqual(fs.readdirSync(SANDBOX), [],
+    'dashboard --terminal must not fall through to launch.js starting the gateway');
+});
+
+test('`cheaper dashboard --tty` behaves the same as --terminal', () => {
+  assert.strictEqual(run(['dashboard', '--tty']).out, run(['dashboard', '--terminal']).out);
+});
+
+// Regression for "README documents only a fraction of the implemented commands" —
+// every command HELP declares must have its own backtick-quoted entry in the README's
+// Commands table, or the two are free to drift again exactly as they did before.
+//
+// PROVED BY MUTATION: deleting any one row from the README table (e.g. the `dashboard`
+// or `taglines` row) makes this test fail with that command's name.
+test('README\'s Commands table documents every command in HELP', () => {
+  const readmePath = path.join(__dirname, '..', '..', 'README.md');
+  const readme = fs.readFileSync(readmePath, 'utf8');
+  const start = readme.indexOf('\n## Commands');
+  assert.ok(start !== -1, 'README has no ## Commands section');
+  const next = readme.indexOf('\n## ', start + 1);
+  const section = readme.slice(start, next === -1 ? readme.length : next);
+  const CANONICAL = DOCUMENTED.concat(['help']);
+  for (const cmd of CANONICAL) {
+    assert.ok(section.includes('`' + cmd),
+      `README's Commands table is missing `+ '`' + cmd + '`'
+      + ' — sync it with HELP in bin/cheaper.js');
+  }
+});
+
+// Regression for "peek reads 7 harnesses and taglines writes into 7, and the README
+// implied it was THE SAME 7" — it is not: peek can read Claude Code's history but
+// taglines does not write Claude Code's line (the plugin does that instead), and
+// taglines writes Cursor's line even though peek cannot read Cursor's history yet.
+// If either source list ever changes shape, this catches the README claim going stale
+// right alongside it, instead of only the day someone happens to reread the prose.
+//
+// PROVED BY MUTATION: adding or removing an entry in either ADAPTERS (adapters.js) or
+// TAGLINE_TARGETS (tagline_install.js) — or moving 'cursor'/'claude-code' across the
+// two lists — flips one of the assertions below.
+test('peek\'s 7 readable harnesses and taglines\' 7 writable harnesses differ by exactly Claude Code / Cursor', () => {
+  const adaptersSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'peek', 'adapters.js'), 'utf8');
+  const taglineSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'tagline_install.js'), 'utf8');
+
+  // Every ADAPTERS entry lives on one line: `{ key: 'x', ..., status: 'y', ... }`.
+  const adapterLines = adaptersSrc.split('\n')
+    .filter((l) => /key:\s*'[^']+'/.test(l) && /status:\s*'[^']+'/.test(l));
+  const keyOf = (l) => l.match(/key:\s*'([^']+)'/)[1];
+  const peekKeys = adapterLines.map(keyOf);
+  const peekReadable = adapterLines.filter((l) => !/status:\s*'sqlite'/.test(l)).map(keyOf);
+
+  // TAGLINE_TARGETS entries are similarly one per line: `{ key: 'x', label: ..., ... }`.
+  // (Later in the file `key: t.key` appears unquoted — the quoted-value regex below
+  // only matches the table's own entries, not those references.)
+  const taglineKeys = (taglineSrc.match(/key:\s*'[^']+'/g) || [])
+    .map((s) => s.match(/'([^']+)'/)[1]);
+
+  assert.strictEqual(peekKeys.length, 8,
+    `peek's ADAPTERS list changed size — README says "detects 8 harnesses": ${peekKeys.join(',')}`);
+  assert.strictEqual(peekReadable.length, 7,
+    `peek's readable-harness count changed — README says "reads chat history for 7": ${peekReadable.join(',')}`);
+  assert.strictEqual(taglineKeys.length, 7,
+    `taglines' harness count changed — README/HELP both say 7: ${taglineKeys.join(',')}`);
+
+  const peekOnly = peekReadable.filter((k) => !taglineKeys.includes(k));
+  const taglineOnly = taglineKeys.filter((k) => !peekReadable.includes(k));
+  assert.deepStrictEqual(peekOnly, ['claude-code'],
+    'README claims Claude Code is peek-readable but not taglines-writable (the plugin '
+    + 'handles its end-of-chat line instead)\n' + peekReadable.join(',') + ' vs ' + taglineKeys.join(','));
+  assert.deepStrictEqual(taglineOnly, ['cursor'],
+    'README claims Cursor is taglines-writable but not peek-readable (peek has no '
+    + 'SQLite reader yet)\n' + peekReadable.join(',') + ' vs ' + taglineKeys.join(','));
 });
 
 test('`gateway --help` collects all three gateway entries, and nothing else', () => {

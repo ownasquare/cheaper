@@ -26,6 +26,15 @@ is: this classifier picks up unambiguous risk vocabulary, and it is NOT a diffic
 oracle. Real difficulty prediction needs the live triage pass (`ROUTER_MODE=triage`),
 which asks a cheap model instead of a regex. Do not add patterns here expecting the
 ranking to improve -- that was tried and measured, and it does not.
+
+BECAUSE IT IS NOT AN ORACLE, EVERY REASON STRING MUST BE A REPORT AND NEVER A VERDICT.
+A second replay (752 human turns, 70 sessions) put the cascade at AUC 0.499 against a
+>20k-output-token cutoff, 0.538 against a median split, Spearman +0.103 -- consistent
+with the 0.517 above and with the same conclusion. A classifier that weak is still
+worth shipping as a cheap DOWNGRADE gate, but it has no standing to characterise a
+request, and the terminal branch of `_content_tier` was doing exactly that. See the
+block comment there for what was changed, what was measured before rejecting the two
+proposed alternatives, and why the fall-through stays haiku.
 """
 
 from __future__ import annotations
@@ -338,7 +347,84 @@ def _content_tier(text: str, cfg: RouterConfig) -> tuple[str, str, bool]:
     mod = _moderate_signals(text, cfg)
     if len(mod) >= cfg.min_moderate_signals:
         return "sonnet", "moderate task signals: " + "; ".join(mod[:3]), False
-    return "haiku", "simple/short request", False
+
+    # --- THE TERMINAL BRANCH: A DEFAULT, NOT A FINDING -------------------------
+    # This branch used to answer "simple/short request", and NOTHING above it ever
+    # tested for simplicity or for shortness. Haiku is what a request gets for failing
+    # to use the escalation vocabulary; the reason string turned that absence of
+    # evidence into a positive claim about the request.
+    #
+    # IT IS FALSIFIABLE WITHOUT A CORPUS, INSIDE ONE CALL OF THIS FUNCTION. A 50,000
+    # character request with no other signal collects exactly one moderate signal --
+    # literally the string "long/dense request (50000 chars)" -- which is one short of
+    # `min_moderate_signals`, so it lands here and was described as "short". The
+    # function contradicted its own previous line. Pinned by
+    # test_the_fallthrough_reason_does_not_claim_a_check_that_never_ran.
+    #
+    # WHAT THE REPLACEMENT SAYS is only what was actually done: no escalation signal
+    # matched, and how close the moderate band came to firing. Both halves are readable
+    # off the code path that produced them, and the near-miss count is the diagnostic an
+    # operator tuning `min_moderate_signals` actually needs (a ledger full of "0/2" is a
+    # vocabulary problem; one full of "1/2" is a threshold problem).
+    #
+    # THE DEFAULT ITSELF STAYS HAIKU, AND THAT IS MEASURED, NOT ASSUMED. The proposal
+    # this replaces was to INVERT the fall-through -- sonnet by default, haiku only on
+    # positive evidence of simplicity. Replayed over a snapshot of real traffic (752
+    # human turns, 70 sessions; difficulty proxied as ever by the output tokens the turn
+    # really consumed):
+    #
+    #                     saved     AUC@>20k   AUC@median   Spearman rho
+    #     shipped        62.14%       0.499       0.538         +0.103
+    #     inverted       47.73%       0.498       0.530         +0.081
+    #
+    # A SNAPSHOT, NOT A CONSTANT, and quoted that way on purpose: the corpus is live and
+    # grows as the author works, so re-running does not reproduce the third decimal. A
+    # re-run four turns later read 62.12 / 0.500 / 0.537 / +0.101 for the shipped row and
+    # 47.73 / 0.499 / 0.528 / +0.078 for the inverted one -- every figure inside 0.01,
+    # the inverted saving identical to the cent, and the ordering unchanged. That
+    # stability is what the conclusion rests on; do not treat these digits as a fixture
+    # to assert against.
+    #
+    # Inverting costs 14.41 points of realized saving and moves all three difficulty
+    # readings the WRONG WAY. It is a large, permanent bill increase bought with a
+    # ranking that got worse -- which is what "spend more on a signal that does not
+    # discriminate" looks like when you actually price it.
+    #
+    # THE "EXPENSIVE HAIKU TURNS" STATISTIC IS THE BASE RATE, NOT A HAIKU DEFECT. The
+    # observation that a large share of haiku-routed turns went on to drive very large
+    # outputs is TRUE and is not evidence of mis-routing, because the same is true of
+    # every other band. On the same snapshot, share of turns exceeding 20k output tokens:
+    #
+    #     corpus-wide 79.1%  |  haiku 79.2%  |  sonnet 80.0%  |  opus 78.7%
+    #
+    # The haiku band is not enriched for expensive work; it is exactly average. A
+    # statistic like that only indicts the cheap band if the base rate sits well below
+    # it, so it must always be quoted against the base rate and never on its own.
+    #
+    # AND THERE ARE NO MISSING LEXICAL SIGNALS TO ADD. The other proposal was to find the
+    # difficulty vocabulary this list lacks. That was done empirically rather than by
+    # imagination: over the haiku-routed turns, every token appearing in >= 25 turns and
+    # >= 10 distinct sessions was ranked by its lift for the expensive half. The result
+    # is stopwords and this corpus's own proper nouns -- the highest-lift token of all is
+    # the author's personal workflow noun, and everything above lift 2.0 is a word like
+    # "into"/"which"/"that". That is the signature of a size effect wearing a vocabulary
+    # costume, so size was measured directly on the same turns:
+    #
+    #                        AUC@>20k   AUC@median   rho
+    #     tier cascade         0.499       0.538     +0.103
+    #     raw char length      0.530       0.568     +0.146
+    #     raw word count       0.559       0.591     +0.181
+    #
+    # Raw word count beats this entire cascade and is still barely off chance, and no
+    # `long_request_chars` cut converts it into money: sweeping 4000 -> 300 moved saving
+    # by at most -2.3 points and AUC@median by at most +0.009 (peak 0.547 at 500 chars,
+    # for -0.74 points of saving), while dropping to 300 collapsed rho to +0.026. Adding
+    # patterns mined from that list would be fitting one user's nouns and calling it a
+    # difficulty model. The honest answer is the one already at the top of this file:
+    # real difficulty prediction needs the live triage pass, not more regex.
+    return ("haiku",
+            f"no escalation signal matched "
+            f"({len(mod)}/{cfg.min_moderate_signals} moderate)", False)
 
 
 def extract_text(body: dict) -> str:

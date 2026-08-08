@@ -72,10 +72,13 @@ const { pyExe, PY_CANDIDATES, launcherLabel } =
   require(path.join(__dirname, '..', 'src', 'gateway.js'));
 const PY_DIR = path.join(__dirname, '..', 'assets', 'gateway', 'app');
 
-// Named rather than "no python3 on PATH", so a skip line is checkable against what was
-// actually attempted.
-const NO_PY = `no usable Python 3 (tried: ${PY_CANDIDATES.map(launcherLabel).join(', ')})`
-  + ' — the gate did not run';
+// Every candidate is NAMED, rather than the old "no python3 on PATH", so the failure line
+// is checkable against what was actually attempted — and so a candidate added to the
+// shared list appears here without anyone remembering to edit this string.
+//
+// It no longer carries its own "— the gate did not run" tail: the one caller leads with
+// DID NOT RUN, and the sentence used to say it twice.
+const NO_PY = `no usable Python 3 (tried: ${PY_CANDIDATES.map(launcherLabel).join(', ')})`;
 
 const ZONES = [
   'UTC',
@@ -261,11 +264,9 @@ function runIn(zone, exe, args) {
   return { err: null, out: r.stdout.trim().split('\n') };
 }
 
+// `py` is always a resolved {cmd, args} launcher. main() exits non-zero when there is no
+// interpreter, so there is no longer a "skipped" branch here to mistake for a pass.
 function pdayParity(py) {
-  if (py === null) {
-    console.log(`  pday/offset parity: SKIPPED — ${NO_PY}`);
-    return;
-  }
   const tzosJson = JSON.stringify(PDAY_TZOS);
   const instJson = JSON.stringify(PDAY_INSTANTS);
   const tzoffJson = JSON.stringify(TZOFF_INSTANTS);
@@ -543,11 +544,9 @@ print('\\n'.join(sorted(out)))
 //     point must stay last.
 //   * `tier` / `decision` breakdown dimensions, whose group KEYS are derived differently
 //     on the two sides today.
+//
+// `py` is always a resolved {cmd, args} launcher, for the reason given above pdayParity.
 function placementParity(py) {
-  if (py === null) {
-    console.log(`  placement parity: SKIPPED — ${NO_PY}`);
-    return;
-  }
   const rowsJson = JSON.stringify(placementRows());
   const winsJson = JSON.stringify(PLACEMENT_WINDOWS);
   const stateJson = JSON.stringify(PLACEMENT_STATE);
@@ -587,19 +586,33 @@ function placementParity(py) {
 }
 
 function main() {
-  const js = jsSide();
+  // Resolved BEFORE any fixture work. With no interpreter there is nothing to diff, and
+  // the failure should land immediately rather than after 1400 JS rows nobody compares.
+  //
   // ONE resolution for all three gates. Three copies of the probe meant three chances to
   // disagree about whether Python is present, and the pday/placement copies used
   // `-c pass` while this one used the real payload.
   const exe = pyExe();
   if (exe === null) {
-    // No Python at all (a JS-only CI lane). Report loudly and pass: silently
-    // "succeeding" on a gate that never ran is how a parity check becomes decoration.
-    console.log(`  period parity: SKIPPED — ${NO_PY}`);
-    pdayParity(null);
-    placementParity(null);
-    return;
+    // NOT a skip, and deliberately not worded as one. A parity gate that quietly does not
+    // run is indistinguishable from one that passed — and noticing drift is this gate's
+    // entire job, so "I could not check" must never be reported in the same shape, on the
+    // same stream, with the same exit code as "I checked and both runtimes agree".
+    //
+    // This was not hypothetical. The probe used to be a second copy living in this file
+    // that tried only `python3` and `python`. On a stock python.org Windows install with
+    // "Add python.exe to PATH" left unchecked — the DEFAULT — neither of those resolves to
+    // a real interpreter and only `py -3` does, so all three gates below skipped, silently
+    // and with exit 0, on exactly the platform whose JS<->Python drift nobody else was
+    // watching. The shared `pyExe()` fixed the DISCOVERY; exiting non-zero fixes the
+    // REPORTING, which was the half that let the first failure hide.
+    //
+    // `check-policy-parity.js` already made this call for the routing gate; a missing
+    // interpreter now fails both, identically, rather than one loudly and one in silence.
+    console.error(`  period parity: DID NOT RUN — ${NO_PY}`);
+    process.exit(1);
   }
+  const js = jsSide();
   const py = pySide(exe);
   if (js.length !== py.length) {
     console.error(`  period parity FAILED: JS produced ${js.length} rows, Python ${py.length}`);

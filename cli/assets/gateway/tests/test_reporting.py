@@ -2495,6 +2495,113 @@ def test_gateway_row_to_event_prefers_the_rows_frozen_frame_over_reconstruction(
     assert absent["pday"] == periods.pday_of(GW_EDGE_TS * 1000, fallback)
 
 
+# ---------------------------------------------------------------------------
+# the two halves of the product must agree about what was MEASURED
+# ---------------------------------------------------------------------------
+#
+# The reporting layer has always been honest here: `gateway_row_to_event` maps an
+# unknown `usage_source` to ``conf: "estimated"``, `store.fold_rows` returns the two
+# bases separately, and nothing in this module ever adds them. The legacy `/metrics`
+# summary was NOT -- it published $80.52 under a headline that reads as measured from a
+# store in which `usage_source` is NULL on all 94 rows.
+#
+# So the fix landed in `metrics.summary()`, and what needs guarding from here is that
+# the two layers now describe the SAME rows the same way. Two surfaces of one product
+# disagreeing about whether a figure was measured is the defect the user reported, one
+# level up; a future "simplify the mapping" that defaulted an unknown provenance to
+# `measured` would re-open it on the side that is currently correct, and no test in
+# either module would have noticed.
+
+# The probes' INPUT-token counts, measured off ~/.cheaper/metrics.db: 90 of its 94 rows
+# carry 2-13 input tokens and ZERO output.
+OWNER_PROBE_IN_TOKENS = (2, 13, 7, 2, 9, 13, 3, 11, 2)
+
+
+def owner_shaped_gateway(tmp_path):
+    """A gateway store in the shapes measured off the owner's live ``metrics.db``.
+
+    ``usage_source`` is NULL on every row -- the state that made the headline
+    unsubstantiable -- with nine zero-output probes and two output-bearing rows carrying
+    the money. Written straight to SQLite because ``record()`` normalises an unknown
+    provenance to ``''`` and the rows on disk predate that; NULL is what is actually
+    there, and NULL is what both layers have to handle.
+    """
+    import sqlite3
+
+    import metrics as metrics_mod
+
+    ts = utc_ms(2026, 8, 20, 12) / 1000.0          # inside AUGUST
+    path = str(tmp_path / "owner.db")
+    m = metrics_mod.Metrics(db_path=path)
+    rows = [("probe%d" % i, "haiku", "claude-haiku-4-5", n_in, 0)
+            for i, n_in in enumerate(OWNER_PROBE_IN_TOKENS)]
+    rows.append(("heavy", "sonnet", "claude-sonnet-5", 1_200_000, 900_000))
+    rows.append(("kept", "opus", "claude-opus-5", 200_000, 80_000))
+    with sqlite3.connect(path) as c:
+        for rid, tier, served, n_in, n_out in rows:
+            c.execute(
+                "INSERT INTO decisions (ts, tier, model, original_model, requested_tier, "
+                "reason, source, in_tokens, out_tokens, status, session, usage_source, "
+                "request_id, tzo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ts, tier, served, "claude-opus-5", "opus", "s", "gw",
+                 n_in, n_out, 200, "owner", None, rid, 0))
+        c.commit()
+    return m
+
+
+def test_the_reporting_layer_and_the_summary_agree_this_data_was_never_measured(
+        tmp_path, events_dir):
+    """ONE STORE, BOTH READ MODELS, ONE ANSWER: nobody measured this.
+
+    Reports puts every dollar in the ESTIMATED basis and reports zero measured calls.
+    `/metrics` now labels the identical arithmetic `dollars_basis: "unmeasured"` and
+    withholds the renderable headline. Neither figure moved; they simply stopped
+    disagreeing about what kind of number they are.
+    """
+    m = owner_shaped_gateway(tmp_path)
+    rows = reporting.unified_rows(m, events_dir)["rows"]
+    assert len(rows) == 11, len(rows)
+
+    rep = reporting.report_window(rows, AUGUST[0], AUGUST[1], FULLY_COVERED, TZ)
+    # Every row is seen, and every one of them is ESTIMATED. Not one is measured.
+    assert rep["events"] == {"measured": 0, "estimated": 11}, rep["events"]
+    assert rep["dollars_suppressed"] is False, rep["labels"]
+    assert rep["measured"]["calls"] == 0, rep["measured"]
+    assert rep["measured"]["saved"] == 0.0, rep["measured"]
+    assert rep["estimated"]["calls"] == 11, rep["estimated"]
+    assert rep["estimated"]["saved"] > 1.0, rep["estimated"]
+
+    # ...and the legacy summary now says the same thing about the same rows.
+    s = m.summary(session="owner")
+    mm = s["measurement"]
+    assert mm["dollars_basis"] == "unmeasured", mm
+    assert mm["measured_calls"] == 0 and mm["unmeasured_calls"] == 11, mm
+    assert mm["headline"]["saved"] is None, mm["headline"]
+    assert mm["headline"]["unsubstantiated_saved"] == s["dollars"]["saved"], mm["headline"]
+
+    # THE SAME ARITHMETIC, to the cent. If these ever part company the two layers have
+    # started pricing differently, which is a separate and worse bug than the labelling.
+    assert rep["estimated"]["saved"] == pytest.approx(s["dollars"]["saved"], abs=1e-4)
+
+
+def test_a_confirmed_gateway_row_still_reaches_the_measured_basis(tmp_path, events_dir):
+    """THE POSITIVE CONTROL for the test above. Without it, a mapping that answered
+    "estimated" unconditionally would satisfy it -- and the product would have lost the
+    ability to report a measurement at all, which is the opposite failure and just as
+    dishonest."""
+    m = gw_metrics(tmp_path, tzo=GW_EDGE_TZO, request_id="req_measured_ok")
+    rows = reporting.unified_rows(m, events_dir)["rows"]
+    # GW_EDGE_TS is 2026-08-31T23:30-07:00, i.e. 2026-09-01T06:30 in UTC -- the whole
+    # point of that fixture. Windowing is done on the row's INSTANT, so AUGUST would
+    # exclude it; the window spans both months so this control is about the BASIS and
+    # nothing else.
+    rep = reporting.report_window(rows, utc_ms(2026, 8, 1), utc_ms(2026, 10, 1),
+                                  FULLY_COVERED, TZ)
+    assert rep["events"] == {"measured": 1, "estimated": 0}, rep["events"]
+    assert rep["measured"]["calls"] == 1 and rep["measured"]["saved"] > 0.0
+    assert m.summary(session="gw-sess")["measurement"]["dollars_basis"] == "measured"
+
+
 @pytest.fixture()
 def client(monkeypatch):
     import app as app_module

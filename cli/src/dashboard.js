@@ -12,10 +12,15 @@ const api = require('./api');
 const savings = require('./savings');
 
 function parseArgs(argv) {
-  const o = { json: false, peek: true };
+  const o = { json: false, peek: true, terminal: false };
   for (const a of argv || []) {
     if (a === '--json') o.json = true;
     else if (a === '--no-peek') o.peek = false;
+    // Recognised so `run()` can tell "asked for a terminal view" apart from "asked for
+    // nothing" and answer honestly — see the case 'dashboard' comment in bin/cheaper.js.
+    // There is no terminal renderer for this view (unlike reports/logs/monitor); this
+    // flag exists only so it can be told apart from a bare, no-flag call.
+    else if (a === '--terminal' || a === '--tty') o.terminal = true;
   }
   return o;
 }
@@ -44,10 +49,18 @@ async function collect(o) {
 
 async function run(argv = []) {
   const o = parseArgs(argv);
-  const data = await collect(o);
-  if (o.json) { console.log(JSON.stringify(data, null, 2)); return; }
+  if (o.json) { console.log(JSON.stringify(await collect(o), null, 2)); return; }
   console.log('');
-  console.log('  ' + c.amber('cheaper dashboard') + c.dim('  — use --json, or open the browser view with `cheaper dashboard`'));
+  if (o.terminal) {
+    // Reached from bin/cheaper.js's `dashboard` case ONLY when --terminal/--tty was
+    // passed. Unlike reports/logs/monitor, there is no in-terminal renderer for this
+    // view yet — say so plainly instead of silently falling through to the browser,
+    // which is what happened before dispatch started routing this flag here at all.
+    console.log('  ' + c.amber('cheaper dashboard') + c.dim('  — no --terminal view yet'));
+    console.log('  ' + c.dim('use --json for the same data as text, or `cheaper dashboard` for the browser view'));
+  } else {
+    console.log('  ' + c.amber('cheaper dashboard') + c.dim('  — use --json, or open the browser view with `cheaper dashboard`'));
+  }
   console.log('');
 }
 

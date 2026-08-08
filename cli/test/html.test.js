@@ -791,9 +791,80 @@ test('report.html: the legacy /report payload still renders, and says it is the 
   assert.strictEqual(bk['Saved (blended basis)'].cls, '',
     'a missing blended figure was painted green behind its own em dash');
   assert.strictEqual(bk['Metered spend'].value, '&mdash;');
-  assert.strictEqual(bk['Costlier routes'].value, '$0.00');
+  // LEGACY_PAYLOAD carries no `measurement` block — an older gateway — so its basis is
+  // UNKNOWN and every real figure is qualified. The zero still RENDERS (a measured zero
+  // of costlier routing is a real claim and must not be suppressed into an em dash) and
+  // still takes no colour (baseline is not a loss); what it may not do is present itself
+  // as measured when nothing says it was. Both halves are asserted here.
+  assert.strictEqual(bk['Costlier routes'].value, 'about $0.00');
   assert.strictEqual(bk['Costlier routes'].cls, '',
     'a measured zero of costlier routing was painted as a loss');
+  // …and with a gateway that DOES state its basis, the same zero is unqualified. Without
+  // this half, "always prefix about" would satisfy every assertion above while making the
+  // qualifier meaningless.
+  const measured = renderReport(Object.assign({}, LEGACY_PAYLOAD, {
+    dollars: { extra: 0 },
+    measurement: { dollars_basis: 'measured', measured_calls: 8, unmeasured_calls: 0,
+                   priced_calls: 8, zero_token_calls: 0 },
+  }));
+  assert.strictEqual(kpiMap(measured.els)['Costlier routes'].value, '$0.00');
+  assert.ok(!/approx/.test(measured.out), 'a measured figure was qualified as "about"');
+});
+
+test('report.html: the printed legacy view never presents unmeasured dollars as measured', () => {
+  // A printed report is the artifact people quote from and attach to expense claims, so
+  // an unqualified figure here travels further and lasts longer than the same figure on
+  // the live page. The legacy `/report` endpoint serves Metrics.summary() verbatim — the
+  // very payload whose `usage_source` was NULL on all 94 rows when this shipped.
+  const CASES = [
+    ['unmeasured', { dollars_basis: 'unmeasured', measured_calls: 0, unmeasured_calls: 94,
+                     priced_calls: 4, zero_token_calls: 90 }, /Not measured\./],
+    ['mixed', { dollars_basis: 'mixed', measured_calls: 2, unmeasured_calls: 92,
+                priced_calls: 4, zero_token_calls: 90 }, /Partly measured\./],
+    ['an unrecognised basis', { dollars_basis: 'probably' },
+      /Mixed, and not separated on this view/],
+  ];
+  for (const [why, m, narrative] of CASES) {
+    const { out, els } = renderReport(Object.assign({}, LEGACY_PAYLOAD, { measurement: m }));
+    const k = kpiMap(els);
+    assert.match(k['Saved (blended basis)'].value, /^about \$1\.15$/,
+      `${why}: the headline saving reads "${k['Saved (blended basis)'].value}"`);
+    assert.match(k['Metered spend'].value, /^about \$2\.25$/,
+      `${why}: the spend figure is unqualified beside a qualified saving`);
+    // The percentage is derived from the same two accumulators; leaving it bare would
+    // launder the identical claim one line down from the qualified figure.
+    assert.match(k['Saved (blended basis)'].sub, /^about 33\.8% of the baseline/,
+      `${why}: the percentage sub-line reads "${k['Saved (blended basis)'].sub}"`);
+    assert.match(text(out).replace(/\s+/g, ' '), narrative,
+      `${why}: the provenance block does not state the basis`);
+    // The COUNT column is a fact and is not qualified — how a row's usage was obtained
+    // says nothing about whether the row exists.
+    assert.strictEqual(k['Calls routed cheaper'].value, '5',
+      `${why}: an exact row count was qualified as if it were a dollar figure`);
+    // The qualifier explains itself where it stands.
+    assert.match(out, /<span class="approx" title="[^"]{20,}">about <\/span>/,
+      `${why}: the "about" prefix carries no explanation`);
+  }
+
+  // A gateway that measured everything prints bare figures, and says so.
+  const good = renderReport(Object.assign({}, LEGACY_PAYLOAD, {
+    measurement: { dollars_basis: 'measured', measured_calls: 8, unmeasured_calls: 0,
+                   priced_calls: 8, zero_token_calls: 0 },
+  }));
+  assert.strictEqual(kpiMap(good.els)['Saved (blended basis)'].value, '$1.15');
+  assert.strictEqual(kpiMap(good.els)['Saved (blended basis)'].sub, '33.8% of the baseline');
+  assert.match(text(good.out).replace(/\s+/g, ' '),
+    /Measured\. Every priced call behind the figures on this page carried usage the provider itself reported\. 8 of 8 priced calls/,
+    'a fully measured gateway is not told so, or its counts were dropped');
+
+  // …and a basis that priced NOTHING refuses to report a money result rather than
+  // reporting a zero one.
+  const none = renderReport(Object.assign({}, LEGACY_PAYLOAD, {
+    dollars: {}, measurement: { dollars_basis: 'none', priced_calls: 0 },
+  }));
+  assert.match(text(none.out).replace(/\s+/g, ' '),
+    /No dollar figure is claimed\..*not the same as saving \$0\./,
+    'a report with nothing priceable did not say so');
 });
 
 // ===========================================================================
@@ -1493,9 +1564,34 @@ function fnSource(js, name) {
   assert.fail(`function ${name}() in dashboard.html has unbalanced braces`);
 }
 
+// The page's MODULE-LEVEL CONSTANTS, lifted from the source exactly the way fnSource()
+// lifts its functions. A driver that restated `var SPARK_MIN_POINTS = 3` in its own
+// prelude would keep passing after dashboard.html changed its copy — the same drift
+// fnSource exists to prevent, one declaration kind over. Every one of these carries a
+// rule (the liveness window, the minimum point count for a trend, the set of legal
+// `dollars_basis` values), so a stale duplicate here would test a rule the page no
+// longer applies.
+function varSource(js, name) {
+  const needle = `var ${name} = `;
+  const i = js.indexOf(needle);
+  assert.ok(i >= 0, `dashboard.html no longer declares var ${name}`);
+  assert.strictEqual(js.lastIndexOf(needle), i,
+    `dashboard.html declares var ${name} more than once — which one is under test?`);
+  // The first `;` that ENDS A LINE, allowing the trailing `// …` comment several of these
+  // declarations carry. A bare indexOf(';\n') silently walks past
+  // `var ACTIVE_WINDOW_S = 120;   // …` and swallows everything up to the next
+  // line-terminating semicolon — hundreds of lines of unrelated source, which then
+  // executes inside the driver.
+  const m = /;[ \t]*(?:\/\/[^\n]*)?\n/.exec(js.slice(i));
+  assert.ok(m, `var ${name} in dashboard.html has no statement terminator`);
+  return js.slice(i, i + m.index + 1);
+}
+
 // Every function renderDims() reaches, transitively. `baselineChoice` and `lastPeek` are
 // the page's own mutable module state and are declared by the wrapper.
 const DIM_FNS = ['num', 'measuredValue', 'money', 'esc', 'tokenCount', 'seconds',
+                 'measurementInfo', 'dollarsAreMeasured', 'basisTitle', 'approxPrefix',
+                 'approxFigure',
                  'moneyBaselineValue', 'historicalDimsAvailable',
                  'tokensDimValue', 'timeDimValue', 'renderDims'];
 
@@ -1505,6 +1601,7 @@ function dimDriver() {
   const doc = { getElementById(id) { return id === 'dimGrid' ? grid : null; } };
   const drive = new Function('document',
     'var baselineChoice = "requested_default";\nvar lastPeek = null;\n'
+    + varSource(js, 'DOLLAR_BASES') + '\n'
     + DIM_FNS.map((n) => fnSource(js, n)).join('\n\n')
     + '\nreturn function(choice, data, peek){'
     + '  baselineChoice = choice; lastPeek = (peek === undefined ? null : peek);'
@@ -1541,15 +1638,32 @@ function moneyDim(html) { return readDim(dimCards(html)[0], 'Money'); }
 function tokensDim(html) { return readDim(dimCards(html)[1], 'Tokens'); }
 function timeDim(html) { return readDim(dimCards(html)[2], 'Time'); }
 
+// A gateway payload that DECLARES its dollars measured — every priced call carried
+// provider-reported usage, so no "about" qualifier is attached to the figures.
+//
+// It is stated explicitly because the page treats an ABSENT `measurement` block as
+// UNKNOWN, not as measured (see measurementInfo() in dashboard.html): an older gateway is
+// exactly as unable to substantiate the claim as a database full of NULL usage_source, so
+// degrading the other way would make the un-upgraded gateway the one configuration that
+// prints unqualified figures. The three tests below are about the absent / negative /
+// measured-zero split, which is orthogonal to the basis; without this every figure would
+// arrive prefixed "about" and they would be testing the qualifier instead. The qualifier
+// has its own tests further down.
+const MEASURED = { measured_calls: 4, unmeasured_calls: 0, dollars_basis: 'measured',
+                   priced_calls: 4, zero_token_calls: 0 };
+
 // Each baseline choice: the label the card puts under the headline, the plain-language
 // SUBJECT the negative caption must name, and how to put a value on the payload.
 const BASELINES = [
   { choice: 'highest_tier', label: 'vs all-frontier', subject: 'the all-frontier baseline',
-    value: (v) => [{ baselines: { highest_tier: v } }, null] },
+    value: (v) => [{ measurement: MEASURED, baselines: { highest_tier: v } }, null] },
   { choice: 'requested_default', label: 'vs your model', subject: 'the model you asked for',
-    value: (v) => [{ baselines: { requested_default: v } }, null] },
+    value: (v) => [{ measurement: MEASURED, baselines: { requested_default: v } }, null] },
+  // The historical baseline reads `lastPeek`, not the gateway's rows, so the gateway's
+  // `measurement` block says nothing about it and is deliberately not applied — see the
+  // SCOPE note on qualify() in renderDims().
   { choice: 'historical', label: 'vs your history', subject: 'your own history',
-    value: (v) => [{}, { totals: { dollarsSaved: v } }] },
+    value: (v) => [{ measurement: MEASURED }, { totals: { dollarsSaved: v } }] },
 ];
 
 test('dashboard.html: requested_default is still the baseline the page opens on', () => {
@@ -1639,7 +1753,8 @@ test('dashboard.html: a MEASURED zero money baseline is still $0.00, on every ch
     assert.strictEqual(d.warn, null, `${b.choice}: a measured zero was captioned as an overspend`);
   }
   // …and a positive is untouched.
-  const pos = moneyDim(render('highest_tier', { baselines: { highest_tier: 4.5 } }, null));
+  const pos = moneyDim(render('highest_tier',
+    { measurement: MEASURED, baselines: { highest_tier: 4.5 } }, null));
   assert.strictEqual(pos.value, '$4.50');
   assert.strictEqual(pos.cls, '');
 });
@@ -1693,6 +1808,7 @@ test('dashboard.html: MEASURED zero tokens/time/spend still render 0, 0.0s and $
   // a renderDims() that simply never prints a figure. A measured zero is a real claim.
   const render = dimDriver();
   const zeroData = {
+    measurement: MEASURED,
     dollars: { spent: 0 },
     tokens: { saved_reasoning_potential: 0 },
     time: { saved_model_s: 0, saved_reasoning_potential_s: 0 },
@@ -1734,14 +1850,17 @@ test('dashboard.html: MEASURED zero tokens/time/spend still render 0, 0.0s and $
 // only one surface learns the absent/measured-zero split the two disagree on screen: the
 // dim card saying "— (no data yet)" while the stat card two panels above it says "$0.00".
 // ---------------------------------------------------------------------------
-const CARD_FNS = ['num', 'measuredValue', 'money', 'pctFrac', 'renderCards'];
+const CARD_FNS = ['num', 'measuredValue', 'money', 'pctFrac', 'esc',
+                  'measurementInfo', 'dollarsAreMeasured', 'basisTitle', 'approxPrefix',
+                  'approxFigure', 'renderCards'];
 
 function cardsDriver() {
   const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
   const grid = { innerHTML: '' };
   const doc = { getElementById(id) { return id === 'statCards' ? grid : null; } };
   const drive = new Function('document',
-    CARD_FNS.map((n) => fnSource(js, n)).join('\n\n')
+    varSource(js, 'DOLLAR_BASES') + '\n'
+    + CARD_FNS.map((n) => fnSource(js, n)).join('\n\n')
     + '\nreturn function(data){ renderCards(data || {}); };')(doc);
   return (data) => { grid.innerHTML = ''; drive(data); return grid.innerHTML; };
 }
@@ -1774,7 +1893,8 @@ test('dashboard.html: the Saved and Spent stat cards agree with the Money dim ca
   }
 
   // MEASURED ZERO — the mirror, so "never $0.00" is not satisfiable by never reporting.
-  const zero = render({ total: 0, dollars: { saved: 0, spent: 0, savings_pct: 0 } });
+  const zero = render({ total: 0, measurement: MEASURED,
+                        dollars: { saved: 0, spent: 0, savings_pct: 0 } });
   for (const [i, name, want] of [[2, 'Saved', '$0.00'], [3, 'Spent', '$0.00'],
                                  [4, 'Savings %', '0.0%']]) {
     const c = statCard(zero, i);
@@ -1784,7 +1904,8 @@ test('dashboard.html: the Saved and Spent stat cards agree with the Money dim ca
   }
 
   // …and a real pair of figures keeps its colour and its sign.
-  const real = render({ total: 9, dollars: { saved: 1.5, spent: -0.25, savings_pct: 42 } });
+  const real = render({ total: 9, measurement: MEASURED,
+                        dollars: { saved: 1.5, spent: -0.25, savings_pct: 42 } });
   assert.strictEqual(statCard(real, 2).value, '$1.50');
   assert.strictEqual(statCard(real, 2).cls, 'green');
   assert.strictEqual(statCard(real, 3).value, '-$0.25');
@@ -1987,6 +2108,10 @@ test('dashboard.html: no two nodes attach all-top-tier wording to different figu
   // values would let the mislabelling pass unnoticed.
   const payload = {
     total: 5,
+    // Declared measured so the figures render bare: this test compares a LABEL against
+    // the FIGURE beside it, and an "about" prefix on both would only add noise to the
+    // comparison. The prefix has its own tests.
+    measurement: MEASURED,
     dollars: { saved: 0.2, spent: 0.3, savings_pct: 40 },
     baselines: { requested_default: 0.2, highest_tier: 0.4 },
   };
@@ -3195,23 +3320,52 @@ test('SUPPRESSION NOTES: three copies, one rule, textually identical', () => {
 // stubbed getComputedStyle standing in for whatever --green the cascade actually
 // resolved (light, dark, or an explicit override) — so the test can prove the chart
 // FOLLOWS the cascade rather than pinning one hard-coded swatch.
-function sparkDriver(greenValue) {
+const SPARK_FNS = ['num', 'esc', 'money', 'measuredValue', 'pageOrigin',
+                   'bucketWidthLabel', 'bucketStamp', 'sparkTooFew',
+                   'themeGreen', 'hexToRgba', 'renderSpark'];
+
+// `clientWidth` is stubbed rather than left undefined: renderSpark() sizes its viewBox to
+// the element's MEASURED width so one user unit is one CSS pixel (a stretched <text> is
+// unreadable, which is why the old fixed 600-unit box could not simply grow to carry
+// axis labels). Pinning it here makes every coordinate in the asserted output
+// deterministic instead of depending on what a headless layout happened to report.
+function sparkDriver(greenValue, clientWidth) {
   const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
-  const wrap = { innerHTML: '' };
+  const wrap = { innerHTML: '', clientWidth: clientWidth === undefined ? 600 : clientWidth };
   const doc = {
     getElementById(id) { return id === 'sparkWrap' ? wrap : null; },
     documentElement: {},
   };
   const gcs = () => ({ getPropertyValue: (name) => (name === '--green' ? greenValue : '') });
   const drive = new Function('document', 'getComputedStyle',
-    'function num(v,d){v=Number(v);return isFinite(v)?v:(d===undefined?0:d);}\n'
-    + fnSource(js, 'themeGreen') + '\n\n'
-    + fnSource(js, 'hexToRgba') + '\n\n'
-    + fnSource(js, 'renderSpark')
+    varSource(js, 'SPARK_H') + '\n'
+    + varSource(js, 'SPARK_PAD') + '\n'
+    + varSource(js, 'SPARK_MIN_POINTS') + '\n'
+    + SPARK_FNS.map((n) => fnSource(js, n)).join('\n\n')
     + '\nreturn function(data){ renderSpark(data); };'
   )(doc, gcs);
   return (data) => { wrap.innerHTML = ''; drive(data); return wrap.innerHTML; };
 }
+
+// A real /metrics timeseries. Every point carries its own `t` — an epoch-second bucket
+// START, exactly as metrics.py::summary() emits it — because the chart now labels its own
+// time axis from those instants. A fixture with `saved` and no `t` describes a payload
+// this gateway does not produce, and it is the shape the chart is now required to REFUSE
+// to plot (an axis it cannot date is an axis it must not draw).
+const HOUR = 3600;
+const T0 = 1754_500_000 - (1754_500_000 % HOUR);   // an arbitrary but exact hour boundary
+const TS3 = { timeseries: { bucket_seconds: HOUR, points: [
+  { t: T0, saved: 1, spent: 0.5, calls: 3 },
+  { t: T0 + HOUR, saved: 2, spent: 0.5, calls: 5 },
+  { t: T0 + 2 * HOUR, saved: 1.5, spent: 0.5, calls: 2 },
+] } };
+// The same stamp renderSpark() is required to print for an hour bucket, computed with the
+// platform's own formatter so the assertion is about WHICH INSTANT was labelled rather
+// than about the runner's timezone.
+const stampOf = (t) => new Date(t * 1000).toLocaleString('en-US',
+  { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+const svgTexts = (html) => (html.match(/<text\b[^>]*>([\s\S]*?)<\/text>/g) || [])
+  .map((s) => text(s));
 
 test('dashboard.html: renderSpark reads --green from the cascade instead of hard-coding the dark swatch', () => {
   const html = fs.readFileSync(DASHBOARD, 'utf8');
@@ -3223,10 +3377,8 @@ test('dashboard.html: renderSpark reads --green from the cascade instead of hard
   assert.ok(!/stroke="#34d399"/.test(html),
     'the spark line stroke is hard-coded to the dark-theme green instead of reading --green');
 
-  const TS = { timeseries: { points: [{ saved: 1 }, { saved: 2 }, { saved: 1.5 }] } };
-
   // :root[data-theme="light"] --green.
-  const svgLight = sparkDriver('#047857')(TS);
+  const svgLight = sparkDriver('#047857')(TS3);
   assert.match(svgLight, /stroke="#047857"/,
     'the line did not pick up the light-theme --green from the cascade');
   assert.match(svgLight, /fill="rgba\(4,120,87,0\.15\)"/,
@@ -3235,10 +3387,144 @@ test('dashboard.html: renderSpark reads --green from the cascade instead of hard
     'the dark-theme swatch leaked into a light-theme render — the fill and line would wash out together, not compensate for each other');
 
   // :root[data-theme="dark"] --green — same chart, different cascade value.
-  const svgDark = sparkDriver('#34d399')(TS);
+  const svgDark = sparkDriver('#34d399')(TS3);
   assert.match(svgDark, /stroke="#34d399"/);
   assert.match(svgDark, /fill="rgba\(52,211,153,0\.15\)"/);
+
+  // The axis furniture must NOT be painted with the series colour — it is drawn from CSS
+  // classes so it follows --muted/--line, and a gridline in the series green would read
+  // as a second series.
+  assert.match(svgDark, /class="grid"/, 'the chart lost its value gridline');
+  assert.match(svgDark, /class="zero"/, 'the chart lost its zero baseline');
 });
+
+// ---------------------------------------------------------------------------
+// ITEM (a): "SAVINGS OVER TIME" WAS A TRIANGLE WITH NO MEANING.
+//
+// The old chart was a bare <path> in a 600x90 box: no axis, no tick, no label, no
+// baseline. On three points spanning two days it drew a mountain, and nothing on screen
+// said what period it covered or what any height was worth. A shape with no scale is not
+// a chart — it is decoration that looks like evidence, and a reader who acts on the slope
+// is acting on nothing.
+// ---------------------------------------------------------------------------
+
+test('dashboard.html: the spark chart carries a dated time axis, a zero baseline, a max '
+   + 'value and its bucket width', () => {
+    const html = sparkDriver('#34d399')(TS3);
+    const labels = svgTexts(html);
+
+    // THE TIME AXIS. Both ends, stamped from the buckets' OWN instants and in the
+    // reader's own timezone — not the epoch numbers, and not an unlabelled span.
+    assert.ok(labels.includes(stampOf(T0)),
+      `the first bucket is not labelled with its own date; axis text was ${JSON.stringify(labels)}`);
+    assert.ok(labels.includes(stampOf(T0 + 2 * HOUR)),
+      `the last bucket is not labelled with its own date; axis text was ${JSON.stringify(labels)}`);
+    assert.notStrictEqual(stampOf(T0), stampOf(T0 + 2 * HOUR),
+      'the fixture must span more than one label-resolution step, or this proves nothing');
+
+    // THE VALUE AXIS. A max label and a zero baseline label, so a height converts to
+    // money without guessing.
+    assert.ok(labels.includes('$2.00'),
+      `the peak value is not labelled; axis text was ${JSON.stringify(labels)}`);
+    assert.ok(labels.includes('$0.00'),
+      `the zero baseline is not labelled; axis text was ${JSON.stringify(labels)}`);
+
+    // THE BUCKET WIDTH. The same three points are a quiet afternoon at one-minute
+    // buckets and a quiet quarter at one-day buckets; without this the chart cannot be
+    // read at all.
+    assert.match(text(html), /Each point spans 1 hour/,
+      'the chart does not state how wide one point is');
+    assert.match(text(html), /3 points/, 'the chart does not state how many points it drew');
+    assert.match(text(html), /local time/i,
+      'the chart does not say the stamps are local, so a reader cannot place them');
+
+    // …and the width is stated in the unit the payload actually used, not a hard-coded
+    // "hour". A day-bucketed trend labelled "1 hour" is a wrong axis, not a rounding.
+    const daily = sparkDriver('#34d399')({ timeseries: { bucket_seconds: 86400, points: [
+      { t: T0, saved: 1, calls: 1 }, { t: T0 + 86400, saved: 2, calls: 1 },
+      { t: T0 + 2 * 86400, saved: 3, calls: 1 }] } });
+    assert.match(text(daily), /Each point spans 1 day/,
+      'the caption hard-codes an interval instead of reading bucket_seconds');
+  });
+
+test('dashboard.html: two points is not a trend — the chart says so instead of drawing a '
+   + 'shape', () => {
+    const render = sparkDriver('#34d399');
+    for (const n of [0, 1, 2]) {
+      const pts = [];
+      for (let i = 0; i < n; i++) pts.push({ t: T0 + i * HOUR, saved: 1 + i, calls: 2 });
+      const html = render({ timeseries: { bucket_seconds: HOUR, points: pts } });
+      assert.ok(!/<svg/.test(html),
+        `${n} point(s) still drew a chart — a line through ${n} point(s) shows a direction `
+        + 'that one interval cannot contain');
+      if (n === 0) {
+        // A blank panel under a heading that says "Savings over time" reads as "you saved
+        // nothing over time". It must say what would put a series there.
+        assert.match(text(html), /No routed traffic has been recorded yet/,
+          'the empty chart does not say why it is empty');
+        assert.match(html, /ANTHROPIC_BASE_URL/,
+          'the empty chart does not say how to record a series');
+      } else {
+        assert.match(text(html), /not enough to draw a trend/,
+          `${n} point(s): the panel does not say why it declined to draw`);
+        assert.match(text(html), /two points is a line, not a direction/,
+          `${n} point(s): the panel does not say what the threshold means`);
+        // The buckets it DOES have are stated as figures. Refusing to draw is not a
+        // licence to withhold the data.
+        assert.match(text(html), new RegExp(stampOf(T0).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+          `${n} point(s): the buckets it has were hidden rather than printed`);
+        assert.match(text(html), /\$1\.00 saved/,
+          `${n} point(s): the recorded figure was dropped`);
+      }
+    }
+    // …and the threshold is exactly the one the page declares, not a number this test
+    // decided on its own.
+    assert.match(fs.readFileSync(DASHBOARD, 'utf8'), /var SPARK_MIN_POINTS = 3;/,
+      'the minimum-points rule moved; this test is asserting a threshold the page no longer uses');
+  });
+
+test('dashboard.html: a NEGATIVE bucket is drawn below the zero line, never clamped to it', () => {
+  // The old chart pinned `min = 0`, so a bucket where Cheaper spent MORE than the
+  // baseline — a real, signed result the rest of this page goes to some length to
+  // preserve — was drawn ON the baseline, indistinguishable from a bucket that saved
+  // exactly nothing.
+  const html = sparkDriver('#34d399')({ timeseries: { bucket_seconds: HOUR, points: [
+    { t: T0, saved: 2, calls: 1 },
+    { t: T0 + HOUR, saved: -1, calls: 1 },
+    { t: T0 + 2 * HOUR, saved: 1, calls: 1 }] } });
+  const labels = svgTexts(html);
+  assert.ok(labels.includes('-$1.00'),
+    `the negative floor is not labelled on the value axis; got ${JSON.stringify(labels)}`);
+  assert.match(text(html), /floor -\$1\.00/,
+    'the caption does not state the negative floor');
+
+  // Geometry: the zero baseline sits ABOVE the lowest plotted point, which is only true
+  // if the negative was given room below it.
+  const zeroY = Number(/<line class="zero"[^>]*\by1="([\d.]+)"/.exec(html)[1]);
+  const ys = (html.match(/<circle class="dot"[^>]*\bcy="([\d.]+)"/g) || [])
+    .map((s) => Number(/cy="([\d.]+)"/.exec(s)[1]));
+  assert.strictEqual(ys.length, 3, 'the chart lost its per-bucket markers');
+  // SVG y grows downward, so "below the baseline" is a LARGER y.
+  assert.ok(Math.max.apply(null, ys) > zeroY,
+    `no plotted point falls below the zero baseline (zero at y=${zeroY}, points at ${ys}) — `
+    + 'the negative bucket was clamped');
+});
+
+test('dashboard.html: a bucket with no derivable figure is dropped and counted, never '
+   + 'plotted at zero', () => {
+    // The old code ran every point through num(p.saved, 0), which drew an ABSENT figure
+    // ON the baseline — a measured $0.00 the payload never claimed, at full confidence
+    // and with no label anywhere.
+    const html = sparkDriver('#34d399')({ timeseries: { bucket_seconds: HOUR, points: [
+      { t: T0, saved: 1, calls: 1 },
+      { t: T0 + HOUR, saved: null, calls: 1 },
+      { t: T0 + 2 * HOUR, saved: 2, calls: 1 },
+      { t: T0 + 3 * HOUR, saved: 3, calls: 1 }] } });
+    const ys = (html.match(/<circle class="dot"/g) || []).length;
+    assert.strictEqual(ys, 3, 'the unpriceable bucket was plotted as if it were a figure');
+    assert.match(text(html), /1 bucket carried no derivable figure and is not plotted/,
+      'the dropped bucket was dropped SILENTLY — a shrinking denominator nobody announces');
+  });
 
 test('dashboard.html: toggling the theme re-renders the spark chart, not only first paint', () => {
   const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
@@ -3282,6 +3568,408 @@ test('dashboard.html: toggling the theme re-renders the spark chart, not only fi
     'toggling the theme after data has loaded must re-render the spark chart exactly once');
   assert.deepStrictEqual(calls[0], { timeseries: { points: [{ saved: 1 }, { saved: 2 }] } },
     'the re-render used stale or wrong data');
+});
+
+// ---------------------------------------------------------------------------
+// ITEM (b): UNMEASURED DOLLARS WERE BEING PUBLISHED AS MEASURED.
+//
+// `usage_source` records HOW a row's token counts were obtained. 'body' means the
+// PROVIDER reported them; anything else means they were inferred from the request, which
+// is a guess about what was billed. On the database that produced this defect every one
+// of 94 rows had usage_source NULL — the gateway's measured path had never fired once —
+// and the page printed "SAVED $80.52 / SAVINGS 86.4%" in the same type it would have used
+// for a figure read off an invoice.
+//
+// The contract is additive: metrics.summary() publishes a `measurement` block, and
+// `dollars_basis` is "measured" ONLY when every priced row carried provider-reported
+// usage. An ABSENT block is UNKNOWN, never measured — degrading the other way would make
+// an un-upgraded gateway the one configuration that prints unqualified figures.
+// ---------------------------------------------------------------------------
+
+// Every basis that is NOT 'measured', including the two ways the block can fail to say
+// anything useful. All five must render identically as far as the FIGURE is concerned:
+// the reader's takeaway ("I cannot quote this") is the same in every one of them.
+const UNMEASURED_CASES = [
+  ['unmeasured', { measured_calls: 0, unmeasured_calls: 94, dollars_basis: 'unmeasured',
+                   priced_calls: 4, zero_token_calls: 90 }],
+  ['mixed', { measured_calls: 2, unmeasured_calls: 92, dollars_basis: 'mixed',
+              priced_calls: 4, zero_token_calls: 90 }],
+  ['none', { measured_calls: 0, unmeasured_calls: 94, dollars_basis: 'none',
+             priced_calls: 0, zero_token_calls: 94 }],
+  // An older gateway that predates the contract. This is the DEFAULT state of every
+  // installed copy the day this ships, so it is the case that must not degrade to a
+  // confident number.
+  ['an ABSENT measurement block', null],
+  // A block whose basis this build does not recognise — a newer gateway, or a typo.
+  // Unrecognised is not a licence to assume the flattering reading.
+  ['an unrecognised dollars_basis', { dollars_basis: 'probably', priced_calls: 4 }],
+  // A block that is present but is not an object at all.
+  ['a non-object measurement block', 'measured'],
+];
+
+const withBasis = (base, m) => (m === null ? base : Object.assign({ measurement: m }, base));
+
+test('dashboard.html: a money headline whose dollars are not measured is qualified, on '
+   + 'every card that shows one', () => {
+    const cards = cardsDriver();
+    const dims = dimDriver();
+    const figures = { total: 9, dollars: { saved: 80.52, spent: 12.7, savings_pct: 86.4 },
+                      baselines: { requested_default: 80.52, highest_tier: 90 } };
+
+    for (const [why, m] of UNMEASURED_CASES) {
+      const payload = withBasis(figures, m);
+      // The three stat cards that carry a dollar or a percentage derived from these rows.
+      for (const [i, name] of [[2, 'Saved'], [3, 'Spent'], [4, 'Savings %']]) {
+        const c = statCard(cards(payload), i);
+        assert.match(c.value, /^about /,
+          `${why}: the ${name} card reads "${c.value}" — an unmeasured figure presented as `
+          + 'a measured result');
+        // The figure itself SURVIVES. Suppressing it would hide real spend; the fix is a
+        // qualifier, not a redaction.
+        assert.ok(!/nodata/.test(c.cls),
+          `${why}: the ${name} card suppressed a figure it should have qualified`);
+      }
+      // …and the Money dim card, on both gateway-sourced baselines.
+      for (const choice of ['requested_default', 'highest_tier']) {
+        const d = moneyDim(dims(choice, payload, null));
+        assert.match(d.value, /^about /,
+          `${why}/${choice}: the Money headline reads "${d.value}"`);
+        assert.match(d.card, /class="spent-sub"><span class="approx"/,
+          `${why}/${choice}: the spend line is unqualified beside a qualified headline`);
+      }
+      // The qualifier explains itself where it stands, so it survives being screenshotted
+      // away from the banner.
+      assert.match(cards(payload), /<span class="approx" title="[^"]{20,}">about <\/span>/,
+        `${why}: the "about" prefix carries no explanation`);
+    }
+  });
+
+test('dashboard.html: a MEASURED basis leaves every figure unqualified', () => {
+  // THE OVER-CORRECTION GUARD. Without it, "always qualify" would pass every assertion
+  // above while making the qualifier meaningless — a page that says "about" over a
+  // genuinely measured figure is understating a claim it can substantiate, and a reader
+  // who sees it everywhere stops reading it anywhere.
+  const cards = cardsDriver();
+  const dims = dimDriver();
+  const payload = { total: 9, measurement: MEASURED,
+                    dollars: { saved: 80.52, spent: 12.7, savings_pct: 86.4 },
+                    baselines: { requested_default: 80.52, highest_tier: 90 } };
+  const html = cards(payload);
+  assert.ok(!/approx/.test(html), 'a measured figure was qualified as "about"');
+  assert.strictEqual(statCard(html, 2).value, '$80.52');
+  assert.strictEqual(statCard(html, 3).value, '$12.70');
+  assert.strictEqual(statCard(html, 4).value, '86.4%');
+  const d = moneyDim(dims('requested_default', payload, null));
+  assert.strictEqual(d.value, '$80.52');
+  assert.ok(!/approx/.test(d.card), 'a measured spend line was qualified as "about"');
+});
+
+test('dashboard.html: an ABSENT figure is never qualified — "about —" claims nothing', () => {
+  // The qualifier attaches to a FIGURE. With no figure there is nothing for it to
+  // qualify, and prefixing the em dash would turn a clean "no claim made" into a
+  // half-claim.
+  const cards = cardsDriver();
+  const dims = dimDriver();
+  const payload = withBasis({ total: 0 }, UNMEASURED_CASES[0][1]);
+  for (const i of [2, 3, 4]) {
+    const c = statCard(cards(payload), i);
+    assert.strictEqual(c.value, '&mdash;', `card ${i}: an absent figure was given a value`);
+    assert.ok(!/approx/.test(c.card), `card ${i}: an em dash was prefixed "about"`);
+  }
+  const d = moneyDim(dims('requested_default', payload, null));
+  assert.strictEqual(d.value, '&mdash;');
+  assert.ok(!/approx/.test(d.card), 'an absent Money headline was prefixed "about"');
+});
+
+// The page-level basis statement. ALWAYS rendered: a banner that appears only when
+// something is wrong teaches a reader that its absence means nothing, and "this gateway
+// reports no basis at all" is exactly the state that has to be visible.
+const BASIS_FNS = ['num', 'esc', 'measuredValue', 'measurementInfo', 'renderBasisLine'];
+
+function basisDriver() {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const box = { innerHTML: '', className: '' };
+  const doc = { getElementById(id) { return id === 'basisLine' ? box : null; } };
+  const drive = new Function('document',
+    varSource(js, 'DOLLAR_BASES') + '\n'
+    + BASIS_FNS.map((n) => fnSource(js, n)).join('\n\n')
+    + '\nreturn function(d){ renderBasisLine(d || {}); };')(doc);
+  // A SNAPSHOT, not the live stub. Returning `box` itself hands every caller the same
+  // mutable object, so `const a = render(x); const b = render(y);` leaves `a` and `b`
+  // pointing at y's output — and an assertion written about the first payload silently
+  // runs against the second.
+  return (d) => {
+    box.innerHTML = ''; box.className = '';
+    drive(d);
+    return { innerHTML: box.innerHTML, className: box.className };
+  };
+}
+
+test('dashboard.html: the basis line states the basis on every payload, including none', () => {
+  const render = basisDriver();
+
+  const measured = render({ measurement: MEASURED });
+  assert.match(text(measured.innerHTML), /^Measured\./,
+    'a fully measured gateway is not told so');
+  assert.match(measured.className, /\bok\b/, 'the measured state is styled as a warning');
+
+  for (const [why, m] of UNMEASURED_CASES) {
+    const el = render(withBasis({}, m));
+    assert.ok(text(el.innerHTML).trim().length > 40,
+      `${why}: the basis line rendered nothing — its whole point is that it is never blank`);
+    assert.match(el.className, /\bwarn\b/, `${why}: an unmeasured basis is styled as fine`);
+    assert.ok(!/^Measured\./.test(text(el.innerHTML)),
+      `${why}: an unmeasured basis was announced as measured`);
+  }
+
+  // The counts are read three-state: an absent count is NOT a count of zero, and
+  // "0 of 0 priced calls" would be a fabricated statement about a gateway that reported
+  // neither number.
+  const bare = render({ measurement: { dollars_basis: 'unmeasured' } });
+  assert.ok(!/\b0 of 0\b/.test(text(bare.innerHTML)),
+    'the basis line invented a count for a gateway that published none');
+
+  // ITEM (b), second half: the Logs tab's wall of $0.00 is EXPLAINED rather than left to
+  // look like a broken pricing path that someone then "fixes" by inventing a number.
+  const zeros = render({ measurement: UNMEASURED_CASES[0][1] });
+  assert.match(text(zeros.innerHTML), /90 recorded calls returned no output tokens/,
+    'the zero-token rows are not explained anywhere');
+  assert.match(text(zeros.innerHTML), /which is the correct figure for them/,
+    'the zero-token explanation does not say the $0.00 is correct');
+  // …and it is not asserted when the gateway did not report it.
+  assert.ok(!/returned no output tokens/.test(text(bare.innerHTML)),
+    'a zero-token claim was made for a gateway that published no such count');
+});
+
+// ---------------------------------------------------------------------------
+// ITEM (d): "live" WAS A CLAIM ABOUT THE SOCKET, NOT ABOUT THE DATA.
+//
+// /ws re-pushes the whole summary every five seconds whether or not a call was routed, so
+// a connection carrying nothing is frame-for-frame identical to one carrying live
+// traffic. The green dot said "live" over a database whose newest row was 29 hours old.
+// ---------------------------------------------------------------------------
+const STATUS_FNS = ['num', 'measuredValue', 'durationLabel', 'freshnessInfo',
+                    'statusState', 'paintStatus', 'setStatus'];
+
+function statusDriver() {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const classes = new Set();
+  const dot = { classList: {
+    toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
+  } };
+  // textContent is counted, not just stored: the wrapper is role="status"
+  // aria-live="polite", so ASSIGNING it is what announces the change — and re-assigning
+  // an identical string re-announces it, which the 15-second repaint would otherwise do
+  // four times a minute to a screen-reader user.
+  let announced = 0;
+  let current = '';
+  const label = {};
+  Object.defineProperty(label, 'textContent', {
+    get() { return current; },
+    set(v) { current = v; announced++; },
+  });
+  const doc = { getElementById(id) {
+    if (id === 'statusDot') return dot;
+    if (id === 'statusText') return label;
+    return null;
+  } };
+  const api = new Function('document',
+    varSource(js, 'LIVE_WINDOW_S') + '\n'
+    + varSource(js, 'wsTransport') + '\n'
+    + 'var lastData = null;\n'
+    + STATUS_FNS.map((n) => fnSource(js, n)).join('\n\n')
+    + '\nreturn { setStatus: setStatus, repaint: paintStatus,'
+    + '  push: function(d){ lastData = d; paintStatus(); } };')(doc);
+  return {
+    setStatus: api.setStatus,
+    push: api.push,
+    repaint: api.repaint,
+    read: () => ({ classes: Array.from(classes).sort(), text: current, announced }),
+  };
+}
+
+test('dashboard.html: the connection indicator tells live, connected-idle and '
+   + 'disconnected apart', () => {
+    const s = statusDriver();
+    const now = Date.now() / 1000;
+
+    // 1. DISCONNECTED — unchanged behaviour, and neither "on" nor "idle".
+    s.setStatus(false, false);
+    assert.strictEqual(s.read().text, 'connecting…');
+    assert.deepStrictEqual(s.read().classes, []);
+    s.setStatus(false, true);
+    assert.strictEqual(s.read().text, 'reconnecting…');
+    assert.deepStrictEqual(s.read().classes, []);
+
+    // 2. LIVE — connected AND a row arrived inside the window. The only state entitled to
+    //    the word.
+    s.setStatus(true, false);
+    s.push({ freshness: { newest_ts: now - 5, age_seconds: 5, live: true } });
+    assert.strictEqual(s.read().text, 'live');
+    assert.deepStrictEqual(s.read().classes, ['on']);
+
+    // 3. CONNECTED, NOT RECEIVING — the state that used to be painted green. It must not
+    //    say "live", it must say for HOW LONG, and it must not read as an outage either.
+    // 104400s = 29 hours. durationLabel() rolls to days past 24h — deliberately the SAME
+    // rounding the session list's "1d ago" uses, so the indicator and the row beneath it
+    // cannot describe one instant two different ways.
+    s.push({ freshness: { newest_ts: now - 104400, age_seconds: 104400, live: false } });
+    const idle = s.read();
+    assert.strictEqual(idle.text, 'connected — no traffic for 1d',
+      `a 29-hour-old newest row reported "${idle.text}"`);
+    assert.deepStrictEqual(idle.classes, ['idle']);
+    assert.ok(!/\blive\b/.test(idle.text),
+      'a connection that has delivered nothing for 29 hours still called itself live');
+    // …and the duration is a real reading of the gap, not a fixed "a while": a two-hour
+    // lull and a day-long one are different facts about whether anything is pointed here.
+    s.push({ freshness: { newest_ts: now - 7200, age_seconds: 7200, live: false } });
+    assert.strictEqual(s.read().text, 'connected — no traffic for 2h');
+
+    // A socket that stays open cannot keep a stale "live" alive: the age is recomputed
+    // against the local clock, so the gateway's own `live: true` is overruled once the
+    // instant it points at falls outside the window. This is the wedged-socket case — no
+    // close event ever fires, and the old indicator would have stayed green forever.
+    s.push({ freshness: { newest_ts: now - 3600, age_seconds: 5, live: true } });
+    assert.strictEqual(s.read().text, 'connected — no traffic for 1h',
+      'a stale newest_ts was overridden by the payload’s own optimistic live flag');
+
+    // 4. A gateway that has recorded nothing at all is not the same as one that has gone
+    //    quiet, and saying "no traffic for 0s" would be nonsense.
+    s.push({ freshness: { newest_ts: null, age_seconds: null, live: false } });
+    assert.strictEqual(s.read().text, 'connected — nothing recorded yet');
+
+    // 5. A gateway that publishes no freshness block at all. "Connected" is the whole of
+    //    what is known about it, and inferring "live" from a completed handshake is
+    //    precisely the inference that produced this defect.
+    s.push({});
+    assert.strictEqual(s.read().text, 'connected — traffic unknown');
+    assert.deepStrictEqual(s.read().classes, ['idle']);
+
+    // …and the transport still wins: a dropped socket is a dropped socket whatever the
+    // last payload said.
+    s.setStatus(false, true);
+    assert.strictEqual(s.read().text, 'reconnecting…');
+  });
+
+test('dashboard.html: the status live region announces a change and only a change', () => {
+  const s = statusDriver();
+  s.setStatus(true, false);
+  s.push({ freshness: { newest_ts: Date.now() / 1000 - 5, live: true } });
+  assert.strictEqual(s.read().text, 'live');
+  const before = s.read().announced;
+  // The 15-second repaint runs whether or not anything moved. Re-assigning the same
+  // string re-announces it to a screen reader.
+  s.repaint(); s.repaint(); s.repaint();
+  assert.strictEqual(s.read().announced, before,
+    'an unchanged status was re-announced — a screen-reader user hears it four times a minute');
+  s.push({ freshness: { newest_ts: Date.now() / 1000 - 7200, live: false } });
+  assert.strictEqual(s.read().announced, before + 1,
+    'a real state change was NOT announced — the aria-live region is mutating nothing');
+});
+
+// ---------------------------------------------------------------------------
+// ITEM (c): THE MONITOR CLAIMED TO WATCH THINGS IT CANNOT SEE.
+//
+// "Active sessions" showed "(no session id) / testclient / 1d ago" while two Claude
+// Desktop threads were open on screen. Claude Desktop talks straight to
+// api.anthropic.com; it never reaches this process, so its chats are not MISSING from
+// this list, they are structurally outside it and no amount of waiting will change that.
+//
+// The defect is presentational and so is the fix. Inventing rows for chats the gateway
+// cannot observe would be the same fabrication as inventing dollars for tokens nobody
+// reported — a panel that says "we cannot see that" is the honest one.
+// ---------------------------------------------------------------------------
+const MONITOR_FNS = ['num', 'esc', 'money', 'truncate', 'pageOrigin', 'durationLabel',
+                     'agoLabel', 'classifySurface', 'renderMonitor'];
+
+function monitorDriver() {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const sessions = { innerHTML: '' };
+  const surfaces = { innerHTML: '' };
+  const doc = { getElementById(id) {
+    if (id === 'sessions') return sessions;
+    if (id === 'surfaces') return surfaces;
+    return null;
+  } };
+  const drive = new Function('document',
+    varSource(js, 'SURFACES') + '\n'
+    + varSource(js, 'ACTIVE_WINDOW_S') + '\n'
+    + MONITOR_FNS.map((n) => fnSource(js, n)).join('\n\n')
+    + '\nreturn function(rows){ renderMonitor(rows || []); };')(doc);
+  return (rows) => { sessions.innerHTML = ''; drive(rows); return sessions.innerHTML; };
+}
+
+test('dashboard.html: the Monitor states the boundary of what it can observe', () => {
+  const html = fs.readFileSync(DASHBOARD, 'utf8');
+  // In the STATIC markup, not in an empty-state branch: the limit is true whether or not
+  // the list has rows, and the non-empty case is when a reader is most likely to mistake
+  // it for "every chat I have open".
+  const panel = /<h2>Active sessions[\s\S]*?<div id="sessions">/.exec(html);
+  assert.ok(panel, 'the Active sessions panel lost its heading or its list');
+  const scope = panel[0];
+  // Flattened: this copy is wrapped for readability in the source, so a phrase can span a
+  // newline and several columns of indentation.
+  const prose = text(scope).replace(/\s+/g, ' ');
+  assert.match(scope, /class="scope-note"/,
+    'the Active sessions panel makes no statement about what it can see');
+  assert.match(prose, /routed through this gateway/i,
+    'the panel does not say the list is limited to gateway-routed chats');
+  assert.match(prose, /Claude Desktop/,
+    'the panel does not name the client whose absence prompted this — a reader with two '
+    + 'threads open needs to be told those threads are not eligible, not left to infer it');
+  assert.match(prose, /api\.anthropic\.com/,
+    'the panel does not name the endpoint a direct client uses');
+  assert.match(scope, /ANTHROPIC_BASE_URL/,
+    'the panel does not say how to make a client visible');
+});
+
+test('dashboard.html: an empty session list says why it is empty and what to do', () => {
+  const render = monitorDriver();
+  const html = render([]);
+  // NOT "no sessions yet". The overwhelmingly likely reason is that every client on the
+  // machine is still talking to the provider directly — a configuration, not a wait.
+  assert.match(text(html), /No chat has been routed through this gateway/,
+    'the empty state still reads as "nothing has happened yet"');
+  assert.match(html, /export ANTHROPIC_BASE_URL=/,
+    'the empty state does not carry the line that makes a client visible');
+  assert.match(text(html), /cannot be listed here/,
+    'the empty state does not say a direct client will NEVER appear, so a reader waits');
+  assert.ok(!/no sessions yet/i.test(text(html)),
+    'the ambiguous "no sessions yet" wording survived');
+});
+
+test('dashboard.html: a row with no session id says what that MEANS', () => {
+  const render = monitorDriver();
+  const now = Date.now() / 1000;
+  const html = render([
+    { session: '', source: 'testclient', ts: now - 90000, savings: 0, actual_cost: 0 },
+    { session: '', source: 'testclient', ts: now - 90100, savings: 0, actual_cost: 0 },
+  ]);
+  // "(no session id)" stated the symptom and left the reader to guess the cause; the
+  // guess is usually "the dashboard is broken". It is a fact about the CLIENT: it sent no
+  // session header, which is also why every call from it folds into this one row.
+  assert.ok(!/\(no session id\)/.test(text(html)),
+    'the bare "(no session id)" placeholder survived');
+  assert.match(text(html), /no session id/,
+    'the row no longer says the session id is absent at all');
+  assert.match(text(html), /client sent no session header/,
+    'the row does not say WHY it has no session id');
+  assert.match(html, /title="This client sent no session header[^"]*grouped into one row/,
+    'the row does not explain that its call count spans every chat from that client');
+
+  // NOTHING CURRENTLY ROUTING is its own fact. Without it a reader compares "2 threads on
+  // screen" against "1 row, 1d ago" and concludes the panel is broken, when what it is
+  // reporting is that no traffic has reached the gateway since then.
+  assert.match(text(html), /Nothing is routing through the gateway right now/,
+    'a list whose newest row is a day old does not say that nothing is live');
+  assert.match(text(html), /1d ago/, 'the staleness note does not say how stale');
+
+  // …and a genuinely live row does NOT get that banner, or the note would be noise.
+  const live = render([{ session: 'sess-a', source: 'claude-code', ts: now - 5,
+                         savings: 1, actual_cost: 0.5 }]);
+  assert.ok(!/Nothing is routing/.test(text(live)),
+    'a session seen five seconds ago was reported as "nothing is routing"');
+  assert.match(live, /class="live-dot on"/, 'an active session lost its live marker');
 });
 
 test('dashboard.html: print resets the mobile scroll-table rules (table-wrap, min-width, scroll-fade, scrollhint)', () => {

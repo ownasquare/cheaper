@@ -141,12 +141,21 @@ with your key, and recorded. See [Supported tools](#supported-tools).
 Routing you can't see is a promise; routing you can see is a receipt.
 
 ```bash
-cheaper monitor                        # live terminal: downgrade rate, tier mix, est. savings, recent decisions
-open http://localhost:8787/dashboard   # same, in the browser
+cheaper monitor      # live terminal: downgrade rate, tier mix, est. savings, recent decisions
+cheaper dashboard    # same, in the browser
 ```
 
 Both read the gateway's SQLite decision log, so the numbers are your real traffic —
 not a model.
+
+`/dashboard` is token-gated (since 0.3.0) — `cheaper dashboard` mints the token and
+opens your browser at the tokened URL for you, so use it instead of opening the bare
+URL yourself. (The line it prints to the terminal is the bare, secret-free URL — safe
+to paste into chats or screenshots — because the browser it opened already has the
+tokened copy.) Once a browser has loaded a tokened dashboard, it gets a same-origin
+session cookie and a plain reload (Cmd-R) keeps working without the token in the URL;
+a fresh browser or profile that has never opened the dashboard hits a 401 until it
+goes through `cheaper dashboard` at least once.
 
 ---
 
@@ -215,14 +224,27 @@ speaks a native, non-OpenAI protocol with no compat mode needs a protocol adapte
 cheaper <command> [options]
 ```
 
+This table is kept in sync with the same `HELP` string `cheaper --help` prints — see
+[`cli/test/cli_help.test.js`](cli/test/cli_help.test.js), which fails the suite if a
+command is ever added to `HELP` without a matching row here.
+
 | Command | What it does |
 |---|---|
 | `peek [--days N] [--harness <key>] [--limit N] [--json]` | Estimate savings from your existing logs (local, read-only). |
 | `install [skill agents hook gateway plugin] [--all]` | Install components. `--all` = skill+agents+hook+gateway; `plugin` = the managed bundle. |
+| `uninstall [components] [--purge]` | Remove installed components (default: all). `--purge` also drops `~/.cheaper` (including gateway metrics). |
 | `gateway start` · `stop` · `status` | Run / stop / check the routing gateway. |
-| `monitor` | Live routing + savings in the terminal. |
-| `status` | Show what's installed and whether the gateway is running. |
-| `uninstall` | Remove everything (add `--purge` to also drop `~/.cheaper`). |
+| `dashboard [--json]` | Open the live localhost dashboard in your browser, or print the same three panels as JSON. **No `--terminal` view** — asking for one prints a pointer to `--json` rather than silently opening the browser. |
+| `reports [--terminal] [--json]` | Realized savings by period, bucketed on when the calls happened — browser, terminal, or JSON. |
+| `logs [--terminal] [--json]` | The full audit register, every routed call — browser, terminal, or JSON. |
+| `monitor [--terminal] [--json] [--watch]` | Live routing + savings — browser by default, terminal with `--terminal`, raw `/metrics` with `--json` (add `--watch` to stream it). |
+| `savings [--json]` | Realized savings by period, bucketed on when the calls happened. Disjoint windows that add up to lifetime. |
+| `export [--format csv\|tsv\|json\|ndjson] [--out FILE] [--from/--to YYYY-MM-DD] [--tz IANA] [--basis measured\|estimated] [--guard safe\|raw]` | Stream the full audit register to a file. |
+| `import --since D [--dry-run] [--harness <key>] [--json]` | Backfill per-call events from your existing transcripts, timestamped at their own event time and marked permanently ESTIMATED. |
+| `forget --session I` | Exclude one chat from every total, leaving a tombstone so the drop is stated rather than silent. |
+| `compact [--dry-run] [--json]` | Seal finished months: merge, dedupe, verify, gzip. Explicit only — never runs from a hook. |
+| `taglines [--all] [--harness <key>] [--remove] [--dry-run]` | Wire the Cheaper.app end-of-chat savings line into every supported harness (Claude Code is handled by the plugin instead). |
+| `status [--verbose]` | Show what's installed and whether the gateway is running. |
 | `version` · `help` | Version / help. |
 
 <details>
@@ -262,7 +284,7 @@ Everything is env-configurable; defaults are safe (downgrade-only, no surprise s
 | `ROUTER_MIN_TIER` | `haiku` | Never route below this tier. |
 | `ROUTER_LONG_CHARS` | `4000` | Length that nudges a request up to at least mid. |
 | `ROUTER_MODE` | `heuristic` | `triage` classifies via a live cheap-model pass. |
-| `CHEAPER_PRICE_HAIKU` / `_SONNET` / `_OPUS` | `1` / `3` / `15` | Relative $/Mtok weights for the savings estimate. |
+| `CHEAPER_PRICE_HAIKU` / `_SONNET` / `_OPUS` | `1` / `3` / `5` | Relative $/Mtok weights for the **legacy tier-weight estimate only** (`est_savings_units` / `est_savings_pct`) — not the real per-model dollars shown elsewhere, which come from `pricing.py` per row. The old `1`/`3`/`15` spread was the retired Opus 4 rate and overstated top-tier work threefold; current defaults track the live catalog (Haiku 4.5 `$1`, Sonnet 5 `$3`, Opus 5 `$5`). |
 | `CHEAPER_DB` | `~/.cheaper/metrics.db` | Gateway decision log (SQLite). |
 </details>
 
@@ -283,14 +305,19 @@ Everything is env-configurable; defaults are safe (downgrade-only, no surprise s
 `peek` is a read-only, prompt-text-only scanner. It **detects 8 harnesses and reads
 chat history for 7** — Cursor keeps its history in a SQLite database `peek` does not
 read yet, so it is reported as unreadable rather than quietly skipped. The end-of-chat
-savings line is wired to the same 7. Support is graded honestly:
+savings line (`cheaper taglines`) is wired to a **different** 7, not the same set:
+Claude Code's line ships through the plugin instead of `taglines`, and `taglines` adds
+Cursor — whose chat history `peek` cannot read, but whose end-of-chat file `taglines`
+can still write a line into. The overlap is 6 (Codex, Gemini CLI, Grok, OpenCode,
+Copilot, PI.dev); Claude Code is peek-only, Cursor is taglines-only. Support is graded
+honestly:
 
 | Harness | Location | Status | Notes |
 |---|---|---|---|
 | **Claude Code** | `~/.claude/projects/**/*.jsonl` | ✅ supported | Real token counts; sub-agent sidechains (`isSidechain` + sibling `subagents/`); usage **deduped by `message.id`** (one turn spans multiple lines that repeat the same usage). |
 | **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | ◐ experimental | Model from `turn_context`, messages from `response_item`; **tokens estimated** (codex counts are cumulative/version-fragile — summing would inflate). |
-| **Gemini CLI / Grok / OpenCode / Copilot** | tool config dirs | ◐ experimental | Generic JSONL/JSON parsing; extracts what it can, fabricates nothing. |
-| **Cursor** | `state.vscdb` (SQLite) | ○ not yet | DB-backed; a read-only reader is on the roadmap. |
+| **Gemini CLI / Grok / OpenCode / Copilot / PI.dev** | tool config dirs | ◐ experimental | Generic JSONL/JSON parsing; extracts what it can, fabricates nothing. |
+| **Cursor** | `state.vscdb` (SQLite) | ○ not yet | DB-backed; a read-only reader is on the roadmap. `peek` cannot read this harness, but `cheaper taglines` can still install its end-of-chat line. |
 
 Safeguards: tool-output bodies never enter the pipeline; unknown models are
 unpriceable (no phantom savings); savings honor the never-upgrade ceiling. See

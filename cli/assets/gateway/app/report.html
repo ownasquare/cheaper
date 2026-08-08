@@ -111,6 +111,12 @@
 
   /* An un-reportable cell is a LABEL, never $0.00. Zero is a measured result. */
   .nodata{color:var(--mut);font-style:italic;}
+  /* "about" — this document's existing word for a figure it will still print but will not
+     stand behind as measured, alongside `withheld`, `not covered` and the unpriceable em
+     dash. It PREFIXES the figure rather than replacing it: the number is the best
+     available reconstruction, and suppressing it would hide real spend. It must survive
+     printing, because a printed report is the artifact people quote from. */
+  .approx{color:var(--mut);font-weight:650;}
   .notcovered{color:var(--mut);}
   .notcovered::before{content:"";display:inline-block;width:7px;height:7px;border-radius:2px;
     margin-right:5px;vertical-align:0;
@@ -421,6 +427,98 @@
     var n = Number(v);
     if (!isFinite(n)) return noClaim(why);
     return n.toLocaleString('en-US');
+  }
+
+  // ---- THE MEASUREMENT BASIS OF THE LEGACY VIEW'S DOLLARS ---------------------------
+  //
+  // The legacy `/report` endpoint serves Metrics.summary() verbatim, so every figure on
+  // that branch is the gateway proxy's own blended aggregate. `usage_source` decides
+  // whether the token counts underneath those dollars came from the PROVIDER ('body') or
+  // were inferred from the request — and a dollar derived from inferred tokens is a
+  // reconstruction, not a measurement. A printed report is the artifact people quote
+  // from and attach to expense claims, so an unqualified figure here travels further and
+  // lasts longer than the same figure on the live page.
+  //
+  // metrics.summary() publishes the split as an additive `measurement` block. A gateway
+  // that predates that block publishes nothing, and the honest reading of nothing is
+  // UNKNOWN, never "measured" — degrading the other way would make the un-upgraded
+  // gateway the one configuration whose printout carries no qualifier at all.
+  //
+  // This mirrors measurementInfo() in gateway/app/dashboard.html. An HTML page cannot
+  // import, so the two copies are the price of the rule, exactly as they are for
+  // claimState() above.
+  var DOLLAR_BASES = { measured: 1, unmeasured: 1, mixed: 1, none: 1 };
+  function measurementBasis(o){
+    var m = (o && typeof o.measurement === 'object' && o.measurement) ? o.measurement : null;
+    var basis = (m && typeof m.dollars_basis === 'string')
+      ? m.dollars_basis.trim().toLowerCase() : '';
+    return DOLLAR_BASES[basis] ? basis : 'unknown';
+  }
+  function basisTitle(o){
+    var basis = measurementBasis(o);
+    if (basis === 'measured') return '';
+    if (basis === 'none') return 'No call behind this figure could be priced.';
+    if (basis === 'unknown') {
+      return 'The gateway that produced this report does not state whether its dollar '
+        + 'figures came from provider-reported usage, so this figure cannot be presented '
+        + 'as measured.';
+    }
+    return 'Reconstructed from the request body, not from provider-reported usage: the '
+      + 'token counts behind this figure are what the request implied, not what was '
+      + 'billed. Not a measured result.';
+  }
+  // `v` is the RAW value and `rendered` is what money()/savedMoney() made of it. An absent
+  // value has already become a labelled non-number, and "about —" would turn a clean
+  // "no claim made" into a half-claim, so only a real figure is prefixed.
+  function qualifyFigure(o, v, rendered){
+    if (v === null || v === undefined || !isFinite(Number(v))) return rendered;
+    if (measurementBasis(o) === 'measured') return rendered;
+    return '<span class="approx" title="' + esc(basisTitle(o)) + '">about </span>' + rendered;
+  }
+  // The provenance block's "Basis" row for the legacy view, written from the counts when
+  // the gateway supplies them. Counts are read three-state: an absent count is not a
+  // count of zero, so a clause whose number is missing is DROPPED rather than filled with
+  // 0 — "0 of 0 priced calls" is a fabricated statement about a gateway that reported
+  // neither number.
+  var LEGACY_BLEND_NOTE = 'The gateway observed every row below, but only the rows whose '
+    + 'usage the provider actually reported are <i>measured</i>; rows whose usage was '
+    + 'never reported are <i>estimated</i>. The basis-split report is served at '
+    + '<span class="mono">/api/v1/report.html</span>.';
+  function measurementNarrative(){
+    var basis = measurementBasis(D);
+    var m = (D && typeof D.measurement === 'object' && D.measurement) ? D.measurement : {};
+    var n = function(v){
+      var x = Number(v);
+      return (v === null || v === undefined || !isFinite(x)) ? null : x;
+    };
+    var priced = n(m.priced_calls), meas = n(m.measured_calls), unmeas = n(m.unmeasured_calls);
+    var counts = '';
+    if (meas !== null && priced !== null){
+      counts = ' ' + meas.toLocaleString('en-US') + ' of ' + priced.toLocaleString('en-US')
+        + ' priced call' + (priced === 1 ? '' : 's') + ' carried provider-reported usage.';
+    } else if (unmeas !== null){
+      counts = ' ' + unmeas.toLocaleString('en-US') + ' call' + (unmeas === 1 ? '' : 's')
+        + ' carried no provider-reported usage.';
+    }
+    if (basis === 'measured'){
+      return '<b>Measured.</b> Every priced call behind the figures on this page carried '
+        + 'usage the provider itself reported.' + counts;
+    }
+    if (basis === 'none'){
+      // "$0", not "$0.00": a literal two-decimal zero anywhere in this template is a
+      // measured claim, and cli/test/html.test.js bans it outright for that reason. The
+      // NO_CLAIM sentence above already uses the same shortened form.
+      return '<b>No dollar figure is claimed.</b> Not one recorded call could be priced, '
+        + 'so there is no money result on this page. That is not the same as saving $0.';
+    }
+    if (basis === 'unknown'){
+      // The original, still-accurate wording for a gateway that publishes no split.
+      return '<b>Mixed, and not separated on this view.</b> ' + LEGACY_BLEND_NOTE;
+    }
+    return '<b>' + (basis === 'mixed' ? 'Partly measured.' : 'Not measured.') + '</b>'
+      + counts + ' The remaining figures were reconstructed from what each request asked '
+      + 'for, which is not what was billed, so they are marked <b>about</b> above and '
+      + 'must not be quoted as a measured saving. ' + LEGACY_BLEND_NOTE;
   }
 
   // Only for values that are exact counts by construction and cannot be absent.
@@ -1432,11 +1530,14 @@
         (age !== null && isFinite(age) ? ' (' + esc(String(age)) + ' days old)' : '') +
         (stale ? ' <span class="warn">— over ' + STALE_DAYS + ' days old; re-verify ' +
                  'before relying on these figures</span>' : '')],
-      ['Basis', '<b>Mixed, and not separated on this view.</b> The gateway observed every ' +
-        'row below, but only the rows whose usage the provider actually reported are ' +
-        '<i>measured</i>; rows whose usage was never reported are <i>estimated</i>. This ' +
-        'legacy view reports one blended figure and cannot tell you which is which. The ' +
-        'basis-split report is served at <span class="mono">/api/v1/report.html</span>.'],
+      // The blanket "cannot tell you which is which" was true only while the payload
+      // carried no split at all. metrics.summary() now publishes `measurement`, so when
+      // it is present this row states the ACTUAL counts — and states plainly when the
+      // answer is "none of them", which is the state that produced a confident headline
+      // out of a database whose usage_source was NULL from end to end. When the block is
+      // absent (an older gateway) the original wording stands, because it is then still
+      // exactly true.
+      ['Basis', measurementNarrative()],
       ['Grain', 'call — per-chat legacy aggregates are a different grain and are not ' +
         'included on this view.'],
       ['Baseline', esc(D.baseline_model || 'the model each request asked for') +
@@ -1611,19 +1712,30 @@
     }
 
     var dol = D.dollars || {}, cnt = D.counts || {};
+    // Every dollar in this block is the proxy's own aggregate over rows whose
+    // `usage_source` may or may not be the provider's. `qualifyFigure` is a no-op exactly
+    // when the payload states that every priced call carried provider-reported usage; on
+    // anything else — including a gateway that states nothing — the figure is prefixed
+    // "about" and cannot be quoted as a measured saving. The percentage under the
+    // headline is derived from the same two accumulators, so it carries the same
+    // qualifier: a bare "86.4% of the baseline" under a qualified figure would launder
+    // the identical claim one line down.
+    var savedPctKnown = (dol.savings_pct !== null && dol.savings_pct !== undefined);
+    var pctPrefix = (savedPctKnown && measurementBasis(D) !== 'measured') ? 'about ' : '';
     paintKpis([
-      { k: 'Saved (blended basis)', v: savedMoney(dol.saved, NO_CLAIM),
-        s: (dol.savings_pct !== null && dol.savings_pct !== undefined)
-             ? dol.savings_pct + '% of the baseline' : '',
+      { k: 'Saved (blended basis)',
+        v: qualifyFigure(D, dol.saved, savedMoney(dol.saved, NO_CLAIM)),
+        s: savedPctKnown ? pctPrefix + dol.savings_pct + '% of the baseline' : '',
         // NOT `(Number(dol.saved) < 0) ? 'red' : 'green'` — Number(undefined) < 0 is
         // false, so a MISSING dollars.saved was painted green behind its own em dash.
         cls: moneyClass(dol.saved) },
-      { k: 'Metered spend', v: money(dol.spent, NO_CLAIM), s: 'at published list rates' },
+      { k: 'Metered spend', v: qualifyFigure(D, dol.spent, money(dol.spent, NO_CLAIM)),
+        s: 'at published list rates' },
       { k: 'Calls routed cheaper', v: int(cnt.models_changed, NO_CLAIM),
         s: 'of ' + (cnt.intercepted === null || cnt.intercepted === undefined
                      ? 'an unknown number of' : Number(cnt.intercepted).toLocaleString('en-US')) +
            ' intercepted' },
-      { k: 'Costlier routes', v: money(dol.extra, NO_CLAIM),
+      { k: 'Costlier routes', v: qualifyFigure(D, dol.extra, money(dol.extra, NO_CLAIM)),
         s: (cnt.models_upcharged === null || cnt.models_upcharged === undefined
              ? 'count unavailable' : cnt.models_upcharged + ' call(s)') + ', subtracted above',
         // Absent stays neutral; only a real positive figure is a real loss.

@@ -725,3 +725,139 @@ def test_quality_is_not_regressed_on_canonical_hard_requests(text):
     it: every unambiguous correctness-critical shape must still classify hard. A
     confidently wrong answer on one of these costs more than the routing ever saves."""
     assert _hard(text, RouterConfig()), text
+
+
+# ===========================================================================
+# DEFECT 5 -- haiku was a silent default wearing a finding's clothes
+# ===========================================================================
+
+def test_the_fallthrough_reason_does_not_claim_a_check_that_never_ran():
+    """THE SELF-CONTRADICTION, provable inside ONE call and with no corpus at all.
+
+    `_content_tier`'s terminal branch returned the reason 'simple/short request' for
+    anything that matched nothing. No rule above it tests simplicity and no rule above it
+    tests shortness -- haiku is what a request gets for failing to use the escalation
+    vocabulary, and the reason string laundered that absence of evidence into a positive
+    claim about the request.
+
+    The fixture is the sharpest available form of it: 50,000 characters that collect
+    EXACTLY ONE moderate signal, and that signal is literally the string
+    'long/dense request (50000 chars)'. One line later the same function called it
+    short. A reason that contradicts a value the same call just computed is not a
+    wording problem, it is the concealment pattern this repo has now shipped three
+    times -- a figure or a label asserting work that was never performed.
+    """
+    cfg = RouterConfig()
+    long_text = "x " * 25_000                      # no fence, no verb, no multi-step
+    assert len(long_text) >= cfg.long_request_chars
+    mod = R._moderate_signals(long_text, cfg)
+    # The near-miss is real: one signal, and it is the LENGTH one.
+    assert len(mod) == cfg.min_moderate_signals - 1, mod
+    assert any("long/dense" in s for s in mod), mod
+
+    tier, reason, hard = R._content_tier(long_text, cfg)
+    assert (tier, hard) == ("haiku", False)        # the ROUTING is unchanged, by design
+    low = reason.lower()
+    assert "short" not in low, reason
+    assert "simple" not in low, reason
+    assert "no escalation signal matched" in low, reason
+    # ...and it reports the near-miss it actually observed, which is the diagnostic an
+    # operator tuning min_moderate_signals needs.
+    assert f"{len(mod)}/{cfg.min_moderate_signals}" in reason, reason
+
+
+def test_the_fallthrough_reason_reports_the_real_signal_count():
+    """The count is READ OFF the same list the band was tested against, so it can never
+    describe a different evaluation than the one that happened."""
+    cfg = RouterConfig()
+    # Nothing at all: 0 of 2.
+    _t, reason, _h = R._content_tier("hi", cfg)
+    assert "(0/2 moderate)" in reason, reason
+    # One moderate signal, still short of the band: 1 of 2.
+    _t2, reason2, _h2 = R._content_tier("can you summarize this", cfg)
+    assert "(1/2 moderate)" in reason2, reason2
+    # And it tracks the knob rather than a hardcoded 2.
+    _t3, reason3, _h3 = R._content_tier("can you summarize this",
+                                        RouterConfig(min_moderate_signals=3))
+    assert "(1/3 moderate)" in reason3, reason3
+
+
+def test_the_cheap_default_is_kept_and_haiku_is_still_the_fallthrough():
+    """THE POSITION, pinned so a later 'obvious' inversion has to argue with a test.
+
+    The proposal attached to this defect was to make sonnet the fall-through and require
+    positive evidence of simplicity to reach haiku. Replayed over a snapshot of real
+    traffic (752 human turns, 70 sessions; difficulty proxied by the output tokens each
+    turn really consumed):
+
+                        saved     AUC@>20k   AUC@median   Spearman
+        shipped        62.14%       0.499       0.538       +0.103
+        inverted       47.73%       0.498       0.530       +0.081
+
+    14.41 points of realized saving, spent to make all three difficulty readings WORSE.
+    The measurement that motivated the inversion -- that many haiku-routed turns went on
+    to be expensive -- is the corpus BASE RATE and not a property of the haiku band:
+    79.2% of haiku turns exceeded 20k output tokens against 79.1% corpus-wide, 80.0% for
+    sonnet and 78.7% for opus. The cheap default is therefore unchanged, and only the
+    sentence describing it was wrong.
+
+    THIS TEST ASSERTS THE BEHAVIOUR, NEVER THE FIGURES. The corpus is live and the third
+    decimal moves between runs (see the block comment in router.py::_content_tier), so
+    pinning 62.14% here would be pinning a number the next run cannot reproduce -- which
+    is the same class of mistake as the reason string this defect is about.
+    """
+    cfg = RouterConfig()
+    for text in ("rename this variable", "", "hi", "x " * 25_000,
+                 "can you summarize this"):
+        tier, _reason, hard = R._content_tier(text, cfg)
+        assert tier == "haiku", text[:20]
+        assert hard is False
+    # The fall-through is reached by ABSENCE, so it must also survive an empty body end
+    # to end rather than only inside _content_tier.
+    d = decide({"model": "claude-opus-5", "messages": []}, cfg)
+    assert d.tier == "haiku"
+    assert "no escalation signal matched" in d.reason
+
+
+def test_no_reason_string_in_the_cascade_describes_the_request():
+    """THE GENERAL RULE the terminal branch broke, asserted over every branch.
+
+    A reason may name a SIGNAL that fired (evidence the code holds) or say that none
+    did. It may not characterise the request itself -- 'simple', 'short', 'easy',
+    'trivial', 'complex' -- because this cascade measures none of those things (AUC
+    0.499 against a >20k-output cutoff; see the module docstring). Guarding the property
+    rather than the one string is what stops the next branch reintroducing it.
+    """
+    cfg = RouterConfig()
+    banned = ("simple", "short", "easy", "trivial", "complex", "difficult", "hard task")
+    samples = [
+        "", "hi", "rename this variable",
+        "summarize and refactor this endpoint",              # -> sonnet
+        "prove that this lock-free queue avoids the ABA problem",   # -> opus
+        "the contract says the diagnosis must be logged",    # -> opus, two domains
+        "review the authentication flow and make sure it is safe",  # -> opus, cue
+        "x " * 25_000,
+        "```\ncode\n```\nfirst, do this and then that",
+    ]
+    for text in samples:
+        _tier, reason, _hard = R._content_tier(text, cfg)
+        low = reason.lower()
+        for word in banned:
+            assert word not in low, f"reason characterises the request: {reason!r}"
+
+
+def test_the_reason_survives_the_ceiling_and_the_dollar_ceiling():
+    """The reason is APPENDED to, never replaced, so the honest fall-through statement
+    still reaches the ledger on the paths that also cap or walk down. A reader of the
+    Logs table sees why haiku was chosen AND what constrained it."""
+    cfg = RouterConfig()
+    # capped: opus-worthy content is irrelevant here -- a plain request on a cheap model.
+    d = decide(body("rename this variable", model="claude-haiku-4-5"), cfg)
+    assert d.tier == "haiku"
+    assert "no escalation signal matched" in d.reason
+    # min_tier raise: the fall-through statement is still the head of the reason.
+    d2 = decide(body("rename this variable", model="claude-opus-5"),
+                RouterConfig(min_tier="sonnet"))
+    assert d2.tier == "sonnet"
+    assert d2.reason.startswith("no escalation signal matched")
+    assert "raised to min_tier" in d2.reason

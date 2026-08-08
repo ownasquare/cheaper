@@ -33,6 +33,13 @@
   .status{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:0.85rem;color:var(--muted);}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 0 3px rgba(248,113,113,0.15);transition:background .2s,box-shadow .2s;}
   .dot.on{background:var(--green);box-shadow:0 0 0 3px rgba(52,211,153,0.15);}
+  /* THE THIRD TRANSPORT STATE, and the one that used to be painted green: the socket is
+     open but NOTHING has arrived through it inside the liveness window. "Connected" and
+     "receiving" are different facts, and a green dot on a gateway whose newest row is a
+     day old asserts the second while only the first is true. Amber, not green, and the
+     adjacent #statusText says which — the dot is never the only carrier (see the
+     colour-only check in tests/e2e/a11y.spec.js). */
+  .dot.idle{background:var(--amber);box-shadow:0 0 0 3px rgba(251,191,36,0.15);}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:20px;}
   .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
   .card .label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--muted);margin-bottom:6px;}
@@ -44,7 +51,10 @@
   .bar-fill{height:100%;background:var(--green);border-radius:3px;transition:width .3s;}
   .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px;}
   .panel h2{font-size:0.95rem;margin:0 0 12px 0;color:var(--text);font-weight:600;}
-  .empty-note{color:var(--muted);font-size:0.85rem;padding:12px 0;}
+  .empty-note{color:var(--muted);font-size:0.85rem;padding:12px 0;line-height:1.6;}
+  .empty-note b{color:var(--text);}
+  .empty-note code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
+    padding:1px 5px;font-size:0.78rem;color:var(--text);}
   .tool-row{display:grid;grid-template-columns:120px 60px 1fr 90px;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:0.82rem;}
   .tool-row:last-child{border-bottom:none;}
   .tool-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
@@ -67,20 +77,47 @@
   .pill.opus{background:rgba(244,114,182,0.15);color:var(--love-fg);}
   .pill.other{background:rgba(139,139,149,0.15);color:var(--muted);}
   .muted{color:var(--muted);}
-  svg.spark{width:100%;height:90px;display:block;}
-  /* renderSpark() swaps this wrapper's ENTIRE content between the 90px chart and a
-     one-line ".empty-note" (~41px) depending on whether >=2 points fall inside the
-     trailing 1-hour window — and that window rolls in real time. Without a floor here,
-     a call that was inside the window when a reader loaded the page can roll back out
-     of it a few minutes later with no other change on screen, and the panel — along
-     with every panel below it — visibly jumps upward. That is a real layout-shift bug
-     for a live page, not just a test artifact: it is what turned "Savings by period"
-     and everything under it into an apparent full-page regression in this suite, when
-     only #sparkWrap (already masked out of the pixel diff, per volatileRegions() in
-     visual.spec.js, BECAUSE its content is time-volatile) had actually changed. Pin the
-     footprint to the chart's own height so both states occupy the same box and nothing
-     downstream reflows either for a real viewer or for the masked screenshot.  */
-  #sparkWrap{min-height:90px;}
+  /* The chart is 150 CSS px tall and its viewBox is sized to the element's MEASURED
+     width, so one SVG user unit is one CSS pixel — see renderSpark(). The old chart was
+     a fixed 600-unit box stretched with preserveAspectRatio="none", which is fine for a
+     bare path and unusable the moment the chart carries <text>: a 2x horizontal stretch
+     makes every axis label 2x wide and unreadable. */
+  svg.spark{width:100%;height:150px;display:block;overflow:hidden;}
+  /* Axis furniture, styled here rather than with fill="…"/stroke="…" attributes so it
+     follows the SAME theme custom properties the rest of the page does. A presentation
+     attribute cannot carry var(), which is exactly why the line and area colours are
+     computed in JS (themeGreen()) and the static furniture is done in CSS. */
+  svg.spark text{font-family:inherit;font-size:10px;fill:var(--muted);}
+  svg.spark .grid{stroke:var(--line);stroke-width:1;}
+  /* The ZERO baseline is not a gridline: it is the line a saving is measured from, and a
+     bucket below it means Cheaper spent MORE than the baseline. Dashed and in --muted so
+     it reads as an axis rather than as another series. */
+  svg.spark .zero{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3;opacity:0.7;}
+  svg.spark .dot{fill:var(--card);stroke-width:1.5;}
+  .spark-cap{font-size:0.74rem;color:var(--muted);margin-top:8px;line-height:1.5;}
+  .spark-cap code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
+    padding:1px 5px;font-size:0.72rem;color:var(--text);}
+  /* The "not enough points to be a trend" state: the buckets that DO exist are printed
+     as figures rather than drawn as a shape. Two points is a line, not a direction. */
+  .spark-few{font-size:0.82rem;color:var(--muted);line-height:1.6;}
+  .spark-few .spark-point{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;
+    padding:4px 0;border-bottom:1px solid var(--line);}
+  .spark-few .spark-point:last-child{border-bottom:none;}
+  .spark-few .spark-when{color:var(--text);min-width:130px;}
+  .spark-few .spark-val{color:var(--green);font-weight:600;}
+  /* renderSpark() swaps this wrapper's ENTIRE content between the chart and a short
+     "too few points to be a trend" block, depending on how many buckets carry a
+     derivable figure — and a bucket can appear at any moment on a live page. Without a
+     floor here, a panel that gained its third bucket while a reader was looking at it
+     grows, and every panel below it — along with the whole page — visibly jumps. That is
+     a real layout-shift bug for a live page, not just a test artifact: it is what turned
+     "Savings by period" and everything under it into an apparent full-page regression in
+     this suite, when only #sparkWrap (already masked out of the pixel diff, per
+     volatileRegions() in visual.spec.js, BECAUSE its content is time-volatile) had
+     actually changed. Pin the footprint to the chart's own height (150px) plus its
+     caption so both states occupy the same box and nothing downstream reflows, either
+     for a real viewer or for the masked screenshot. */
+  #sparkWrap{min-height:196px;}
   .peek-headline{font-size:1rem;margin-bottom:10px;}
   .peek-headline .green{color:var(--green);font-weight:700;}
   .harness-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:0.82rem;border-bottom:1px solid var(--line);}
@@ -129,6 +166,33 @@
   .dim-card .spent-sub.nodata{color:var(--muted);font-weight:400;font-style:italic;}
   .tag-potential{display:inline-block;font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;
     color:var(--blue);background:rgba(96,165,250,0.15);border-radius:99px;padding:2px 7px;margin-left:6px;vertical-align:middle;}
+
+  /* ---- the measurement basis of every dollar on this page ----------------------
+     "about" is this product's existing word for a figure it will still print but will
+     not stand behind as measured — it sits beside 'withheld', 'not covered' and the
+     unpriceable em dash in cli/src/reports.js and report.html. It PREFIXES the figure
+     rather than replacing it: the number is the best available reconstruction and
+     suppressing it would hide real spend, but a reader must not be able to quote it as a
+     measured result. Rendered in --muted at the headline's own size so it is impossible
+     to crop out of a screenshot of the number it qualifies. */
+  .approx{color:var(--muted);font-weight:600;}
+  /* The page-level basis statement. ALWAYS rendered — a page that shows the banner only
+     when something is wrong teaches readers that its absence means nothing, and the
+     absence is exactly the state ("this gateway reports no basis at all") that has to be
+     visible. Full-width, above every tab, and not dismissable. */
+  .basis-line{border:1px solid var(--line);border-left-width:4px;border-radius:8px;
+    padding:10px 14px;margin-bottom:16px;font-size:0.8rem;line-height:1.55;
+    color:var(--muted);background:var(--card);}
+  .basis-line b{color:var(--text);}
+  .basis-line.ok{border-left-color:var(--green);}
+  .basis-line.warn{border-left-color:var(--amber);}
+  .basis-line code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
+    padding:1px 5px;font-size:0.76rem;color:var(--text);}
+  /* A panel that states the LIMITS of what it can see. Not an empty-state message —
+     it is true whether or not the panel has rows, so it lives in the static markup. */
+  .scope-note{font-size:0.78rem;color:var(--muted);line-height:1.55;margin:0 0 12px;}
+  .scope-note code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
+    padding:1px 5px;font-size:0.74rem;color:var(--text);}
 
   /* ---- Light theme ----
      Three layers, in this order, so the toggle always wins over the OS:
@@ -496,6 +560,18 @@
 </div>
 
 <main>
+  <!-- THE BASIS OF EVERY DOLLAR BELOW, on every tab, always rendered.
+       `usage_source` records HOW a row's token counts were obtained: 'body' means the
+       provider reported them; anything else means they were inferred from the request
+       body, which is a guess about what was BILLED. A dollar derived from inferred
+       tokens is not a measured saving, and printing it in the same type as one that is
+       makes this page assert something it cannot substantiate — the exact
+       confidently-wrong-number failure this product exists to prevent.
+       It is deliberately NOT conditional on something being wrong: a banner that appears
+       only on failure teaches a reader that its absence means nothing, and "this gateway
+       reports no basis at all" is precisely the state that has to be visible. -->
+  <div id="basisLine" class="basis-line"></div>
+
   <!-- ============================ DASHBOARD ============================ -->
   <section class="tabpane active" id="tab-dashboard">
     <div class="counts-row" id="countsRow"></div>
@@ -709,7 +785,25 @@
   <!-- ============================= MONITOR ============================= -->
   <section class="tabpane" id="tab-monitor">
     <div class="panel">
-      <h2>Active sessions</h2>
+      <!-- SCOPE, in the static markup, because it is true whether or not this panel has
+           rows — an empty-state message would say it only when the list happened to be
+           empty, and the list being NON-empty is when the reader is most likely to
+           mistake it for "every chat I have open".
+           This gateway can only observe a client that sends its requests HERE. Claude
+           Desktop, claude.ai, the Anthropic Console and any tool left on the default
+           endpoint talk straight to the provider, so their chats are not missing from
+           this list — they are structurally outside it, and no amount of waiting will
+           make them appear. Saying so is the whole fix: the panel previously presented
+           itself as a view of everything the user was doing. -->
+      <h2>Active sessions
+        <span class="h2note">chats routed through this gateway &mdash; nothing else can be seen</span></h2>
+      <p class="scope-note" id="sessionsScope">Cheaper sees a chat only when the client
+        sends it through this gateway. A client on its default endpoint &mdash; Claude
+        Desktop for macOS, claude.ai in a browser, or any tool whose base URL is still
+        <code>api.anthropic.com</code> &mdash; reaches the provider directly and cannot
+        appear here, however many threads are open on screen. To make one visible, start
+        it with <code class="baseurl">export ANTHROPIC_BASE_URL=&hellip;</code> pointing
+        at this gateway.</p>
       <div id="sessions"></div>
     </div>
 
@@ -817,6 +911,17 @@
     });
   }
   function num(v, d){ v = Number(v); return isFinite(v) ? v : (d===undefined?0:d); }
+  // The address a client has to be pointed at to become visible to this gateway. Read
+  // from our OWN location so the instruction is correct on a non-default port instead of
+  // repeating a documentation constant that may not be this process's address.
+  // Guarded because these renderers are also executed outside a browser by the node test
+  // harness, where `location` does not exist; a panel must not die half-built over it.
+  function pageOrigin(){
+    try {
+      if (typeof location === 'undefined' || !location) return 'http://localhost:8787';
+      return location.origin || (location.protocol + '//' + location.host);
+    } catch(e){ return 'http://localhost:8787'; }
+  }
   // ---- The three-state reader for every SIGNED figure that can be genuinely ABSENT ----
   //
   // A MEASURED zero and an ABSENT measurement are different claims. `num(v, 0)` collapses
@@ -886,6 +991,118 @@
     return (neg ? '-' : '') + out.trim();
   }
 
+  // A bare duration, with no "ago" and no tense — the same ladder agoLabel() has always
+  // used, factored out because the connection indicator needs "no traffic for 29h" and
+  // the session list needs "29h ago", and two independently-rounded copies of the same
+  // number on one screen is how "1d ago" ends up sitting beside "no traffic for 23h".
+  function durationLabel(sec){
+    sec = Math.max(0, num(sec, 0));
+    if (sec < 60) return Math.round(sec) + 's';
+    if (sec < 3600) return Math.round(sec / 60) + 'm';
+    if (sec < 86400) return Math.round(sec / 3600) + 'h';
+    return Math.round(sec / 86400) + 'd';
+  }
+
+  // ---------- THE MEASUREMENT BASIS OF EVERY DOLLAR ON THIS PAGE ----------------
+  //
+  // metrics.py records `usage_source` per row: 'body' means the PROVIDER reported the
+  // token counts for that call, anything else means they were inferred from the request.
+  // A dollar derived from inferred tokens is a reconstruction, not a measurement, and
+  // rendering it in the same type as a measured one is the confidently-wrong-number
+  // failure this whole product exists to refuse.
+  //
+  // metrics.summary() publishes the split as an additive `measurement` block. A gateway
+  // that predates that block publishes NOTHING — and the honest reading of nothing is
+  // UNKNOWN, not "measured". An older gateway is exactly as unable to substantiate the
+  // claim as a database full of NULLs, so 'unknown' is qualified identically to
+  // 'unmeasured'. Degrading the other way (absent block ⇒ assume measured) would make an
+  // un-upgraded gateway the one configuration that prints unqualified figures, which is
+  // the worst possible default.
+  //
+  // Every field is read through measuredValue(): a count that is absent is not a count
+  // of zero, and a sentence built from num(v,0) would state "0 of 0 calls" for a gateway
+  // that reported neither.
+  var DOLLAR_BASES = { measured: 1, unmeasured: 1, mixed: 1, none: 1 };
+  function measurementInfo(d){
+    var m = (d && typeof d.measurement === 'object' && d.measurement) ? d.measurement : null;
+    var basis = (m && typeof m.dollars_basis === 'string')
+      ? m.dollars_basis.trim().toLowerCase() : '';
+    if (!DOLLAR_BASES[basis]) basis = 'unknown';
+    return {
+      published: !!m,
+      basis: basis,
+      measured: measuredValue(m && m.measured_calls),
+      unmeasured: measuredValue(m && m.unmeasured_calls),
+      priced: measuredValue(m && m.priced_calls),
+      zeroToken: measuredValue(m && m.zero_token_calls)
+    };
+  }
+  // The single predicate every money renderer on this pane asks before printing a figure
+  // as a result rather than as a reconstruction. ONE copy, so the stat cards and the dim
+  // card can never disagree about whether the same accumulator was measured.
+  function dollarsAreMeasured(d){ return measurementInfo(d).basis === 'measured'; }
+  // The tooltip that travels WITH the "about" prefix, so the qualifier is self-explaining
+  // wherever it lands rather than depending on the reader scrolling back to the banner.
+  function basisTitle(d){
+    var m = measurementInfo(d);
+    if (m.basis === 'measured') return '';
+    if (m.basis === 'none') return 'No call behind this figure could be priced.';
+    if (m.basis === 'unknown') {
+      return 'This gateway does not report whether these dollars came from '
+        + 'provider-reported usage, so the figure cannot be presented as measured. '
+        + 'Upgrade and restart it with `cheaper gateway restart`.';
+    }
+    return 'Reconstructed from the request body, not from provider-reported usage: '
+      + 'the token counts behind this figure are what the request implied, not what was '
+      + 'billed. Not a measured result.';
+  }
+  // `rendered` is already-escaped figure markup. The prefix is a SPAN, not a change to
+  // the figure itself, so the number stays exactly as computed and machine-readable.
+  //
+  // It applies to the PERCENTAGE as well as to the dollars: savings_pct is derived from
+  // the same two accumulators, so a qualified "about $80.52" standing beside an
+  // unqualified "86.4%" would launder the identical claim through the card next to it.
+  //
+  // ONLY a figure that exists is prefixed. An ABSENT figure is already a labelled
+  // non-number, and "about —" qualifies nothing.
+  function approxPrefix(title){
+    return '<span class="approx" title="' + esc(title) + '">about </span>';
+  }
+  function approxFigure(d, rendered){
+    return dollarsAreMeasured(d) ? rendered : approxPrefix(basisTitle(d)) + rendered;
+  }
+
+  // ---------- FRESHNESS: is DATA arriving, not is the SOCKET open ----------------
+  //
+  // These are different facts and the indicator used to conflate them. /ws re-pushes the
+  // whole summary every 5 seconds whether or not a single call was routed, so a socket
+  // that has delivered nothing for 29 hours looks identical, frame for frame, to one
+  // carrying live traffic. "live" is a claim about the DATA.
+  //
+  // The age is recomputed from `newest_ts` against the local clock rather than trusting
+  // the payload's own `age_seconds`, so it keeps counting up between pushes — and so a
+  // socket that wedges open without closing is surfaced by a growing number instead of a
+  // frozen one. `age_seconds` is the fallback for a payload that reports the age but not
+  // the instant.
+  var LIVE_WINDOW_S = 120;
+  function freshnessInfo(d){
+    var f = (d && typeof d.freshness === 'object' && d.freshness) ? d.freshness : null;
+    if (!f) return { published: false, live: false, age: null, everRecorded: null };
+    var newest = measuredValue(f.newest_ts);
+    var age = measuredValue(f.age_seconds);
+    var seconds = null;
+    if (!newest.missing) seconds = Math.max(0, (Date.now() / 1000) - newest.value);
+    else if (!age.missing) seconds = Math.max(0, age.value);
+    return {
+      published: true,
+      // The gateway's own verdict is authoritative when it says "live"; the locally
+      // recomputed age is what keeps a stale page from continuing to claim it.
+      live: f.live === true && (seconds === null || seconds <= LIVE_WINDOW_S),
+      age: seconds,
+      everRecorded: !newest.missing
+    };
+  }
+
   var lastData = null;
   var lastPeek = null;
   var baselineChoice = 'requested_default';
@@ -916,6 +1133,79 @@
       'List rates only: negotiated discounts, credits and flat-rate plans are not modelled.';
   }
 
+  // ---------- The basis statement (every tab, every load) ----------
+  //
+  // #provenance answers "at what PRICES?"; this answers "over what TOKEN COUNTS?". They
+  // are independent, and a page can have an impeccable price catalog applied to token
+  // counts nobody ever measured — which is exactly the state that produced a confident
+  // headline out of 94 rows whose usage_source was NULL from end to end.
+  //
+  // Counts are read three-state: an absent count is not a count of zero, so a clause is
+  // DROPPED rather than filled with 0. "0 of 0 priced calls carried provider-reported
+  // usage" is a fabricated statement about a gateway that reported neither number.
+  function renderBasisLine(d){
+    var el = document.getElementById('basisLine');
+    if (!el) return;
+    var m = measurementInfo(d);
+    var priced = m.priced, meas = m.measured, unmeas = m.unmeasured;
+    var html = '';
+    var cls = 'basis-line warn';
+
+    if (m.basis === 'measured'){
+      cls = 'basis-line ok';
+      html = '<b>Measured.</b> Every call behind the dollar figures Cheaper reports for '
+        + 'its own routed traffic carried usage the provider itself reported'
+        + (priced.missing ? '' : ' (' + priced.value.toLocaleString('en-US') + ' priced call'
+            + (priced.value === 1 ? '' : 's') + ')')
+        + ', so those figures are what the calls billed at list rates.';
+    } else if (m.basis === 'none'){
+      html = '<b>No dollar figure is claimed.</b> Not one recorded call could be priced, '
+        + 'so there is no money result on this page to report. That is not the same as '
+        + 'having saved $0.00.';
+    } else if (m.basis === 'unknown'){
+      html = '<b>Basis unknown.</b> This gateway does not report whether its dollar '
+        + 'figures came from provider-reported usage, so none of them may be presented '
+        + 'as a measured saving. Every one is prefixed <b>about</b> until it does. '
+        + 'Upgrade Cheaper and restart it with <code>cheaper gateway restart</code>.';
+    } else {
+      // unmeasured / mixed — the same defect at two intensities, so one sentence with a
+      // different subject rather than two nearly-identical branches.
+      var subject = (m.basis === 'mixed')
+        ? '<b>Partly measured.</b> Only some'
+        : '<b>Not measured.</b> None';
+      var counted = '';
+      if (!meas.missing && !priced.missing){
+        counted = ' (' + meas.value.toLocaleString('en-US') + ' of '
+          + priced.value.toLocaleString('en-US') + ' priced call'
+          + (priced.value === 1 ? '' : 's') + ')';
+      } else if (!unmeas.missing){
+        counted = ' (' + unmeas.value.toLocaleString('en-US') + ' call'
+          + (unmeas.value === 1 ? '' : 's') + ' carried no provider-reported usage)';
+      }
+      html = subject + ' of the calls behind Cheaper’s own routed-traffic dollar '
+        + 'figures carried usage the provider reported' + counted
+        + '. The rest were reconstructed from '
+        + 'what each request asked for, which is not what was billed. Those figures are '
+        + 'prefixed <b>about</b> and must not be quoted as a measured saving.';
+    }
+
+    // The register's wall of $0.00, explained where a reader can act on it. A call that
+    // returned no output tokens genuinely costs its input tokens and nothing else, and on
+    // a probe-sized request that rounds to $0.00 — the CORRECT figure for it, not a
+    // missing one. Left unexplained it reads as a broken pricing path, and someone
+    // "fixes" it by inventing a number.
+    var zt = m.zeroToken;
+    if (!zt.missing && zt.value > 0){
+      html += ' <span class="muted">' + zt.value.toLocaleString('en-US') + ' recorded call'
+        + (zt.value === 1 ? '' : 's') + ' returned no output tokens at all; '
+        + (zt.value === 1 ? 'it prices' : 'they price') + ' to $0.00, which is the correct '
+        + 'figure for ' + (zt.value === 1 ? 'it' : 'them') + ' in the register &mdash; not '
+        + 'a missing one.</span>';
+    }
+    el.className = cls;
+    el.innerHTML = html;
+  }
+
   // ---------- Stat cards ----------
   function renderCards(d){
     var total = num(d.total, 0);
@@ -937,8 +1227,13 @@
     html += '<div class="card"><div class="label">Total routed</div><div class="value">' + total.toLocaleString('en-US') + '</div></div>';
     html += '<div class="card"><div class="label">Downgrade rate</div><div class="value green">' + dr.toFixed(1) + '%</div>' +
             '<div class="bar-track"><div class="bar-fill" style="width:' + Math.min(100, Math.max(0, dr)) + '%"></div></div></div>';
+    // Saved / Spent / Savings % are all derived from the SAME token counts, so they carry
+    // the SAME basis qualifier or none of them do — see approxFigure(). Qualifying only
+    // the flattering one would be its own dishonesty. `Total routed` and `Downgrade rate`
+    // are exact counts of rows and are unaffected by how those rows' usage was obtained,
+    // so they are deliberately left unqualified.
     html += '<div class="card"><div class="label">Saved</div><div class="value ' +
-            (savedInfo.missing ? 'nodata">&mdash;' : 'green">' + money(savedInfo.value)) + '</div>' +
+            (savedInfo.missing ? 'nodata">&mdash;' : 'green">' + approxFigure(d, money(savedInfo.value))) + '</div>' +
             // `dollars.saved` is metrics.py's REQUESTED-MODEL accumulator: base_x is
             // cost_of_model(om, ...) where `om` is the model the caller ASKED FOR, and
             // baselines.requested_default is literally dollars["saved"]. The all-top-tier
@@ -950,10 +1245,10 @@
             '<div class="sub">vs the model you asked for</div>' +
             (savedInfo.missing ? '<div class="sub warn">no data yet</div>' : '') + '</div>';
     html += '<div class="card"><div class="label">Spent</div><div class="value ' +
-            (spentInfo.missing ? 'nodata">&mdash;' : 'red">' + money(spentInfo.value)) + '</div>' +
+            (spentInfo.missing ? 'nodata">&mdash;' : 'red">' + approxFigure(d, money(spentInfo.value))) + '</div>' +
             (spentInfo.missing ? '<div class="sub warn">no data yet</div>' : '') + '</div>';
     html += '<div class="card"><div class="label">Savings %</div><div class="value ' +
-            (savedPctInfo.missing ? 'nodata">&mdash;' : 'green">' + pctFrac(savedPctInfo.value).toFixed(1) + '%') + '</div>' +
+            (savedPctInfo.missing ? 'nodata">&mdash;' : 'green">' + approxFigure(d, pctFrac(savedPctInfo.value).toFixed(1) + '%')) + '</div>' +
             (savedPctInfo.missing ? '<div class="sub warn">no data yet</div>' : '') + '</div>';
     document.getElementById('statCards').innerHTML = html;
   }
@@ -1006,16 +1301,20 @@
         // (and therefore this baseline) covers FEWER rows than `dollars.spent`. An
         // exclusion, so it is counted and shown here rather than left to silently shrink
         // the comparison.
-        billedTopMissing: num(counts.billed_top_missing, 0)
+        billedTopMissing: num(counts.billed_top_missing, 0),
+        fromGateway: true
       };
     } else if (baselineChoice === 'historical') {
       // A null/absent `lastPeek.totals` is MISSING, not zero: no scan has been performed.
       var totals = (lastPeek && lastPeek.totals) || null;
       raw = totals ? totals.dollarsSaved : null;
-      info = { label: 'vs your history', subject: 'your own history' };
+      // `fromGateway:false` — this number never passed through the proxy, so the
+      // gateway's own measured/unmeasured split says nothing about it. See
+      // HISTORICAL_BASIS_TITLE.
+      info = { label: 'vs your history', subject: 'your own history', fromGateway: false };
     } else {
       raw = baselines.requested_default;
-      info = { label: 'vs your model', subject: 'the model you asked for' };
+      info = { label: 'vs your model', subject: 'the model you asked for', fromGateway: true };
     }
     var missing = raw === null || raw === undefined || !isFinite(Number(raw));
     info.amount = missing ? null : Number(raw);
@@ -1085,13 +1384,29 @@
     // others. A measured negative is red text WITH a plain-language label (never a bare
     // "-$X.XX" that reads as a rendering glitch); a missing figure is an em dash with a
     // "no data" note (never $0.00, which would claim a measurement that was not made).
+    //
+    // …and the BASIS qualifier, which is orthogonal to all three: a measured negative, a
+    // measured positive and a measured zero are each a claim about dollars, and every one
+    // of them is only as good as the token counts underneath it. `qualify()` is a no-op
+    // exactly when metrics.summary() says every priced call carried provider-reported
+    // usage.
+    //
+    // SCOPE: `measurement` describes the GATEWAY's own rows. The historical baseline is
+    // `cheaper peek`'s reconstruction from local transcripts — a different data source,
+    // already labelled as such by this card's own "vs your history" caption and by the
+    // Peek panel it is read from — so the gateway's basis is deliberately NOT stamped
+    // onto it. Borrowing a qualifier across data sources is the mirror of the defect this
+    // fixes: a statement about one measurement attached to another.
+    var qualify = (moneyInfo.fromGateway === false)
+      ? function(rendered){ return rendered; }
+      : function(rendered){ return approxFigure(d, rendered); };
     var moneyHeadline, moneyCls = '', moneyNote = '';
     if (moneyInfo.missing){
       moneyHeadline = '&mdash;';
       moneyCls = 'nodata';
       moneyNote = 'no data yet';
     } else if (moneyInfo.amount < 0){
-      moneyHeadline = money(moneyInfo.amount);
+      moneyHeadline = qualify(money(moneyInfo.amount));
       moneyCls = 'money-neg';
       // The subject comes from the SELECTED baseline, never from a literal: this caption
       // sits directly beneath `moneyInfo.label`, and naming a different baseline than the
@@ -1099,7 +1414,7 @@
       moneyNote = 'you spent ' + money(Math.abs(moneyInfo.amount)) +
         ' MORE than ' + moneyInfo.subject + ' this period — a real result, not an error.';
     } else {
-      moneyHeadline = money(moneyInfo.amount);
+      moneyHeadline = qualify(money(moneyInfo.amount));
     }
     html += '<div class="dim-card">' +
       '<div class="label">Money</div>' +
@@ -1113,9 +1428,13 @@
         'published all-frontier rate on their own day are excluded from this baseline">' +
         num(moneyInfo.billedTopMissing, 0).toLocaleString('en-US') +
         ' call(s) excluded from this baseline (no all-frontier rate that day)</div>' : '') +
+      // The spend is the gateway's OWN accumulator on every baseline choice — including
+      // `historical`, where the headline above it is a transcript reconstruction. So it
+      // is qualified from the gateway's basis directly, not through qualify(), which
+      // follows the HEADLINE's provenance rather than this line's.
       (spentInfo.missing
         ? '<div class="spent-sub nodata">&mdash; spent (no data yet)</div>'
-        : '<div class="spent-sub">' + money(spentInfo.value) + ' spent</div>') +
+        : '<div class="spent-sub">' + approxFigure(d, money(spentInfo.value)) + ' spent</div>') +
       '</div>';
     // Tokens. The "potential" tag qualifies a FIGURE; with no figure there is nothing for
     // it to qualify, so it is dropped rather than left labelling an em dash.
@@ -1227,33 +1546,190 @@
     if (!isFinite(r) || !isFinite(g) || !isFinite(b)) return 'rgba(52,211,153,' + alpha + ')';
     return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
   }
+  // ---- THE CHART ITSELF ------------------------------------------------------------
+  //
+  // What was here before was a bare <path> in a 600x90 box: no axis, no tick, no label,
+  // no baseline. On three points spanning two days it drew a mountain, and a reader could
+  // not tell what period it covered, what any height was worth, or which way was up. A
+  // shape with no scale is not a chart — it is decoration that looks like evidence.
+  //
+  // It stays HAND-ROLLED SVG. This repo deliberately ships no charting library (the whole
+  // dashboard is one self-contained file the gateway serves over loopback), and pulling
+  // one in for four axis labels would be a far larger change than the defect warrants.
+  var SPARK_H = 150;
+  // Left padding carries the y labels ("-$12.34" at 10px ≈ 44px), bottom carries the two
+  // date stamps.
+  var SPARK_PAD = { l: 54, r: 14, t: 16, b: 32 };
+  // TWO POINTS IS NOT A TREND. A two-point series draws a line, and a line reads as a
+  // direction — but one interval contains no direction, only its two endpoints. Below
+  // this count the panel prints the buckets it has as figures instead of drawing a shape
+  // a reader would over-interpret.
+  var SPARK_MIN_POINTS = 3;
+
+  // The bucket width, in words, from `timeseries.bucket_seconds`. The chart is useless
+  // without it: the same three points are a quiet afternoon at one-minute buckets and a
+  // quiet quarter at one-day buckets.
+  function bucketWidthLabel(sec){
+    sec = num(sec, 0);
+    if (!(sec > 0)) return 'an unreported interval';
+    var plural = function(n, unit){ return n + ' ' + unit + (n === 1 ? '' : 's'); };
+    if (sec % 86400 === 0) return plural(sec / 86400, 'day');
+    if (sec % 3600 === 0) return plural(sec / 3600, 'hour');
+    if (sec % 60 === 0) return plural(sec / 60, 'minute');
+    return plural(sec, 'second');
+  }
+  // A bucket's start instant in the reader's OWN timezone. An axis labelled in UTC on a
+  // page whose every other timestamp is local is worse than no axis.
+  function bucketStamp(tSec, bucketSec){
+    var ms = num(tSec, 0) * 1000;
+    if (!(ms > 0)) return '—';
+    var opts = (num(bucketSec, 0) >= 86400)
+      ? { month: 'short', day: 'numeric' }
+      : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+    try { return new Date(ms).toLocaleString('en-US', opts); }
+    catch(e){ return new Date(ms).toISOString(); }
+  }
+
+  // Fewer points than a trend needs. It says which buckets it HAS and what they were
+  // worth, rather than either drawing them or going blank — a blank panel under a heading
+  // that says "Savings over time" reads as "you saved nothing over time".
+  function sparkTooFew(pts, dropped, bucketSec, width){
+    var html = '<div class="spark-few">';
+    if (!pts.length){
+      html += '<div>No routed traffic has been recorded yet, so there is no series to '
+        + 'draw. Point a client at this gateway to start one: '
+        + '<code>export ANTHROPIC_BASE_URL=' + esc(pageOrigin()) + '</code></div>';
+    } else {
+      html += '<div>' + pts.length + ' bucket' + (pts.length === 1 ? '' : 's') + ' of '
+        + esc(width) + ' each &mdash; not enough to draw a trend. A line needs at least '
+        + SPARK_MIN_POINTS + ' points; two points is a line, not a direction. '
+        + 'The buckets recorded so far:</div>';
+      pts.forEach(function(p){
+        html += '<div class="spark-point">'
+          + '<span class="spark-when">' + esc(bucketStamp(p.t, bucketSec)) + '</span>'
+          + '<span class="spark-val">' + money(p.v) + ' saved</span>'
+          + '<span class="muted">' + p.calls.toLocaleString('en-US') + ' call'
+          + (p.calls === 1 ? '' : 's') + '</span>'
+          + '</div>';
+      });
+    }
+    if (dropped > 0){
+      html += '<div class="muted">' + dropped + ' further bucket'
+        + (dropped === 1 ? '' : 's') + ' carried no derivable figure and '
+        + (dropped === 1 ? 'is' : 'are') + ' not counted here.</div>';
+    }
+    return html + '</div>';
+  }
+
   function renderSpark(d){
-    var ts = (d.timeseries && Array.isArray(d.timeseries.points)) ? d.timeseries.points : [];
     var wrap = document.getElementById('sparkWrap');
-    if (ts.length < 2){
-      wrap.innerHTML = '<div class="empty-note">waiting for traffic…</div>';
+    if (!wrap) return;
+    var series = (d && d.timeseries) || {};
+    var raw = Array.isArray(series.points) ? series.points : [];
+    var bucketSec = num(series.bucket_seconds, 0);
+    var width = bucketWidthLabel(bucketSec);
+
+    // A point whose `saved` is not a finite number is UNPRICEABLE, not zero. The old code
+    // ran every point through num(p.saved, 0), which plotted an absent figure ON the
+    // baseline — a measured $0.00 the payload never claimed, drawn at full confidence.
+    // Drop those points from the line and SAY how many were dropped.
+    var pts = [], dropped = 0;
+    raw.forEach(function(p){
+      var v = measuredValue(p && p.saved);
+      var t = measuredValue(p && p.t);
+      if (v.missing || t.missing){ dropped++; return; }
+      pts.push({ t: t.value, v: v.value, calls: num(p && p.calls, 0) });
+    });
+    pts.sort(function(a, b){ return a.t - b.t; });
+
+    if (pts.length < SPARK_MIN_POINTS){
+      wrap.innerHTML = sparkTooFew(pts, dropped, bucketSec, width);
       return;
     }
-    var W = 600, H = 90, pad = 4;
-    var vals = ts.map(function(p){ return num(p.saved, 0); });
-    var max = Math.max.apply(null, vals.concat([0.01]));
-    var min = 0;
-    var n = ts.length;
-    var stepX = (W - pad*2) / Math.max(1, n - 1);
-    function yFor(v){
-      var t = (v - min) / (max - min || 1);
-      return H - pad - t * (H - pad*2);
-    }
-    var pts = vals.map(function(v, i){ return [pad + i*stepX, yFor(v)]; });
-    var linePath = pts.map(function(p, i){ return (i===0?'M':'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join(' ');
-    var areaPath = linePath + ' L' + pts[pts.length-1][0].toFixed(1) + ',' + (H-pad) +
-                   ' L' + pts[0][0].toFixed(1) + ',' + (H-pad) + ' Z';
+
+    // ONE user unit == ONE CSS pixel, so the <text> labels are not stretched by
+    // preserveAspectRatio="none". clientWidth is 0 in the node test driver (a plain
+    // object) and on a hidden tab, so it falls back to a fixed 600 rather than dividing
+    // by zero. The chart is re-rendered on resize and on every metrics push, so a viewport
+    // change corrects itself.
+    var W = Math.max(320, Math.round(num(wrap.clientWidth, 0) || 600));
+    var H = SPARK_H, P = SPARK_PAD;
+    var x0 = P.l, x1 = W - P.r, yTop = P.t, yBot = H - P.b;
+
+    var vals = pts.map(function(p){ return p.v; });
+    // ZERO IS ALWAYS IN FRAME. A floating y-axis makes every series look like it never
+    // crossed zero, and a bucket where Cheaper spent MORE than the baseline is a real,
+    // signed result that has to be visibly BELOW the line rather than off the bottom of
+    // a chart that silently clamped its minimum to 0 — which is what the old code did.
+    var minV = Math.min(0, Math.min.apply(null, vals));
+    var maxV = Math.max(0, Math.max.apply(null, vals));
+    if (maxV === minV) maxV = minV + 0.01;      // a perfectly flat series still needs height
+    var span = maxV - minV;
+    var yFor = function(v){ return yBot - ((v - minV) / span) * (yBot - yTop); };
+    var xFor = function(i){ return x0 + (i * (x1 - x0)) / (pts.length - 1); };
+
+    var coords = pts.map(function(p, i){ return [xFor(i), yFor(p.v)]; });
+    var linePath = coords.map(function(c, i){
+      return (i === 0 ? 'M' : 'L') + c[0].toFixed(1) + ',' + c[1].toFixed(1);
+    }).join(' ');
+    var zeroY = yFor(0);
+    // The area is filled to the ZERO line, not to the bottom of the box, so the shaded
+    // region means "money" rather than "distance above the cheapest bucket".
+    var areaPath = linePath
+      + ' L' + coords[coords.length - 1][0].toFixed(1) + ',' + zeroY.toFixed(1)
+      + ' L' + coords[0][0].toFixed(1) + ',' + zeroY.toFixed(1) + ' Z';
+
     var green = themeGreen();
-    var svg = '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' +
-      '<path d="' + areaPath + '" fill="' + hexToRgba(green, 0.15) + '" stroke="none"></path>' +
-      '<path d="' + linePath + '" fill="none" stroke="' + green + '" stroke-width="2" vector-effect="non-scaling-stroke"></path>' +
-      '</svg>';
-    wrap.innerHTML = svg;
+    var svg = '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" '
+      + 'preserveAspectRatio="none" role="img" aria-label="'
+      + esc('Savings per ' + width + ' bucket, ' + bucketStamp(pts[0].t, bucketSec)
+            + ' to ' + bucketStamp(pts[pts.length - 1].t, bucketSec)
+            + ', peaking at ' + money(maxV)) + '">';
+    // Top gridline + its VALUE, so a height can be read off the chart.
+    svg += '<line class="grid" x1="' + x0 + '" y1="' + yTop + '" x2="' + x1 + '" y2="' + yTop + '"></line>';
+    svg += '<text x="' + (x0 - 6) + '" y="' + (yTop + 3) + '" text-anchor="end">'
+        + esc(money(maxV)) + '</text>';
+    // The zero baseline, always drawn and always labelled.
+    svg += '<line class="zero" x1="' + x0 + '" y1="' + zeroY.toFixed(1) + '" x2="' + x1
+        + '" y2="' + zeroY.toFixed(1) + '"></line>';
+    svg += '<text x="' + (x0 - 6) + '" y="' + (zeroY + 3).toFixed(1) + '" text-anchor="end">'
+        + esc(money(0)) + '</text>';
+    // …and the floor, but only when it is a real negative. Repeating $0.00 twice on the
+    // same axis would be noise.
+    if (minV < 0){
+      svg += '<line class="grid" x1="' + x0 + '" y1="' + yBot + '" x2="' + x1 + '" y2="' + yBot + '"></line>';
+      svg += '<text x="' + (x0 - 6) + '" y="' + (yBot + 3) + '" text-anchor="end">'
+          + esc(money(minV)) + '</text>';
+    }
+    svg += '<path d="' + areaPath + '" fill="' + hexToRgba(green, 0.15) + '" stroke="none"></path>';
+    svg += '<path d="' + linePath + '" fill="none" stroke="' + green
+        + '" stroke-width="2" vector-effect="non-scaling-stroke"></path>';
+    // A marker per bucket, each carrying its own instant and figure — the chart is a
+    // summary, and a reader who wants the number should not have to guess it off a slope.
+    coords.forEach(function(c, i){
+      svg += '<circle class="dot" cx="' + c[0].toFixed(1) + '" cy="' + c[1].toFixed(1)
+          + '" r="2.5" stroke="' + green + '"><title>'
+          + esc(bucketStamp(pts[i].t, bucketSec) + ' — ' + money(pts[i].v) + ' saved over '
+                + pts[i].calls.toLocaleString('en-US') + ' call'
+                + (pts[i].calls === 1 ? '' : 's')) + '</title></circle>';
+    });
+    // The TIME axis: the first and last bucket, stamped with real local dates. Anchored
+    // start/end so neither can overhang the plot area on a narrow viewport.
+    svg += '<text x="' + x0 + '" y="' + (H - 10) + '" text-anchor="start">'
+        + esc(bucketStamp(pts[0].t, bucketSec)) + '</text>';
+    svg += '<text x="' + x1 + '" y="' + (H - 10) + '" text-anchor="end">'
+        + esc(bucketStamp(pts[pts.length - 1].t, bucketSec)) + '</text>';
+    svg += '</svg>';
+
+    var cap = 'Each point spans ' + esc(width) + '. ' + pts.length + ' points, '
+      + esc(bucketStamp(pts[0].t, bucketSec)) + ' &rarr; '
+      + esc(bucketStamp(pts[pts.length - 1].t, bucketSec)) + ' (your local time). '
+      + 'Peak ' + money(maxV) + (minV < 0 ? ', floor ' + money(minV) : '') + ' per bucket.';
+    if (dropped > 0){
+      cap += ' ' + dropped + ' bucket' + (dropped === 1 ? '' : 's')
+        + ' carried no derivable figure and ' + (dropped === 1 ? 'is' : 'are') + ' not plotted.';
+    }
+    wrap.innerHTML = svg + '<div class="spark-cap">' + cap + '</div>';
   }
 
   // ---------- By tool ----------
@@ -2001,6 +2477,12 @@
     if (!data || typeof data !== 'object') data = {};
     lastData = data;
     renderProvenance(data);
+    renderBasisLine(data);
+    // The liveness indicator is a function of the DATA as well as of the socket, so it
+    // repaints on every push. Without this it would only ever change on a socket event —
+    // i.e. never, for a connection that stays up while the traffic behind it stops, which
+    // is the exact case it exists to report.
+    paintStatus();
     renderCards(data);
     renderCounts(data);
     renderDims(data);
@@ -2013,17 +2495,65 @@
     if (typeof refreshMonitor === 'function') refreshMonitor(false);
   }
 
+  // ---------- THREE liveness states, not two ----------
+  //
+  // The indicator used to be a function of the WEBSOCKET alone: open ⇒ green ⇒ "live".
+  // But /ws re-pushes the entire summary every five seconds whether or not a single call
+  // was routed, so "the socket is up" and "data is arriving" are indistinguishable at the
+  // transport layer — and a green "live" sat over a database whose newest row was 29
+  // hours old. Three states, named for what is actually true:
+  //
+  //   live                     connected AND a row arrived inside LIVE_WINDOW_S. The only
+  //                            state entitled to the word.
+  //   connected — no traffic   connected, nothing arriving. Amber, and it says for how
+  //                            long, so "quiet" and "nothing is pointed at me" are
+  //                            distinguishable by looking.
+  //   connecting/reconnecting  no socket. Unchanged.
+  //
+  // The transport half and the data half are stored apart and painted together, so a
+  // metrics push can change the wording with no socket event, and vice versa.
+  var wsTransport = { connected: false, reconnecting: false };
   function setStatus(connected, reconnecting){
+    wsTransport.connected = !!connected;
+    wsTransport.reconnecting = !!reconnecting;
+    paintStatus();
+  }
+  function statusState(){
+    if (!wsTransport.connected){
+      return { cls: '', text: wsTransport.reconnecting ? 'reconnecting…' : 'connecting…' };
+    }
+    var f = freshnessInfo(lastData);
+    if (!f.published){
+      // An older gateway publishes no freshness block. "Connected" is the whole of what
+      // is known about it, and inferring "live" from a completed handshake is precisely
+      // the inference that produced the defect.
+      return { cls: 'idle', text: 'connected — traffic unknown' };
+    }
+    if (f.live) return { cls: 'on', text: 'live' };
+    if (!f.everRecorded || f.age === null){
+      return { cls: 'idle', text: 'connected — nothing recorded yet' };
+    }
+    return { cls: 'idle', text: 'connected — no traffic for ' + durationLabel(f.age) };
+  }
+  function paintStatus(){
     var dot = document.getElementById('statusDot');
     var text = document.getElementById('statusText');
-    if (connected){
-      dot.classList.add('on');
-      text.textContent = 'live';
-    } else {
-      dot.classList.remove('on');
-      text.textContent = reconnecting ? 'reconnecting…' : 'connecting…';
-    }
+    if (!dot || !text) return;
+    var s = statusState();
+    dot.classList.toggle('on', s.cls === 'on');
+    dot.classList.toggle('idle', s.cls === 'idle');
+    // The wrapper carries role="status" aria-live="polite", so ASSIGNING this text is
+    // what announces the transition. Assign only on a real change: re-writing an
+    // identical string re-announces it, and the 15-second repaint below would otherwise
+    // read the same sentence to a screen-reader user four times a minute.
+    if (text.textContent !== s.text) text.textContent = s.text;
   }
+  // The age is recomputed against the local clock, so it must be repainted on a timer as
+  // well as on a push — otherwise a socket that wedges open without closing freezes the
+  // label at whatever it said when the last frame arrived, which is the same lie in a
+  // different disguise. #statusText is masked out of the pixel comparison in
+  // tests/e2e/visual.spec.js precisely because it moves on its own like this.
+  setInterval(paintStatus, 15000);
 
   // ---------- WebSocket with fallback polling ----------
   var ws = null;
@@ -2493,12 +3023,14 @@
     if (/background|cron|schedul|batch|daemon/.test(s)) return 'background';
     return 'main';
   }
+  // ONE duration formatter for the whole page — see durationLabel(). The connection
+  // indicator now says "no traffic for 29h" about the same instant this row calls
+  // "29h ago", and two independently-rounded copies of one number are how those two end
+  // up an hour apart on the same screen. Output is unchanged from the four inline
+  // branches this replaced.
   function agoLabel(sec){
     if (!sec || sec < 0) return 'just now';
-    if (sec < 60) return Math.round(sec) + 's ago';
-    if (sec < 3600) return Math.round(sec / 60) + 'm ago';
-    if (sec < 86400) return Math.round(sec / 3600) + 'h ago';
-    return Math.round(sec / 86400) + 'd ago';
+    return durationLabel(sec) + ' ago';
   }
   var ACTIVE_WINDOW_S = 120;   // a session counts as "active" if seen within 2 min
   function renderMonitor(rows){
@@ -2528,20 +3060,59 @@
     var sEl = document.getElementById('sessions');
     if (sEl){
       if (!sessions.length){
-        sEl.innerHTML = '<div class="empty-note">No sessions yet &mdash; point a tool at the gateway to see live chats.</div>';
+        // NOT "no sessions yet". The overwhelmingly likely reason this list is empty is
+        // that every client on this machine is still talking to the provider directly —
+        // which is not a wait, it is a configuration, and no amount of waiting changes
+        // it. So the empty state says what to DO, and says plainly that a direct client
+        // will never appear here however long the panel is left open.
+        sEl.innerHTML = '<div class="empty-note">'
+          + '<b>No chat has been routed through this gateway.</b><br>'
+          + 'Start one with its base URL pointed here:<br>'
+          + '<code>export ANTHROPIC_BASE_URL=' + esc(pageOrigin()) + '</code><br>'
+          + 'A client left on the provider’s own endpoint — Claude Desktop, '
+          + 'claude.ai, or any tool still using <code>api.anthropic.com</code> — never '
+          + 'reaches this process, so its chats cannot be listed here and this panel will '
+          + 'stay empty no matter how many are open.'
+          + '</div>';
       } else {
         var html = '';
+        // NOTHING CURRENTLY ROUTING is its own fact, and a list of grey dots does not
+        // state it. Without this a reader compares "2 threads open on screen" against
+        // "1 row here, 1d ago" and concludes the panel is broken, when what it is
+        // reporting is that no traffic has come through the gateway since then.
+        var newest = sessions[0].last;
+        var newestAge = nowS - newest;
+        if (!(newestAge <= ACTIVE_WINDOW_S)){
+          html += '<div class="empty-note">Nothing is routing through the gateway right '
+            + 'now &mdash; the most recent call it saw was ' + esc(agoLabel(newestAge))
+            + '. Chats running against the provider directly are not counted here.</div>';
+        }
         sessions.forEach(function(g){
           var age = nowS - g.last;
           var active = age <= ACTIVE_WINDOW_S;
-          var label = g.id ? g.id : '(no session id)';
+          // AN EMPTY SESSION ID IS A FACT ABOUT THE CLIENT, not an absence of one. It
+          // means the request carried no session header, so every call from every such
+          // client folds into this single row — which is why the row's call count can be
+          // large and its "chat" meaningless. "(no session id)" stated the symptom and
+          // left the reader to guess at the cause, and the guess is usually "the
+          // dashboard is broken".
+          var anonymous = !g.id;
+          var label = anonymous ? 'no session id' : g.id;
+          var title = anonymous
+            ? 'This client sent no session header, so its calls cannot be separated into '
+              + 'individual chats and are grouped into one row.'
+            : g.id;
           // Most-used source for this session, as a hint of which surface it is.
           var topSrc = '', topN = -1;
           for (var k in g.sources){ if (g.sources[k] > topN){ topN = g.sources[k]; topSrc = k; } }
+          var meta = anonymous
+            ? 'client sent no session header · ' + (topSrc || 'unknown')
+            : (topSrc || 'unknown');
           html += '<div class="session-row">' +
             '<span class="live-dot ' + (active ? 'on' : '') + '" title="' + (active ? 'active' : 'idle') + '"></span>' +
-            '<span class="slabel" title="' + esc(label) + '">' + esc(truncate(label, 40)) +
-              '<div class="smeta">' + esc(truncate(topSrc || 'unknown', 40)) + '</div></span>' +
+            '<span class="slabel' + (anonymous ? ' muted' : '') + '" title="' + esc(title) + '">' +
+              esc(truncate(label, 40)) +
+              '<div class="smeta">' + esc(truncate(meta, 52)) + '</div></span>' +
             '<span class="scalls">' + g.calls.toLocaleString('en-US') + ' calls</span>' +
             '<span class="ssaved">' + money(g.saved) + '</span>' +
             '<span class="sago">' + esc(agoLabel(age)) + '</span>' +
@@ -2699,6 +3270,29 @@
       links[i].setAttribute('href',
         href + (href.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN));
     }
+  })();
+
+  // The Monitor's scope note tells the reader what to export. Baking a documentation
+  // constant into the markup would print the wrong port for any gateway not on the
+  // default, and the whole value of that sentence is that it can be copied verbatim.
+  (function fillBaseUrlHint(){
+    var nodes = document.querySelectorAll('code.baseurl');
+    for (var i = 0; i < nodes.length; i++){
+      nodes[i].textContent = 'export ANTHROPIC_BASE_URL=' + pageOrigin();
+    }
+  })();
+
+  // The chart's viewBox is sized to its element's MEASURED width so its axis labels are
+  // not stretched (see renderSpark()), which means a resize invalidates it. A ws push
+  // would correct it within five seconds anyway; this makes it immediate, and covers the
+  // case where the socket is down and no push is coming. Debounced, because a drag-resize
+  // fires this continuously.
+  (function reflowSparkOnResize(){
+    var t = null;
+    window.addEventListener('resize', function(){
+      if (t) clearTimeout(t);
+      t = setTimeout(function(){ t = null; if (lastData) renderSpark(lastData); }, 150);
+    });
   })();
 
   // Initial empty render so panels aren't blank before first data arrives
