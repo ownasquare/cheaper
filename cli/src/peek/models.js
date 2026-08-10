@@ -10,11 +10,35 @@
 //
 // Sources (re-verify all of them when bumping CATALOG_AS_OF):
 //   Anthropic  https://platform.claude.com/docs/en/about-claude/models/overview
+//              https://platform.claude.com/docs/en/about-claude/pricing  (cache + fast mode)
 //   OpenAI     https://developers.openai.com/api/docs/pricing
 //   Google     https://ai.google.dev/gemini-api/docs/pricing
 //   xAI        https://docs.x.ai/docs/models
 //   DeepSeek   https://api-docs.deepseek.com/quick_start/pricing
 //   Mistral    https://mistral.ai/pricing/api
+//
+// ALL SIX WERE RE-READ ON 2026-08-09, row by row against the vendor's own page.
+//
+// 71 of the 75 rows were confirmable against a live sheet, and EVERY ONE of them already
+// matched to the cent — no base rate, cache rate or tier was wrong. That includes the two
+// Mistral rows the 2026-08-09 route-target correction had come to rest on and flagged as
+// unverified: mistral-large-3 $0.5/$1.5 (opus) and mistral-medium-3.5 $1.5/$7.5 (sonnet).
+// The flagship-cheaper-than-its-mid-model inversion this file asserts is REAL — confirmed
+// on mistral.ai and independently by a price aggregator — so ROUTE_TARGET.mistral's top
+// slot rests on a verified fact, not a transcription. Anthropic's cache multipliers
+// (0.1x / 1.25x / 2x), the Opus 5 / 4.8 fast-mode SKU ($10/$50), the 50% batch discount,
+// and Sonnet 5's $2/$10-through-2026-08-31 window with its 0.20/2.50/4 cache rates all
+// reconciled exactly, as did every Google, xAI and DeepSeek row including all four of
+// Google's and xAI's long-context tiers.
+//
+// The 4 rows that could NOT be re-confirmed are claude-3-opus, claude-3-7-sonnet,
+// claude-3-5-sonnet and claude-3-haiku: fully retired, and no longer carried on
+// Anthropic's pricing page at all. They are KEPT deliberately — peek prices historical
+// calls at the rates in force on the day they happened, so deleting them would make an
+// old transcript unpriceable rather than correctly priced. They cannot go stale in the
+// forward direction, because a retired model gets no new traffic.
+//
+// The ONE real gap found was OpenAI long context — see the note in the OpenAI block.
 //
 // Shape of an entry:
 //   in, out            $/Mtok for fresh input and output. Required.
@@ -37,7 +61,7 @@
 // another — so pricing them against any one host would invent a number. They resolve
 // to null (unpriceable) unless the user configures a host; see resolveModel().
 
-const CATALOG_AS_OF = '2026-08-06';
+const CATALOG_AS_OF = '2026-08-09';
 
 // Anthropic bills prompt-cache traffic as a multiple of the model's input rate:
 // reads at 0.1x, 5-minute writes at 1.25x, 1-hour writes at 2x. Expressed as
@@ -99,15 +123,44 @@ const CATALOG = [
   // ---- OpenAI ---------------------------------------------------------------
   // Cached input is an explicit published rate per model (not a uniform multiplier).
   // Only the 5.6 family charges for cache WRITES; everything older writes free.
-  { id: 'gpt-5.6-sol', family: 'openai', tier: 'opus', in: 5, out: 30, cacheRead: 0.5, cacheWrite: 6.25 },
-  { id: 'gpt-5.6-terra', family: 'openai', tier: 'sonnet', in: 2, out: 12, cacheRead: 0.2, cacheWrite: 2.5 },
-  { id: 'gpt-5.6-luna', family: 'openai', tier: 'haiku', in: 0.2, out: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
+  //
+  // LONG CONTEXT, ADDED 2026-08-09. OpenAI publishes a second price tier above 272k
+  // INPUT tokens for six models, and this catalog had none of them: every one of those
+  // rows priced a >272k call at the short rate, understating input by 2x and output by
+  // 1.5x. That is the plain "wrong rate here is a wrong number in front of the user"
+  // failure this file's header names — it moved `actualCost` (reported as spend), not
+  // just a counterfactual.
+  //
+  // The higher rate applies to the WHOLE request once the threshold is crossed, not to
+  // the excess tokens, which is exactly what ratesFor() already does for Google and xAI
+  // ("this replaces the rates rather than blending").
+  //
+  // No `cacheWrite` is listed on the long rows on purpose: ratesFor() rescales it inside
+  // the model's OWN sheet (lc.in * cacheWrite/in), and that derivation reproduces
+  // OpenAI's published long-context cache-write rates EXACTLY — $12.50 / $5.00 / $0.50
+  // for sol / terra / luna. Restating them here would be a second copy that can drift.
+  //
+  // gpt-5.5-pro is deliberately ABSENT from this list. Third-party trackers claim it
+  // takes the same 2x/1.5x uplift, but OpenAI's own page shows it as <272k only, and
+  // this file does not encode a rate the vendor has not published. A model with no long
+  // tier prices at list for any size, which is what the vendor sheet says.
+  { id: 'gpt-5.6-sol', family: 'openai', tier: 'opus', in: 5, out: 30, cacheRead: 0.5, cacheWrite: 6.25,
+    longContext: { over: 272000, in: 10, out: 45, cacheRead: 1 } },
+  { id: 'gpt-5.6-terra', family: 'openai', tier: 'sonnet', in: 2, out: 12, cacheRead: 0.2, cacheWrite: 2.5,
+    longContext: { over: 272000, in: 4, out: 18, cacheRead: 0.4 } },
+  { id: 'gpt-5.6-luna', family: 'openai', tier: 'haiku', in: 0.2, out: 1.2, cacheRead: 0.02, cacheWrite: 0.25,
+    longContext: { over: 272000, in: 0.4, out: 1.8, cacheRead: 0.04 } },
   { id: 'gpt-5.5-pro', family: 'openai', tier: 'opus', in: 30, out: 180 },
-  { id: 'gpt-5.5', family: 'openai', tier: 'opus', in: 5, out: 30, cacheRead: 0.5 },
+  { id: 'gpt-5.5', family: 'openai', tier: 'opus', in: 5, out: 30, cacheRead: 0.5,
+    longContext: { over: 272000, in: 10, out: 45, cacheRead: 1 } },
   { id: 'gpt-5.4-mini', family: 'openai', tier: 'haiku', in: 0.75, out: 4.5, cacheRead: 0.075 },
   { id: 'gpt-5.4-nano', family: 'openai', tier: 'haiku', in: 0.2, out: 1.25, cacheRead: 0.02 },
-  { id: 'gpt-5.4-pro', family: 'openai', tier: 'opus', in: 30, out: 180 },
-  { id: 'gpt-5.4', family: 'openai', tier: 'sonnet', in: 2.5, out: 15, cacheRead: 0.25 },
+  // No cacheRead published for the -pro SKUs, so cache traffic bills at input — and the
+  // long tier inherits that: it names no cacheRead either, so ratesFor falls back to $60.
+  { id: 'gpt-5.4-pro', family: 'openai', tier: 'opus', in: 30, out: 180,
+    longContext: { over: 272000, in: 60, out: 270 } },
+  { id: 'gpt-5.4', family: 'openai', tier: 'sonnet', in: 2.5, out: 15, cacheRead: 0.25,
+    longContext: { over: 272000, in: 5, out: 22.5, cacheRead: 0.5 } },
   { id: 'gpt-5.2-pro', family: 'openai', tier: 'opus', in: 21, out: 168 },
   { id: 'gpt-5.2', family: 'openai', tier: 'sonnet', in: 1.75, out: 14, cacheRead: 0.175 },
   { id: 'gpt-5.1', family: 'openai', tier: 'sonnet', in: 1.25, out: 10, cacheRead: 0.125 },
