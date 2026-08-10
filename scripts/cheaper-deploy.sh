@@ -240,9 +240,19 @@ fi
 APP="$WORKSPACE/cheaper-app"; CLI="$APP/cli"; GATEWAY="$APP/gateway"
 DESKTOP="$WORKSPACE/cheaper-desktop"
 WEB="$WORKSPACE/cheaper-web"
-# The branch every repo must be on before anything ships. There is no `dev` branch in
-# this workspace and never was; the deploy track is main, established by what this script
-# does rather than by anything that used to declare it. See the pre-flight gate below.
+# The branch every repo must be on before anything ships.
+#
+# DEFAULT: main. Without --promote this script is what it has always been — the deploy
+# track is main, and the pre-flight refuses anything else.
+#
+# WITH --promote: dev. The promotion track starts there (dev -> test -> staging -> backup
+# -> prod -> release-v<ver>), so demanding main would refuse the very branch the track is
+# designed to begin from. Only the ENTRY branch changes; every other gate is untouched,
+# and the deploy still ships from the release ref rather than from whatever branch is
+# checked out — see step_promote.
+#
+# One variable rather than a literal, so the two modes cannot drift apart and the
+# pre-flight's messages name the branch it actually wanted.
 RELEASE_BRANCH="main"
 # Purging is part of publishing, not an optimisation. Both surfaces this script writes to
 # sit behind the Cloudflare cache: installers on dl.cheaper.app carry max-age=14400, and
@@ -325,6 +335,13 @@ yes_scope(){ local s="$1"; [ -n "$s" ] && printf '%s' "$YES_SCOPES" | grep -q " 
 # --yes automates a question that was going to be asked, these suppress a refusal, and
 # conflating the two would let `--yes` in CI silently ship an unverified tree.
 ALLOW_UNRELEASABLE=false
+USE_PROMOTE=false
+DO_BOOTSTRAP=false
+PROMOTE_ALLOW_BOOTSTRAP=false
+# Where the release worktrees live while the deploy runs. Removed on every exit path,
+# including failure — a worktree left behind is the stale-worktree hazard the workspace
+# rules forbid, and it would also silently become the tree a later run deploys from.
+RELEASE_WT=""
 ALLOW_PARTIAL_PLATFORMS=false
 
 ARGS=()
@@ -333,6 +350,14 @@ for a in "$@"; do
     --yes)      YES_ALL=true ;;
     --allow-unreleasable)     ALLOW_UNRELEASABLE=true ;;
     --allow-partial-platforms) ALLOW_PARTIAL_PLATFORMS=true ;;
+    # Run the branch promotion track and deploy from the release ref instead of from the
+    # working tree. Opt-in: without it this script behaves exactly as it did before.
+    --promote)                USE_PROMOTE=true; RELEASE_BRANCH="dev" ;;
+    # Creating and pushing dev/test/staging/prod across three GitHub repositories is not
+    # something a deploy run should decide to do on its own, so it needs its own flag and
+    # is never implied by --promote or --yes. One-time, idempotent.
+    --promote-bootstrap)      USE_PROMOTE=true; RELEASE_BRANCH="dev"
+                              PROMOTE_ALLOW_BOOTSTRAP=true; DO_BOOTSTRAP=true ;;
     # An unrecognised scope used to be accepted and stored, where it could never match
     # any prompt — the exact shape of the typo'd STEP name this script already dies on.
     # `--yes=dektop git` in CI therefore auto-confirmed NOTHING: confirm() fell through
@@ -1562,6 +1587,74 @@ $WRANGLER whoami >/dev/null 2>&1 || warn "wrangler not authenticated — set CLO
 # would deadlock the only tool that can clear the blockage.
 wants git     && { step_git;     }
 
+# ---- the promotion track ---------------------------------------------------------------
+# THE ASCENT runs before anything publishes; THE FINISH runs after everything has. They are
+# deliberately not one function: prod must only be merged into main once the release has
+# actually shipped, or main would claim to mirror a production that never happened.
+step_promote_ascent(){
+  $USE_PROMOTE || return 0
+  b "⓪·5 promote — dev → test → staging → backup → prod → release"
+  . "$APP/scripts/promote.sh"
+  . "$APP/scripts/release-worktree.sh"
+  if $DO_BOOTSTRAP; then promote_bootstrap || { err "bootstrap failed"; return 1; }; fi
+  local ver stamp
+  ver="$(read_version "$CLI/package.json")"
+  [ -n "$ver" ] || { err "cannot read cli/package.json's version — refusing to cut a release named after nothing"; return 1; }
+  # One stamp for all three repos: three differently-named backup branches would not be a
+  # rollback set, they would be three unrelated branches.
+  stamp="$(date +%Y-%m-%d)"
+  promote_preflight            || return 1
+  promote_to test              || return 1
+  promote_to staging           || return 1
+  # BEFORE prod moves — this snapshots the OUTGOING production, which is the only thing
+  # worth rolling back to.
+  promote_backup "$stamp"      || return 1
+  promote_to prod              || return 1
+  promote_release "$ver"       || return 1
+
+  # Deploy from the ref, not from the working tree. Without this the whole track is six
+  # merges followed by a deploy of whatever happens to be on disk.
+  RELEASE_WT="$(mktemp -d "${TMPDIR:-/tmp}/cheaper-release.XXXXXX")"
+  rw_create "$PROMOTE_RELEASE_BRANCH" "$RELEASE_WT" || return 1
+  rw_verify "$RELEASE_WT" "$PROMOTE_RELEASE_BRANCH" || return 1
+  # Repoint every path the publishing steps read. They resolve these at call time, so the
+  # steps below need no changes at all — and cannot accidentally read the main checkout.
+  APP="$RELEASE_WT/cheaper-app"; CLI="$APP/cli"; GATEWAY="$APP/gateway"
+  DESKTOP="$RELEASE_WT/cheaper-desktop"
+  WEB="$RELEASE_WT/cheaper-web"
+  ok "deploying from $PROMOTE_RELEASE_BRANCH in $RELEASE_WT — not from the working tree"
+  # dist/ is gitignored, so installers exist in no ref and must be BUILT from it.
+  rw_build_desktop "$RELEASE_WT" || return 1
+}
+
+# Always removes the worktree, even when the release failed. Merging to main is the part
+# that is conditional.
+step_promote_finish(){
+  $USE_PROMOTE || return 0
+  [ -n "$RELEASE_WT" ] && rw_remove "$RELEASE_WT"
+  if [ "$FAILED" -ne 0 ]; then
+    err "release FAILED — NOT merging prod into main. main still describes the last release that actually shipped, which is the only honest thing it can say."
+    promote_where
+    return 1
+  fi
+  b "⑥ promote — prod → main, then main → dev"
+  promote_finish
+}
+
+if ! step_promote_ascent; then
+  err "promotion track stopped before publishing — nothing was deployed."
+  # promote.sh's own stages already print promote_where when they refuse, so calling it
+  # again here printed the same three lines twice — which reads as two separate diagnoses
+  # of two separate problems. Only print it for the failures promote.sh cannot report on:
+  # the worktree stages, which run after the branch work has already succeeded.
+  if [ -n "$RELEASE_WT" ]; then
+    rw_remove "$RELEASE_WT"
+    command -v promote_where >/dev/null 2>&1 && promote_where
+  fi
+  b "Done — WITH FAILURES."
+  exit 1
+fi
+
 # Everything below PUBLISHES — to npm, to cheaper.app, to dl.cheaper.app. The gate runs
 # once, after git has had its chance, and refuses the whole publishing half rather than
 # letting some surfaces go live from a tree nothing on GitHub describes. A blocked
@@ -1590,6 +1683,10 @@ fi
 # Deliberately OUTSIDE the pre-flight gate, because it publishes nothing:
 # `./cheaper-deploy.sh verify` is a safe standalone health check of what is currently
 # live — including from a dirty tree, which is exactly when you most want to ask.
+# Between publishing and verifying: the worktree goes away, and main/dev catch up ONLY if
+# everything above actually shipped.
+step_promote_finish || true
+
 wants verify && { step_verify; }
 
 # The human summary prints first, then the exit code agrees with it. Anything that
