@@ -8,8 +8,67 @@
 // clipped, contrast holds in both themes, and the tap targets are reachable on a phone.
 
 const { test, expect, expectClean } = require('./fixtures');
+const fs = require('fs');
+const path = require('path');
 
 const TABS = ['dashboard', 'reports', 'logs', 'monitor'];
+
+// --- Pixel baselines are per-PLATFORM; the rest of this file is not -------------------
+//
+// Playwright suffixes every snapshot with process.platform, so `dashboard-mobile` on a
+// Mac is a different file from `dashboard-mobile` on Linux. Every baseline this
+// repository has ever committed is `-darwin`. On Linux there is nothing to compare
+// against, and `toHaveScreenshot` responds to a missing baseline by WRITING one and
+// FAILING — so on Linux CI all 25 captures failed with "A snapshot doesn't exist …
+// writing actual".
+//
+// That is not a gate catching a regression. It is a gate that cannot run, and it took
+// the whole publish path down with it: publish-cli.yml gates `npm publish` on ci.yml,
+// which runs this suite, so the CLI could not be released by CI at all. cheaper@0.4.0
+// went to npm by hand on 2026-08-08 for exactly this reason.
+//
+// The fix is NOT to skip these tests off-reference. Each one pairs its capture with
+// MEASURED assertions — horizontal overflow, clipped text, collapsed boxes, provenance
+// and basis statements — and those are platform-independent, are the checks that
+// actually say "it looked RIGHT" rather than "it looked like this", and were already
+// running on Linux before the screenshot killed the test. Skipping the test would throw
+// away real coverage to fix a file-naming problem.
+//
+// So only the PIXEL COMPARISON is conditional, and only on whether a baseline exists for
+// the platform in hand:
+//
+//   * on macOS every baseline is present, so every comparison runs exactly as before —
+//     this changes nothing on the machine where the baselines are maintained;
+//   * on Linux the structural assertions run and are enforced, and the capture is
+//     recorded as skipped WITH ITS REASON rather than silently dropped;
+//   * commit a `-linux` baseline and it is picked up automatically, with no edit here.
+//
+// The deletion hole this opens is closed by `baseline inventory` at the bottom of this
+// file, which asserts the reference set is complete and fails on EVERY platform. Without
+// it, deleting a baseline would quietly downgrade that capture to "skipped" on Linux.
+const REFERENCE_PLATFORM = 'darwin';
+const SNAPSHOT_DIR = path.join(__dirname, 'visual.spec.js-snapshots');
+
+function baselineFor(name, projectName, platform) {
+  return path.join(SNAPSHOT_DIR, `${name}-${projectName}-${platform}.png`);
+}
+
+// Compare pixels when this platform has a baseline; otherwise state why not.
+async function expectScreenshotWhereBaselined(pageLike, name, opts, testInfo) {
+  const file = baselineFor(name, testInfo.project.name, process.platform);
+  if (!fs.existsSync(file)) {
+    testInfo.annotations.push({
+      type: 'skipped-capture',
+      description:
+        `no ${process.platform} baseline for ${name} (${testInfo.project.name}); pixel ` +
+        `baselines are maintained on ${REFERENCE_PLATFORM}. The layout assertions in this ` +
+        `test still ran and still hold. To enable it here, commit ` +
+        `${path.relative(path.join(__dirname, '..', '..'), file)}.`,
+    });
+    return;
+  }
+  await expect(pageLike).toHaveScreenshot(`${name}.png`, opts);
+}
 
 // Regions whose pixels legitimately differ between runs and would make a screenshot
 // assertion flaky rather than informative:
@@ -236,9 +295,9 @@ test.describe('rendering', () => {
       });
       expect(broken, `${testInfo.project.name} #${tab}: broken boxes`).toEqual([]);
 
-      await expect(page).toHaveScreenshot(`${tab}.png`, {
+      await expectScreenshotWhereBaselined(page, tab, {
         fullPage: true, mask: volatileRegions(page),
-      });
+      }, testInfo);
       expectClean(pageErrors, `${testInfo.project.name} #${tab}`);
     });
   }
@@ -312,7 +371,7 @@ test.describe('display modes', () => {
     expect(dark).not.toBe(light);
   });
 
-  test('print preview keeps every pane and drops the chrome', async ({ dash, page }) => {
+  test('print preview keeps every pane and drops the chrome', async ({ dash, page }, testInfo) => {
     const p = await dash.open('reports');
     await p.emulateMedia({ media: 'print' });
     await p.waitForTimeout(300);
@@ -323,9 +382,9 @@ test.describe('display modes', () => {
     }
     await expect(p.locator('.topnav')).toBeHidden();
     await expect(p.locator('.logs-filters')).toBeHidden();
-    await expect(p).toHaveScreenshot('print-reports.png', {
+    await expectScreenshotWhereBaselined(p, 'print-reports', {
       fullPage: true, mask: volatileRegions(p),
-    });
+    }, testInfo);
     await p.emulateMedia({ media: 'screen' });
   });
 
@@ -358,5 +417,75 @@ test.describe('touch targets', () => {
     });
     // WCAG 2.2 AA "Target Size (Minimum)" is 24x24 CSS px.
     expect(small, 'controls below the 24px minimum tap target').toEqual([]);
+  });
+});
+
+test.describe('baseline inventory', () => {
+  // THE GUARD THAT PAYS FOR THE CONDITIONAL CAPTURE ABOVE.
+  //
+  // Making the pixel comparison conditional on "does a baseline exist for this platform"
+  // opens one hole: DELETE a baseline and the capture silently downgrades to a skip
+  // instead of failing. Off the reference platform nothing would notice, and the suite
+  // would stay green while its screenshot coverage quietly drained away.
+  //
+  // So the reference set is asserted directly, from disk, with no browser involved —
+  // which means this runs and FAILS ON EVERY PLATFORM, including the Linux CI where the
+  // captures themselves are skipped. Deleting a baseline breaks the build everywhere.
+  //
+  // It reads the expected names from the same TABS constant the capturing tests loop
+  // over, so adding a tab moves both together. PROJECTS is listed literally because it
+  // mirrors playwright.config.js's project list, which this file cannot see — the count
+  // assertion below is what catches the two drifting apart.
+  const PROJECTS = ['desktop-dark', 'desktop-light', 'tablet', 'mobile', 'a11y'];
+  const CAPTURES = [...TABS, 'print-reports'];
+
+  test('every reference-platform baseline is present', () => {
+    const missing = [];
+    for (const name of CAPTURES) {
+      for (const project of PROJECTS) {
+        const f = baselineFor(name, project, REFERENCE_PLATFORM);
+        if (!fs.existsSync(f)) missing.push(path.basename(f));
+      }
+    }
+    expect(missing,
+      `${REFERENCE_PLATFORM} baselines are missing. A capture with no baseline for the ` +
+      `platform it runs on is SKIPPED, not failed, so a deleted baseline would drain ` +
+      `screenshot coverage silently. Restore it, or regenerate on ${REFERENCE_PLATFORM} ` +
+      `with: npx playwright test visual.spec.js --update-snapshots`).toEqual([]);
+  });
+
+  test('no baseline exists that nothing captures', () => {
+    // The other direction. A renamed tab or a retired project leaves an orphan PNG that
+    // is never compared against anything, and an orphan is indistinguishable from a
+    // baseline that simply has not been reached yet — so the set stops describing what
+    // the suite actually checks.
+    const expected = new Set();
+    for (const name of CAPTURES) {
+      for (const project of PROJECTS) {
+        expected.add(`${name}-${project}-${REFERENCE_PLATFORM}.png`);
+      }
+    }
+    const onDisk = fs.existsSync(SNAPSHOT_DIR) ? fs.readdirSync(SNAPSHOT_DIR) : [];
+    const orphans = onDisk
+      .filter((f) => f.endsWith(`-${REFERENCE_PLATFORM}.png`))
+      .filter((f) => !expected.has(f));
+    expect(orphans,
+      'baseline PNG(s) that no test captures — a renamed tab or a retired project leaves ' +
+      'these behind, and they read as coverage that does not exist').toEqual([]);
+  });
+
+  test('the inventory itself is not vacuous', () => {
+    // Both assertions above pass trivially if CAPTURES or PROJECTS is empty — an empty
+    // expectation set finds nothing missing and nothing orphaned. Pin the shape, not a
+    // number that a legitimate new tab would have to chase: the count is DERIVED from
+    // the two lists, so this only fires when one of them is empty or the directory has
+    // been emptied.
+    expect(CAPTURES.length, 'no captures declared').toBeGreaterThan(0);
+    expect(PROJECTS.length, 'no capturing projects declared').toBeGreaterThan(0);
+    const onDisk = fs.existsSync(SNAPSHOT_DIR)
+      ? fs.readdirSync(SNAPSHOT_DIR).filter((f) => f.endsWith('.png')) : [];
+    expect(onDisk.length,
+      'the snapshot directory holds no PNG at all — every capture would silently skip')
+      .toBeGreaterThanOrEqual(CAPTURES.length * PROJECTS.length);
   });
 });

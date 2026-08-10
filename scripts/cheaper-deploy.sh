@@ -1029,16 +1029,44 @@ put_r2(){  # $1 glob (in dist/)  $2 stable R2 key  $3 expected version  $4 file 
     return 1
   fi
   say "$base  ->  r2://$R2_BUCKET/$key"
-  if $WRANGLER r2 object put "$R2_BUCKET/$key" --file "$f" --remote; then
-    ok "uploaded $key"
+  # RETRY, because these uploads fail transiently and a first-attempt failure was being
+  # reported as a release-blocking error.
+  #
+  # On 2026-08-09 cheaper-macos-x64.dmg (~104 MB) failed THREE separate runs with
+  # wrangler's bare `TypeError: fetch failed` — a transport error, carrying no HTTP status
+  # and no mention of credentials — then succeeded on the next attempt with the identical
+  # bytes. The smaller arm64 dmg beside it uploaded first time on every one of those runs.
+  # A single attempt therefore turned a flaky network into "dl.cheaper.app was NOT fully
+  # updated", which is both alarming and, on re-run, untrue.
+  #
+  # Three attempts with a widening pause. Deliberately NOT a longer schedule: a genuine
+  # credential or bucket error fails identically every time, and making the operator watch
+  # it fail slowly teaches them nothing. The attempt count is printed so a flaky upload
+  # that eventually succeeds is visible in the log rather than silently smoothed over — an
+  # upload that needed three goes is a fact about the release, not noise.
+  local attempt rc=1
+  for attempt in 1 2 3; do
+    if [ "$attempt" -gt 1 ]; then
+      warn "$key: upload attempt $((attempt-1)) failed — retrying (attempt $attempt of 3)"
+      sleep $(( (attempt - 1) * 5 ))
+    fi
+    if $WRANGLER r2 object put "$R2_BUCKET/$key" --file "$f" --remote; then rc=0; break; fi
+    rc=1
+  done
+  if [ "$rc" -eq 0 ]; then
+    if [ "$attempt" -gt 1 ]; then
+      ok "uploaded $key (succeeded on attempt $attempt of 3 — the earlier failure(s) were transient)"
+    else
+      ok "uploaded $key"
+    fi
     return 0
-  else
-    # The artifact passed every check we make — the version matched. Whatever went wrong
-    # happened at the R2 end (credential, network, bucket), so this is a FAILED upload,
-    # not a REFUSED artifact, and rebuilding it would change nothing.
-    err "upload failed: $key (wrangler could not put $base — this is an upload failure, NOT a problem with the artifact; see wrangler's output above)"
-    return 3
   fi
+  # The artifact passed every check we make — the version matched — and three attempts
+  # could not put it. Whatever went wrong happened at the R2 end (credential, network,
+  # bucket), so this is a FAILED upload, not a REFUSED artifact, and rebuilding it would
+  # change nothing.
+  err "upload failed: $key (wrangler could not put $base after 3 attempts — this is an upload failure, NOT a problem with the artifact; see wrangler's output above)"
+  return 3
 }
 step_desktop(){
   b "④ desktop — upload cheaper-desktop/dist installers -> R2 (dl.cheaper.app)"
