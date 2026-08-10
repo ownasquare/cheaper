@@ -20,11 +20,20 @@
 // gateway can realise. MEASURED: 28 of 75 catalog ids (37.3%) and 4 of ROUTE_TARGET's 6
 // families are in that position (see pricing.js::ROUTABLE_FAMILIES).
 //
-// The two exclusions must not be merged: "catalog a price for this model" and "ship a
-// Gemini endpoint" are different pieces of work, and one blended number describes
-// neither. So the money splits in two:
+// A THIRD, ON THE OTHER LEG. `unpriced` and the vendor split are both facts about the
+// model that RAN. A row can be perfectly priceable and perfectly routable and STILL yield
+// no figure, because the model the gateway would route it TO has no published rate —
+// pricing.js refuses to invent one (`routedPriceable: false`) and books no movement. That
+// leaves a 0 in the saving which is a MISSING figure, not a measured one, and it is
+// counted into `unpricedRoute` / `unpricedRouteTokens` / `unpricedRouteModels` for exactly
+// the reason `unpriced` exists: an exclusion nobody can count is indistinguishable from a
+// bug. Its remedy is "catalog this model", so the model ids travel with the count.
 //
-//   dollarsSaved / dollarsGross / dollarsExtra / downgradable / examples
+// The exclusions must not be merged: "catalog a price for the model that ran", "catalog a
+// price for the model we would route to" and "ship a Gemini endpoint" are three different
+// pieces of work, and one blended number describes none of them. So the money splits:
+//
+//   dollarsSaved / dollarsGross / dollarsExtra / downgradable / substituted / examples
 //       REALIZABLE TODAY — the headline. Routable vendors only.
 //   the matching *Unroutable fields
 //       the same arithmetic over vendors with no gateway endpoint, reported in full under
@@ -75,12 +84,45 @@ function scanHarness(def, opts) {
     key: def.key, label: def.label, status: def.status, installed,
     filesScanned: filesScanned || 0, note: note || '',
     calls: 0, downgradable: 0, estimatedCalls: 0,
+    // THE COUNTER THE DOLLARS ACTUALLY BELONG TO.
+    //
+    // `downgradable` counts TIER moves. Every dollar in this object comes from a MODEL
+    // substitution, and the two populations are neither equal nor nested in either
+    // direction: an operator's tier -> id map can put the CALLER'S OWN model in a lower
+    // tier's slot (a downgrade that substitutes nothing, so no dollar moves), and a
+    // same-tier slot can name a different, cheaper model (a substitution that downgrades
+    // nothing, so a dollar moves with no tier change). Counted from `est.substituted`,
+    // never re-derived here — the routing rules live in classify.routeDecision() and are
+    // asked, not copied.
+    //
+    // This is what makes the headline RECONCILABLE. `saved` is `baselineCost - newCost`,
+    // and `newCost` differs from `baselineCost` only on a substituted row whose target we
+    // could price, so `substituted === 0` IMPLIES `dollarsSaved === 0` — while
+    // `downgradable === 0` implies nothing of the kind. A reader handed both counts can
+    // derive which one the money hangs off; handed only the tier count, they could not.
+    substituted: 0, tokensOnSubstituted: 0,
     // Calls DELIBERATELY excluded from every dollar figure because the catalog holds no
     // published rate for the model. Counted so the exclusion is VISIBLE (invariant 4):
     // adding 0.0 corrupts no total, but a report whose denominator has silently shrunk
     // to two catalogued calls out of two hundred reads exactly like a confident small
     // number. `unpriced === calls` means the dollars below describe NOTHING.
     unpriced: 0, unpricedTokens: 0,
+    // THE SAME EXCLUSION, ON THE OTHER LEG, WITH THE SAME REMEDY.
+    //
+    // `unpriced` is about the model that RAN. This is about the model Cheaper would have
+    // routed TO: a route really was taken and its target has no published rate, so
+    // pricing.js refuses to invent one, books NO movement for the row, and says so in
+    // `routedPriceable`. What that leaves behind is a $0.00 that means "no figure
+    // available" rather than "measured no change" — and the two zeros are only
+    // distinguishable while this one is COUNTED. An exclusion that cannot be counted is
+    // indistinguishable from a bug.
+    //
+    // `unpricedRouteModels` names the ids because the remedy is specific: catalog THIS
+    // model. Unreachable with the shipped ROUTE_TARGET — every target is catalogued, and
+    // policy_parity.test.js pins that — and reachable through any live /healthz map
+    // naming a model the catalog has never seen (an operator fine-tune, or anything
+    // newer than CATALOG_AS_OF).
+    unpricedRoute: 0, unpricedRouteTokens: 0, unpricedRouteModels: [],
     tokens: 0, tokensOnDowngradable: 0,
     // dollarsActual: HISTORICAL — each call at the rates in force on its own day.
     // dollarsBaseline: the same calls at TODAY's rates; the left leg of the prospective
@@ -106,6 +148,7 @@ function scanHarness(def, opts) {
     // exclusion that leaves no trace is the exact failure `unpriced` was added to fix.
     unroutableCalls: 0, unroutableTokens: 0,
     downgradableUnroutable: 0, tokensOnDowngradableUnroutable: 0,
+    substitutedUnroutable: 0, tokensOnSubstitutedUnroutable: 0,
     dollarsBaselineUnroutable: 0, dollarsSavedUnroutable: 0,
     dollarsGrossUnroutable: 0, dollarsExtraUnroutable: 0, offsetCallsUnroutable: 0,
     // vendor -> { calls, gross, extra } so the report can name the endpoint that would
@@ -160,6 +203,24 @@ function scanHarness(def, opts) {
           || (out.unroutableByFamily[est.family] = { calls: 0, gross: 0, extra: 0 });
         f.calls++; f.gross += est.gross; f.extra += est.extra;
       }
+      // THE ROUTED LEG'S OWN EXCLUSION, COUNTED — in BOTH buckets, because the fault is
+      // the same fault either way. `routedPriceable` is false only when a route really
+      // was taken and its target has no published rate; estimateCall then leaves
+      // `newCost === baselineCost`, so this row's `saved` is exactly 0. That zero is a
+      // MISSING FIGURE, and it has just been added to a total full of measured ones.
+      // Counting it is what keeps the surface able to tell the reader which kind it is.
+      //
+      // Deliberately NOT folded into `unpriced`: the two have different remedies on
+      // different legs ("catalog the model that ran" vs "catalog the model we would route
+      // to"), and one blended number describes neither — the same reason `unroutable` is
+      // kept apart from `unpriced` above.
+      if (!est.routedPriceable) {
+        out.unpricedRoute++;
+        out.unpricedRouteTokens += rowTokens;
+        if (est.routedModel && !out.unpricedRouteModels.includes(est.routedModel)) {
+          out.unpricedRouteModels.push(est.routedModel);
+        }
+      }
     } else {
       // Was: `out.dollarsActual += 0; out.dollarsSaved += 0;` — arithmetically a no-op,
       // and that was the problem. The call still incremented out.calls, so an unpriceable
@@ -171,24 +232,41 @@ function scanHarness(def, opts) {
     out.bySource[r.source === 'subagent' ? 'subagent' : 'user']++;
     if (est.actualTier) out.routedFrom[est.actualTier]++;
     if (est.effTier) out.routedTo[est.effTier]++;
-    // `downgradable` AND THE DOLLARS NOW COUNT DIFFERENT POPULATIONS, KNOWINGLY.
+    // THE COUNT THE DOLLARS HANG OFF. Split routable/unroutable on exactly the same rule
+    // as `downgradable` below, so the headline COUNT and the headline DOLLARS describe one
+    // population and a reader can move between them.
     //
-    // `est.downgraded` is strictly about TIER RANK. The dollars above are about the SERVED
+    // `est.substituted` is read, never re-derived: whether the router really served a
+    // different model is a routing question, it is answered once in
+    // classify.routeDecision() (the port of router.py::decide) and carried on the row.
+    // A second copy of that rule here is a second thing to drift.
+    if (est.substituted) {
+      if (est.routable) {
+        out.substituted++;
+        out.tokensOnSubstituted += rowTokens;
+      } else {
+        out.substitutedUnroutable++;
+        out.tokensOnSubstitutedUnroutable += rowTokens;
+      }
+    }
+
+    // `downgradable` AND THE DOLLARS COUNT DIFFERENT POPULATIONS, KNOWINGLY — AND BOTH
+    // ARE NOW PUBLISHED, WHICH IS WHAT MAKES THAT SAFE.
+    //
+    // `est.downgraded` is strictly about TIER RANK. The dollars are about the SERVED
     // MODEL, and since estimateCall stopped pricing a same-tier route as no route at all
     // those two stopped being the same set: a caller on `claude-opus-4` asking a security
     // question is served `claude-opus-5` — same opus tier, so no downgrade, but $90.00 ->
     // $30.00 on a 1M/1M call. That row adds to `dollarsSaved` and NOT to `downgradable`.
+    // The containment fails the other way too: an operator map naming the caller's own
+    // model in a lower tier's slot is a DOWNGRADE that substitutes nothing and moves no
+    // dollar. Neither set contains the other, so neither counter can stand in for both.
     //
-    // The consequence is a real reconciliation gap on the surfaces that print the two side
-    // by side (render.js:172 and :210 put "N downgradable" next to "you'd save $X"): X can
-    // no longer be derived from N, and X can be non-zero while N is 0. Both numbers are
-    // TRUE — one counts tier moves, the other counts dollars — but a reader is entitled to
-    // reconcile them, so the wording or the counter has to change.
-    //
-    // NOT DONE HERE. Widening `downgradable` to mean "substituted" would change a headline
-    // COUNT that every surface and several tests already read, on the back of a change
-    // whose remit was the per-call arithmetic. `est.substituted` is the field to count when
-    // it is done, and it is already on every row — do not re-derive the routing rules here.
+    // The reconciliation gap that left on the surfaces printing them side by side is
+    // closed by PUBLISHING BOTH rather than by widening either: `downgradable` still means
+    // exactly what every existing reader thinks it means (a TIER move), `substituted`
+    // above is the partner of the money, and render.js prints them as two named counts
+    // instead of one count a reader would try to derive dollars from.
     if (est.downgraded) {
       // "Downgradable" is a claim that Cheaper WOULD move this call. For a vendor with no
       // rewriting endpoint it would not, so the claim belongs in the other bucket — and
@@ -204,6 +282,13 @@ function scanHarness(def, opts) {
       out[bucket].push({
         from: est.actualTier, to: est.effTier, saved: est.saved,
         family: est.family, routable: est.routable,
+        // THE ROW'S OWN COPY OF THE ROUTED-LEG EXCLUSION. `saved` is 0 here for two
+        // completely different reasons — a target we priced that happened to cost the same,
+        // and a target we could not price at all — and an example list is the one place the
+        // aggregate counters cannot speak for a single row. Carried so render.js can label
+        // the second kind instead of filing a missing figure under "Biggest opportunities"
+        // as a green $0.00.
+        routedPriceable: est.routedPriceable,
         source: r.source, reason: content.reason, text: snippet(r.text),
       });
     }
@@ -277,14 +362,17 @@ function scan(opts = {}) {
       try { installed = isInstalled(def); } catch { installed = false; }
       h = { key: def.key, label: def.label, status: def.status, installed, error: String(e && e.message || e),
             calls: 0, downgradable: 0, dollarsActual: 0, dollarsBaseline: 0, dollarsSaved: 0,
+            substituted: 0, tokensOnSubstituted: 0,
             dollarsGross: 0, dollarsExtra: 0, offsetCalls: 0,
             dollarsBaselineRoutable: 0,
             unroutableCalls: 0, unroutableTokens: 0,
             downgradableUnroutable: 0, tokensOnDowngradableUnroutable: 0,
+            substitutedUnroutable: 0, tokensOnSubstitutedUnroutable: 0,
             dollarsBaselineUnroutable: 0, dollarsSavedUnroutable: 0,
             dollarsGrossUnroutable: 0, dollarsExtraUnroutable: 0, offsetCallsUnroutable: 0,
             unroutableByFamily: {}, examplesUnroutable: [],
             unpriced: 0, unpricedTokens: 0, tokens: 0,
+            unpricedRoute: 0, unpricedRouteTokens: 0, unpricedRouteModels: [],
             filesScanned: 0, examples: [], bySource: { user: 0, subagent: 0 },
             routedFrom: emptyTierMap(), routedTo: emptyTierMap(),
             timeSavedModelS: 0, timeSavedReasoningPotentialS: 0,
@@ -294,7 +382,14 @@ function scan(opts = {}) {
   }
   const totals = harnesses.reduce((a, h) => {
     a.calls += h.calls; a.downgradable += h.downgradable; a.estimatedCalls += (h.estimatedCalls || 0);
+    a.substituted += (h.substituted || 0);
+    a.tokensOnSubstituted += (h.tokensOnSubstituted || 0);
     a.unpriced += (h.unpriced || 0); a.unpricedTokens += (h.unpricedTokens || 0);
+    a.unpricedRoute += (h.unpricedRoute || 0);
+    a.unpricedRouteTokens += (h.unpricedRouteTokens || 0);
+    for (const id of h.unpricedRouteModels || []) {
+      if (!a.unpricedRouteModels.includes(id)) a.unpricedRouteModels.push(id);
+    }
     a.tokens += h.tokens; a.tokensOnDowngradable += (h.tokensOnDowngradable || 0);
     a.dollarsActual += h.dollarsActual; a.dollarsSaved += h.dollarsSaved;
     a.dollarsBaseline += (h.dollarsBaseline || 0);
@@ -305,6 +400,8 @@ function scan(opts = {}) {
     a.unroutableTokens += (h.unroutableTokens || 0);
     a.downgradableUnroutable += (h.downgradableUnroutable || 0);
     a.tokensOnDowngradableUnroutable += (h.tokensOnDowngradableUnroutable || 0);
+    a.substitutedUnroutable += (h.substitutedUnroutable || 0);
+    a.tokensOnSubstitutedUnroutable += (h.tokensOnSubstitutedUnroutable || 0);
     a.dollarsBaselineUnroutable += (h.dollarsBaselineUnroutable || 0);
     a.dollarsSavedUnroutable += (h.dollarsSavedUnroutable || 0);
     a.dollarsGrossUnroutable += (h.dollarsGrossUnroutable || 0);
@@ -323,12 +420,15 @@ function scan(opts = {}) {
     a.reasoningOpps += (h.reasoningOpps || 0);
     return a;
   }, { calls: 0, downgradable: 0, estimatedCalls: 0, unpriced: 0, unpricedTokens: 0,
+       substituted: 0, tokensOnSubstituted: 0,
+       unpricedRoute: 0, unpricedRouteTokens: 0, unpricedRouteModels: [],
        tokens: 0, tokensOnDowngradable: 0,
        dollarsActual: 0, dollarsBaseline: 0, dollarsSaved: 0,
        dollarsGross: 0, dollarsExtra: 0, offsetCalls: 0,
        dollarsBaselineRoutable: 0,
        unroutableCalls: 0, unroutableTokens: 0,
        downgradableUnroutable: 0, tokensOnDowngradableUnroutable: 0,
+       substitutedUnroutable: 0, tokensOnSubstitutedUnroutable: 0,
        dollarsBaselineUnroutable: 0, dollarsSavedUnroutable: 0,
        dollarsGrossUnroutable: 0, dollarsExtraUnroutable: 0, offsetCallsUnroutable: 0,
        unroutableByFamily: {},
@@ -361,6 +461,15 @@ function scan(opts = {}) {
   // can bank yet". A consumer printing the headline owes the reader this number whenever
   // it is non-zero, and the remedy it implies is an ENDPOINT, not a price.
   totals.unroutableRatio = totals.tokens > 0 ? totals.unroutableTokens / totals.tokens : 0;
+  // The THIRD coverage ratio, and again a different question with a different remedy: not
+  // "we hold no rate for what ran" and not "we have no endpoint for this vendor", but "we
+  // hold no rate for what we would have routed TO". Those rows are priced on the actual
+  // leg and so are invisible to `unpricedRatio`; they simply contribute a 0 to the saving
+  // that looks exactly like a measured one. Named so a surface can say which zero it has.
+  totals.unpricedRouteRatio = totals.tokens > 0 ? totals.unpricedRouteTokens / totals.tokens : 0;
+  // Deterministic regardless of the order harnesses happen to be scanned in — the list is
+  // a remedy ("catalog these"), and a remedy that reorders between runs reads as churn.
+  totals.unpricedRouteModels.sort();
   totals.timeSavedModelS = Math.round(totals.timeSavedModelS * 10) / 10;
   totals.timeSavedReasoningPotentialS = Math.round(totals.timeSavedReasoningPotentialS * 10) / 10;
   // Rough annualization: if we scanned N days, extrapolate to a year.

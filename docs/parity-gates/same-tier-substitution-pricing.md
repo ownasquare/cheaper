@@ -126,7 +126,16 @@ are JS. The invariant that catches it is a composition one and lives in the node
 needed. Putting it in the parity script would have widened a script whose entire contract is
 "ask both runtimes the same question" into one that no longer states what it checks.
 
-## Known follow-up (NOT done — deliberately)
+## Known follow-up — **BOTH CLOSED 2026-08-09**
+
+Closed in [reconciling-downgradable-with-the-dollars.md](reconciling-downgradable-with-the-dollars.md):
+`substituted` / `tokensOnSubstituted` are now published and rendered beside `downgradable`
+(the count was ADDED, not widened — every existing reader of `downgradable` is untouched),
+and `routedPriceable: false` now has a named, counted bucket
+(`unpricedRoute` / `unpricedRouteTokens` / `unpricedRouteModels`) printed with its remedy.
+The original statement of both follows, for the record.
+
+### As originally recorded (NOT done — deliberately)
 
 `downgradable` and the dollars now count **different populations**. `est.downgraded` is strictly
 tier rank; the dollars are the served model. So `dollarsSaved` can be non-zero while

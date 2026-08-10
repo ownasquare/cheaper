@@ -73,14 +73,15 @@ cheaper peek --json                 # machine-readable, for scripting/CI
 cheaper peek — what adaptive routing would have saved
 scanned last 30d across your harness chat logs
 
-harness         calls   downgradable   tokens   you'd save
-● Claude Code   1,284   876 (68%)      18.4M    $41.20
-◐ Codex         412     223 (54%)      5.1M     $7.80
+harness         calls   downgradable  re-routed    tokens   you'd save
+● Claude Code   1,284   876 (68%)     1,102 (86%)  18.4M    $41.20
+◐ Codex         412     223 (54%)     297 (72%)    5.1M     $7.80
 ○ Cursor        DB-backed (not yet readable)
 
-Total   1,696 calls · 1,099 downgradable · from you 1,204 / sub-agents 492
+Total   1,696 calls · 1,099 downgradable · 1,399 re-routed · from you 1,204 / sub-agents 492
 Spent on record   $71.40
 Could have saved  $49.00 (69% off)  · 14.9M tokens re-routable
+Routing           1,399 call(s) re-routed to a different MODEL · 1,099 to a cheaper TIER
 Annualized        $596/yr  (extrapolated from 30d)
 
 Biggest opportunities (top-tier calls that didn't need it):

@@ -28,12 +28,25 @@ concrete, personal number instead of a model.
    `gateway/app/router.py`'s `_content_tier` + the requested-model **ceiling**
    (`effectiveTier = min(rank(actualModel), rank(contentTier))`).
 3. **Pricing** (`cli/src/peek/pricing.js`) maps any model id → `{family, tier}` and
-   family → `{cheap, mid, top}` real `$/Mtok` (in/out). Savings per call =
-   `cost(actualTier) − cost(effectiveTier)`, only ever within the same family.
+   family → `{cheap, mid, top}` real `$/Mtok` (in/out), only ever within the same family.
+   Savings per call are **no longer** `cost(actualTier) − cost(effectiveTier)`: the routed
+   leg is priced against the model `classify.routeDecision()` says the gateway would really
+   **serve** — so a same-tier route is priced as the model substitution it is. See
+   [parity-gates/same-tier-substitution-pricing.md](parity-gates/same-tier-substitution-pricing.md).
 4. **Scan** (`cli/src/peek/scan.js`) rolls it up per harness + totals, with top
-   downgradable examples (redacted, one-line snippets).
+   downgradable examples (redacted, one-line snippets). It publishes **two** counts —
+   `downgradable` (a TIER move) and `substituted` (a MODEL change, which is what the
+   dollars come from) — plus three named exclusions: `unpriced` (no rate for the model that
+   ran), `unpricedRoute` (no rate for the model we would route to) and the unroutable-vendor
+   split. See
+   [parity-gates/reconciling-downgradable-with-the-dollars.md](parity-gates/reconciling-downgradable-with-the-dollars.md).
 5. **Render** (`cli/src/peek/render.js`) prints the terminal report; `--json` emits
-   the raw report object.
+   the raw report object. Every dollar cell is governed by `claimOf`, which decides between
+   *not covered* / *withheld* / *—* / a figure. Dollars are **withheld** — never printed as
+   `$0.00` — when more than 20% of the tokens seen could not be priced on **either** leg:
+   `unpriced` (no rate for the model that ran) or `unpricedRoute` (no rate for the model we
+   would route to). One threshold governs both, and the withholding names which leg caused
+   it, because the two have different remedies.
 
 ## Harness support
 
@@ -49,8 +62,13 @@ concrete, personal number instead of a model.
 - **Unknown models are unpriceable** — `detectFamily` returns `null` for
   unrecognized ids so peek never invents savings against arbitrary "other" rates.
 - **Token dedup** by `message.id` prevents within-turn inflation (Claude Code).
-- **Ceiling honored** — `saved = max(0, …)`; a hard prompt already run on a cheap
-  model shows no "savings".
+- **Ceiling honored** — a hard prompt already run on a cheap model shows no "savings".
+  **`saved` is NO LONGER clamped.** It was `max(0, …)`; that clamp is reachable through the
+  rate *shape* (a tier's route target is not cheaper than every model above it on every
+  token mix), and clamping in the arithmetic makes a route that would have cost the user
+  MORE read as a neutral `$0.00` and vanish from every total. `saved` is now a **signed**
+  delta, split into `gross` / `extra` so an anti-saving is reported rather than suppressed.
+  Do not reintroduce the clamp.
 - **Caveat surfaced** — output notes the estimate assumes the used model was the
   intended ceiling; harness-auto-selected models (titles/summaries) can nudge it.
 
