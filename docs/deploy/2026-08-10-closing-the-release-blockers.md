@@ -165,6 +165,50 @@ git diff --stat 2e02ee0 c39ae38 -- cli/bin cli/src cli/assets/plugin cli/assets/
 The delta is workflow, docs, deploy script and tests — none of which appear in
 `cli/package.json`'s `files` list, so the published tarball content is identical.
 
+## 8. The deploy now checks its own work
+
+Every step reported on the **action** — the push succeeded, wrangler exited 0, `r2 object
+put` said "Upload complete". None looked at the **result**, which is why each of the
+failures above could be green and wrong at the same time.
+
+`./cheaper-deploy.sh verify` asks the public URLs, from outside, whether they agree with
+this workspace — and states **how strongly** each surface is proved, because a uniform ✓
+over checks of different strength is how "it 200s" gets mistaken for "it is correct":
+
+| surface | strength | how |
+|---|---|---|
+| website | **byte-identical** | sha256 of the CDN's response vs the file on disk (the worker serves `web/` verbatim) |
+| macOS dmg | **byte-identical** | R2's etag *is* the md5 for a single-part upload — compared to the local artifact, no download |
+| CI artifacts | **size-matched** | against that release's own `latest*.yml`, fetched unauthenticated from the GitHub Release |
+| npm | version | registry `latest` dist-tag vs `cli/package.json` |
+
+"Could not check" is never "fine" — it is counted separately and exits non-zero as
+INCOMPLETE. The one warning-not-error case is an artifact whose manifest is absent while
+the object answers 200 with a non-zero length; v0.4.1's missing `latest-linux-arm64.yml`
+must not fail every run until the next release.
+
+Not pre-flight-gated: it publishes nothing, so it is a safe standalone health check —
+including from a dirty tree, which is when you most want to ask.
+
+### The full pipeline, run end to end afterwards
+
+```
+✓ pre-flight: all three repos on 'main', clean, level with origin
+✓ website deployed
+✓ cf-purge: purged 60 URL(s)
+✓ uploaded cheaper-macos-arm64.dmg (succeeded on attempt 3 of 3 — the earlier failures were transient)
+✓ uploaded cheaper-macos-x64.dmg
+✓ cf-purge: purged 2 URL(s)
+  not this step's to upload …: 7 CI-owned keys
+✓ desktop summary: all 2 matched installer(s) uploaded at version 0.4.1 — 0 refused
+  7 verified, 1 MISMATCHED, 3 weakly confirmed
+Done — WITH FAILURES.
+```
+
+**The retry earned itself on its first real run**: `cheaper-macos-arm64.dmg` needed three
+attempts. Before today that would have been a red *"dl.cheaper.app was NOT fully updated"*
+for a network hiccup. The one MISMATCH is npm — true, and the NPM_TOKEN blocker.
+
 ## Verification summary
 
 | suite | result |
