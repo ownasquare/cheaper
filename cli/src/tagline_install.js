@@ -23,13 +23,27 @@ const END = '<!-- cheaper:tagline:end -->';
 // `format` is 'md' (managed block appended to an AGENTS.md-style file) or 'mdc'
 // (a dedicated Cursor rule file we own outright). Claude Code is intentionally
 // absent — it's wired by the adaptive-model-router plugin, not here.
+//
+// LABELS NAME THE EXACT PRODUCT WHOSE FILE WE WRITE — no umbrella brand names.
+// The codex row used to read 'Codex / ChatGPT Work', which named a DESKTOP product
+// this installer has no integration with whatsoever: every codex path here and in
+// peek is the terminal CLI's filesystem layout (~/.codex/AGENTS.md below,
+// $CODEX_HOME/sessions and bin:'codex' in peek/adapters.js). Nothing reads or
+// writes an app-container path — `grep -rn "Application Support" cli/` returns
+// nothing. A user read that label, opened the ChatGPT desktop app, and reasonably
+// concluded the product was broken. Same class of trap for the other rows: the
+// files below are the Copilot CLI's ~/.copilot and the Grok CLI's ~/.grok, NOT the
+// Copilot IDE extension and NOT grok.com, so the labels say "CLI". Cursor keeps
+// its name because ~/.cursor/rules IS the Cursor editor's own global-rules dir.
+// The resolved path is printed next to the label on every line, so the label only
+// has to disambiguate the product, not repeat the directory.
 const TARGETS = [
-  { key: 'codex', label: 'Codex / ChatGPT Work', file: path.join(HOME, '.codex', 'AGENTS.md'), probe: path.join(HOME, '.codex'), format: 'md' },
-  { key: 'grok', label: 'Grok', file: path.join(HOME, '.grok', 'AGENTS.md'), probe: path.join(HOME, '.grok'), format: 'md' },
-  { key: 'pi', label: 'PI.dev', file: path.join(HOME, '.pi', 'AGENTS.md'), probe: path.join(HOME, '.pi'), format: 'md' },
-  { key: 'copilot', label: 'GitHub Copilot', file: path.join(HOME, '.copilot', 'AGENTS.md'), probe: path.join(HOME, '.copilot'), format: 'md' },
+  { key: 'codex', label: 'Codex CLI', file: path.join(HOME, '.codex', 'AGENTS.md'), probe: path.join(HOME, '.codex'), format: 'md' },
+  { key: 'grok', label: 'Grok CLI', file: path.join(HOME, '.grok', 'AGENTS.md'), probe: path.join(HOME, '.grok'), format: 'md' },
+  { key: 'pi', label: 'PI.dev CLI', file: path.join(HOME, '.pi', 'AGENTS.md'), probe: path.join(HOME, '.pi'), format: 'md' },
+  { key: 'copilot', label: 'GitHub Copilot CLI', file: path.join(HOME, '.copilot', 'AGENTS.md'), probe: path.join(HOME, '.copilot'), format: 'md' },
   { key: 'gemini', label: 'Gemini CLI', file: path.join(HOME, '.gemini', 'GEMINI.md'), probe: path.join(HOME, '.gemini'), format: 'md' },
-  { key: 'opencode', label: 'OpenCode', file: path.join(HOME, '.config', 'opencode', 'AGENTS.md'), probe: path.join(HOME, '.config', 'opencode'), format: 'md' },
+  { key: 'opencode', label: 'OpenCode CLI', file: path.join(HOME, '.config', 'opencode', 'AGENTS.md'), probe: path.join(HOME, '.config', 'opencode'), format: 'md' },
   { key: 'cursor', label: 'Cursor', file: path.join(HOME, '.cursor', 'rules', 'cheaper-tagline.mdc'), probe: path.join(HOME, '.cursor'), format: 'mdc' },
 ];
 
@@ -177,9 +191,13 @@ function run(argv = []) {
     }
   }
   if (!dry && !remove) {
-    console.log(c.dim('\n  Each harness now appends the Cheaper.app savings line at end of chat via'));
-    console.log(c.dim('  `cheaper peek --tagline`. Claude Code is handled by the adaptive-model-router'));
-    console.log(c.dim('  plugin (run `cheaper install plugin`). Re-run any time to refresh; `--remove` undoes it.\n'));
+    // "now appends" claimed an outcome this command cannot observe: all we did was
+    // write an instruction file. Whether the harness actually emits the line is up
+    // to that harness on its next chat, so say what was written, not what will run.
+    console.log(c.dim('\n  Each harness above now carries the instruction to end a chat with the'));
+    console.log(c.dim('  Cheaper.app savings line from `cheaper peek --tagline`. Claude Code is handled'));
+    console.log(c.dim('  by the adaptive-model-router plugin (run `cheaper install plugin`) instead.'));
+    console.log(c.dim('  Re-run any time to refresh; `--remove` undoes it.\n'));
   } else {
     console.log('');
   }

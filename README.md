@@ -188,26 +188,36 @@ One idea, delivered on every surface where a model runs:
 | **Agents** | Three tiered sub-agents (`router-triage`, `router-solver-sonnet`, `router-solver-opus`) the skill dispatches to | Claude app / Claude Code |
 | **Hook** | Always-on policy injection each turn | Claude Code |
 | **Plugin** | Skill + agents + hook as one managed unit (local marketplace) — an alternative to installing the three separately | Claude app / Claude Code |
-| **Gateway** | Anthropic- **and** OpenAI-compatible proxy that routes *every* call and logs it | Claude Code, SDKs, any tool with a custom base URL |
+| **Gateway** | Anthropic- **and** OpenAI-compatible proxy that routes and logs every call *from a client you have pointed at it* | Claude Code, SDKs, any tool with a custom base URL |
 | **CLI** | `cheaper` — installs the above, runs/monitors the gateway, and `peek`s your logs | Mac / Windows / Linux |
 | **Desktop** | Menu-bar app for install + gateway + peek + live monitor — its own repo, [cheaper-desktop](https://github.com/ownasquare/cheaper-desktop) | Mac / Windows / Linux |
 
 ### The honest boundary
 
 The **gateway** is the only piece that covers *every* surface uniformly — but it
-only reaches clients that let you set a base URL. The **Claude desktop app /
-claude.ai** don't expose one, so there the **plugin** (skill + hook + tiered agents)
-is the lever: it can't change the base session model, but it routes *work* to
-right-sized sub-agents. Together they cover the whole picture.
+only reaches clients that let you set a base URL, and only once **you** have set it.
+Nothing in Cheaper points a tool at the gateway for you: `cheaper install` /
+`cheaper taglines` write an end-of-chat savings-line instruction into a tool's
+global-instructions file, they never edit that tool's base URL or API endpoint. The
+**Claude desktop app / claude.ai** don't expose a base URL at all, so there the
+**plugin** (skill + hook + tiered agents) is the lever: it can't change the base
+session model, but it routes *work* to right-sized sub-agents. Together they cover
+the whole picture.
 
 ---
 
 ## Supported tools
 
-Any tool that can point at a custom base URL routes through the gateway — **36 have
-documented setup** (4 via the Anthropic API, 31 via the OpenAI-compatible API, plus
-Gemini's native API). Routing a tool and *reading* its history are different things:
-see the `peek` support table below, which covers 8 harnesses and reads 7.
+**Read [the honest boundary](#the-honest-boundary) first.** "Supported" here means
+*documented*, not *configured*: a tool routes through the gateway once **you** point
+its base URL at `http://localhost:8787`, and not before. No installer in this repo
+sets that for you — the list below is tools with **documented setup**, not tools
+currently sending Cheaper any traffic.
+
+On that basis, **36 tools have documented setup** (4 via the Anthropic API, 31 via
+the OpenAI-compatible API, plus Gemini's native API). Routing a tool and *reading*
+its history are different things: see the `peek` support table below, which covers 8
+harnesses and reads 7.
 
 > **Claude** · **Codex** · **Cursor** · **Copilot** · **Gemini** · **Goose** ·
 > **OpenCode** · **Kilo Code** · **Roo Code** · **Cursor Agent** · **Kiro** ·
@@ -226,15 +236,23 @@ cheaper <command> [options]
 ```
 
 This table is kept in sync with the same `HELP` string `cheaper --help` prints — see
-[`cli/test/cli_help.test.js`](cli/test/cli_help.test.js), which fails the suite if a
-command is ever added to `HELP` without a matching row here.
+[`cli/test/cli_help.test.js`](cli/test/cli_help.test.js), which **parses `cheaper --help`
+itself** rather than a hand-written list, and fails the suite if a command, a subcommand,
+or a `--port`-taking form is ever added to `HELP` without a matching row here.
 
 | Command | What it does |
 |---|---|
 | `peek [--days N] [--harness <key>] [--limit N] [--json]` | Estimate savings from your existing logs (local, read-only). |
-| `install [skill agents hook gateway plugin] [--all]` | Install components. `--all` = skill+agents+hook+gateway; `plugin` = the managed bundle. |
+| `install [skill agents hook gateway plugin cli autostart] [--all]` | Install components. `--all` = skill+agents+hook+gateway; `plugin` = the managed bundle. `autostart` is **not** in `--all` and never will be — name it explicitly, or use `cheaper autostart enable`. |
 | `uninstall [components] [--purge]` | Remove installed components (default: all). `--purge` also drops `~/.cheaper` (including gateway metrics). |
-| `gateway start` · `stop` · `status` | Run / stop / check the routing gateway. |
+| `gateway start [--port N]` | Start the routing gateway in the background and return. Installs the Python deps on first run. |
+| `gateway stop` · `gateway status` | Stop it / ask whether it is running. |
+| `gateway restart [--port N]` | Stop it, wait for the port to genuinely come free, then start a fresh process. This is the remedy `cheaper status` and the stale-build warnings point you at when the installed files match the source but the *running* gateway is an older build. If the port never frees it exits non-zero and says what still holds it, rather than spawning a uvicorn that dies on `EADDRINUSE` seconds later and calling that a start. |
+| `gateway serve [--port N]` | Run the gateway in the **foreground** and exit with its status — the form a supervisor (launchd / systemd) is pointed at. Installs no deps; run `gateway prepare` first. |
+| `gateway prepare` | Install the gateway's Python deps and refresh its files, **once**, before `serve`. Never run this from a service unit — inside a restart loop it hammers the package index and a machine that is offline at boot never comes up. |
+| `autostart enable [--port N]` | **Opt in** to a per-user login entry that runs `cheaper gateway serve` and restarts it if it crashes. Never installed by `cheaper install` or `--all`. Prints the exact file it wrote and the exact command that removes it. |
+| `autostart disable` | Deregister that entry **and** delete the file it wrote. |
+| `autostart status` | Registered? Switched off by you in Login Items? Do the node / Python paths baked in at enable time still exist? |
 | `dashboard [--json]` | Open the live localhost dashboard in your browser, or print the same three panels as JSON. **No `--terminal` view** — asking for one prints a pointer to `--json` rather than silently opening the browser. |
 | `reports [--terminal] [--json]` | Realized savings by period, bucketed on when the calls happened — browser, terminal, or JSON. |
 | `logs [--terminal] [--json]` | The full audit register, every routed call — browser, terminal, or JSON. |
@@ -247,6 +265,75 @@ command is ever added to `HELP` without a matching row here.
 | `taglines [--all] [--harness <key>] [--remove] [--dry-run]` | Wire the Cheaper.app end-of-chat savings line into every supported harness (Claude Code is handled by the plugin instead). |
 | `status [--verbose]` | Show what's installed and whether the gateway is running. |
 | `version` · `help` | Version / help. |
+
+### Running the gateway under a supervisor
+
+`cheaper gateway start` detaches and returns — which is what you want from a terminal,
+and exactly what you must **not** hand to launchd or systemd: the supervisor watches the
+launcher exit within seconds, restarts it, and the uvicorns pile up behind it. Two
+commands exist for that case instead:
+
+```bash
+cheaper gateway prepare          # once: install the Python deps + refresh the files
+cheaper gateway serve --port 8787   # foreground; lives exactly as long as the service
+```
+
+`serve` deliberately installs nothing. Dependency installation needs the network and can
+take minutes, so inside a restart loop it becomes a hammer on the package index, and a
+machine that is offline at boot would never come up at all. Run `prepare` once, then
+supervise `serve`.
+
+`serve` **exits 0 when it is stopped deliberately** (SIGTERM, SIGINT or SIGHUP — including
+the SIGTERM that `cheaper gateway stop` sends) and **non-zero when uvicorn exits on its
+own**. That distinction is the whole reason `cheaper gateway stop` works on a supervised
+gateway: launchd's `KeepAlive = { SuccessfulExit = false }` and systemd's
+`Restart=on-failure` both restart a crash and both leave a clean exit alone.
+
+### Autostart — opt-in, and only opt-in
+
+`cheaper autostart enable` registers the login entry for you. It is **never** installed by
+`cheaper install`, by `cheaper install --all`, or by an update: a self-restarting login
+daemon outlives the terminal that created it and starts a network listener at every login,
+so it is reachable only by naming it (`cheaper install autostart`), by picking it in the
+interactive menu, or by running `autostart enable`. If you are offered it once and say no,
+the answer is persisted and you are not asked again.
+
+What it writes, per platform:
+
+| Platform | What is registered | Where |
+|---|---|---|
+| macOS | a per-user LaunchAgent | `~/Library/LaunchAgents/com.beladed.cheaper.gateway.plist` |
+| Linux | a `systemd --user` unit | `~/.config/systemd/user/cheaper-gateway.service` |
+| Windows | a Scheduled Task (no file on disk) | task name `Cheaper Gateway` |
+
+Output goes to `~/.cheaper/autostart.log` (created `0600`, and capped at 2 MB **when a
+`cheaper autostart` command runs** — nothing rotates it in between). It is a separate file
+from `gateway.log` on purpose: the gateway chmods that one itself, while launchd would
+recreate it under your umask and quietly widen it back out.
+
+To remove it:
+
+```bash
+cheaper autostart disable
+```
+
+That deregisters the entry **and then** deletes the file — in that order, because the
+reverse leaves launchd/systemd retrying a job that points at something deleted. By hand:
+
+```bash
+# macOS
+launchctl bootout gui/$(id -u)/com.beladed.cheaper.gateway && rm ~/Library/LaunchAgents/com.beladed.cheaper.gateway.plist
+# Linux
+systemctl --user disable --now cheaper-gateway.service && rm ~/.config/systemd/user/cheaper-gateway.service
+# Windows
+schtasks /Delete /TN "Cheaper Gateway" /F
+```
+
+`cheaper autostart status` re-resolves the absolute `node` and Python paths that were baked
+in at enable time and reports drift in words. Under nvm/fnm/volta the interpreter path
+carries a version number, so your next Node upgrade orphans the entry — a login item that
+crash-loops silently at every login is the one failure this command exists to surface. If
+it cannot determine a state, it says so; it never prints "could not determine" as "fine".
 
 <details>
 <summary><b>Quickstart, one paste</b></summary>

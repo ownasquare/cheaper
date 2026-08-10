@@ -44,10 +44,62 @@ function run(args) {
 
 const FULL = run(['--help']).out;
 
+// ---------------------------------------------------------------------------
+// The expected surface is PARSED OUT OF `cheaper --help`, never listed by hand.
+// ---------------------------------------------------------------------------
+//
+// This list used to be a literal array, and that is precisely how the largest addition
+// this CLI has ever taken slipped past the gate whose only job is to catch it: the
+// `autostart` command plus `gateway serve`, `gateway prepare` and `--port` were added to
+// HELP and to bin/cheaper.js's dispatch, the hardcoded array did not mention them, and
+// the README-sync test below happily iterated the array and stayed green while README.md
+// contained zero occurrences of any of the four.
+//
+// A gate that has to be updated by the same commit it is supposed to police is not a
+// gate. So the parser below mirrors bin/cheaper.js's own `namesOf` (cheaper.js:120-124)
+// against the same text: an entry starts at exactly 4 spaces, its head is everything
+// before the first run of 2+ spaces, a head containing `|` is an alias list where every
+// branch names a command, and otherwise only the first token is the command name. Add a
+// command to HELP without documenting it and this file fails, with no edit here.
+function parseHelpEntries(help) {
+  const lines = help.split('\n');
+  const from = lines.findIndex((l) => l.includes('Commands'));
+  assert.notStrictEqual(from, -1, 'no Commands block in `cheaper --help`');
+  let to = lines.findIndex((l, i) => i > from && l.includes('Quickstart'));
+  if (to === -1) to = lines.length;
+
+  const entries = [];
+  for (const line of lines.slice(from + 1, to)) {
+    if (/^ {4}\S/.test(line)) {
+      const head = line.slice(4).split(/ {2,}/)[0].trim();
+      const toks = head.split(/[\s|,]+/).filter(Boolean).map((t) => t.toLowerCase());
+      entries.push({
+        head,
+        names: head.includes('|') ? toks : toks.slice(0, 1),
+        body: [line],
+      });
+    } else if (/^ {5,}\S/.test(line) && entries.length) {
+      entries[entries.length - 1].body.push(line);
+    }
+  }
+  assert.ok(entries.length > 5, 'the HELP parser found almost nothing — it has drifted from bin/cheaper.js');
+  return entries;
+}
+
+const ENTRIES = parseHelpEntries(FULL);
+
 // Every command bin/cheaper.js dispatches on that has its own entry in HELP.
-const DOCUMENTED = ['install', 'uninstall', 'gateway', 'dashboard', 'reports', 'logs',
-  'monitor', 'savings', 'export', 'import', 'forget', 'compact', 'peek', 'taglines',
-  'status', 'version'];
+const DOCUMENTED = [...new Set(ENTRIES.flatMap((e) => e.names))];
+
+// Two-word heads like `gateway serve` / `autostart enable` are the SUBCOMMAND surface.
+// They are the part the old hardcoded list could not see at all: `gateway` was in the
+// array, so adding `gateway serve` and `gateway prepare` changed nothing the gate looked
+// at. `wantsPort` is derived too — an entry whose own text offers `--port` is an entry
+// whose README row has to say so, because for `serve` and `autostart enable` the port is
+// baked into a supervisor entry the user will never open.
+const SUBCOMMANDS = ENTRIES
+  .filter((e) => /^[a-z][a-z-]* [a-z][a-z-]*$/.test(e.head))
+  .map((e) => ({ phrase: e.head, wantsPort: e.body.join('\n').includes('--port') }));
 
 test('every documented command answers --help, and answers it FAST', () => {
   for (const cmd of DOCUMENTED) {
@@ -134,22 +186,53 @@ test('`cheaper dashboard --tty` behaves the same as --terminal', () => {
 
 // Regression for "README documents only a fraction of the implemented commands" —
 // every command HELP declares must have its own backtick-quoted entry in the README's
-// Commands table, or the two are free to drift again exactly as they did before.
+// Commands section, or the two are free to drift again exactly as they did before.
 //
-// PROVED BY MUTATION: deleting any one row from the README table (e.g. the `dashboard`
-// or `taglines` row) makes this test fail with that command's name.
-test('README\'s Commands table documents every command in HELP', () => {
+// The expected set comes from parseHelpEntries(), not from a list maintained here. When
+// it WAS a list, `autostart`, `gateway serve`, `gateway prepare` and `--port` were all
+// added to HELP while README.md contained zero occurrences of any of them, and this test
+// passed anyway — it was iterating the stale array, so it was asserting nothing about the
+// new surface at all.
+//
+// PROVED BY MUTATION: adding a command to HELP in bin/cheaper.js without a README row
+// (e.g. an entry named `wombat`) fails this test naming `wombat`; deleting any existing
+// row (e.g. `dashboard`, `taglines`, `autostart status`) fails it naming that one.
+function readmeCommandsSection() {
   const readmePath = path.join(__dirname, '..', '..', 'README.md');
   const readme = fs.readFileSync(readmePath, 'utf8');
   const start = readme.indexOf('\n## Commands');
   assert.ok(start !== -1, 'README has no ## Commands section');
   const next = readme.indexOf('\n## ', start + 1);
-  const section = readme.slice(start, next === -1 ? readme.length : next);
-  const CANONICAL = DOCUMENTED.concat(['help']);
-  for (const cmd of CANONICAL) {
+  return readme.slice(start, next === -1 ? readme.length : next);
+}
+
+test('README\'s Commands section documents every command in HELP', () => {
+  const section = readmeCommandsSection();
+  for (const cmd of DOCUMENTED) {
     assert.ok(section.includes('`' + cmd),
-      `README's Commands table is missing `+ '`' + cmd + '`'
+      `README's Commands section is missing `+ '`' + cmd + '`'
       + ' — sync it with HELP in bin/cheaper.js');
+  }
+});
+
+// The half the hardcoded array structurally could not check. `gateway` being documented
+// says nothing about `gateway serve`, and `serve` is the entry a supervisor is pointed at:
+// undocumented, the only way to find it is to read bin/cheaper.js.
+test('README\'s Commands section documents every SUBCOMMAND in HELP, with its --port', () => {
+  const section = readmeCommandsSection();
+  assert.ok(SUBCOMMANDS.length >= 8,
+    'expected the gateway/autostart subcommand surface to be parsed out of HELP; got '
+    + JSON.stringify(SUBCOMMANDS.map((s) => s.phrase)));
+  for (const { phrase, wantsPort } of SUBCOMMANDS) {
+    const rows = section.split('\n').filter((l) => l.includes('`' + phrase));
+    assert.ok(rows.length,
+      `README's Commands section never mentions \`${phrase}\` — sync it with HELP in bin/cheaper.js`);
+    // A --port that HELP offers but the README never shows is how a user ends up with a
+    // login entry baked to the wrong port and no idea the flag existed.
+    if (wantsPort)
+      assert.ok(rows.some((l) => l.includes('--port')),
+        `HELP offers \`--port\` on \`${phrase}\` but no README row for it mentions --port:\n`
+        + rows.join('\n'));
   }
 });
 
@@ -199,10 +282,43 @@ test('peek\'s 7 readable harnesses and taglines\' 7 writable harnesses differ by
     + 'SQLite reader yet)\n' + peekReadable.join(',') + ' vs ' + taglineKeys.join(','));
 });
 
-test('`gateway --help` collects all three gateway entries, and nothing else', () => {
+// This used to assert start|stop|status and nothing more, which had stopped being true:
+// `gateway serve` and `gateway prepare` were added right below them and the assertion
+// still passed, because listing three of five entries proves nothing about the other two.
+// The expected phrases are parsed out of HELP, so a sixth gateway entry is covered the
+// day it is added.
+//
+// The negative half matters more than it looks: the `autostart` entries sit IMMEDIATELY
+// after the gateway ones in HELP, so an off-by-one in commandHelp()'s capture logic would
+// drag a login-daemon registration command into the output of `gateway --help`.
+test('`gateway --help` collects every gateway entry HELP has, and nothing else', () => {
+  const expected = ENTRIES.filter((e) => e.names[0] === 'gateway').map((e) => e.head);
+  // The literal is deliberate HERE and only here: parseHelpEntries() is a copy of
+  // commandHelp()'s rules, so comparing one against the other alone would be tautological
+  // — a shared parsing bug would hide from both. One independent statement of the truth
+  // makes a silent change to the gateway surface impossible.
+  assert.deepStrictEqual(expected,
+    ['gateway start', 'gateway stop', 'gateway restart', 'gateway status', 'gateway serve',
+     'gateway prepare'],
+    'the gateway surface in HELP changed — update the README rows and this expectation together');
   const r = run(['gateway', '--help']);
-  for (const s of ['gateway start', 'gateway stop', 'gateway status']) assert.ok(r.out.includes(s), r.out);
+  for (const s of expected) assert.ok(r.out.includes(s), `\`gateway --help\` dropped "${s}"\n` + r.out);
   assert.ok(!r.out.includes('Install components'), 'no neighbouring entry may leak in\n' + r.out);
+  assert.ok(!r.out.includes('autostart enable'),
+    'the autostart entries follow gateway\'s in HELP and must NOT be collected here\n' + r.out);
+});
+
+// `autostart` is a TOP-LEVEL command, not a `gateway` subcommand (bin/cheaper.js:162-167),
+// so its three entries must collect on their own and must not pull the gateway ones in
+// with them — they are adjacent in HELP and share the word "gateway" in their prose.
+test('`autostart --help` collects its own three entries and none of gateway\'s', () => {
+  const expected = ENTRIES.filter((e) => e.names[0] === 'autostart').map((e) => e.head);
+  assert.deepStrictEqual(expected, ['autostart enable', 'autostart disable', 'autostart status']);
+  const r = run(['autostart', '--help']);
+  assert.strictEqual(r.status, 0, r.out);
+  for (const s of expected) assert.ok(r.out.includes(s), `\`autostart --help\` dropped "${s}"\n` + r.out);
+  assert.ok(!r.out.includes('Start the routing gateway'),
+    'the gateway entries precede autostart\'s in HELP and must not leak in\n' + r.out);
 });
 
 test('`status --help` does not also drag in the `gateway status` entry', () => {

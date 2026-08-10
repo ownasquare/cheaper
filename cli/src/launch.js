@@ -12,11 +12,23 @@ const P = require('./paths');
 const { c } = require('./util');
 const gateway = require('./gateway');
 const { withToken } = require('./token');
-const { PORT } = gateway;
 
 const HEALTH_TIMEOUT_MS = 15000;
 const HEALTH_POLL_MS = 500;
 const PEEK_REFRESH_MS = 120000;
+
+// WHICH PORT — resolved at CALL TIME, never at module load.
+//
+// This file used to destructure `gateway.PORT`, a constant computed from the environment
+// the moment the module was first required. So `cheaper launch` health-checked, opened and
+// PRINTED http://localhost:8787 for a gateway that `cheaper gateway start --port 9000` (or
+// an autostart entry moved off a busy 8787) had put somewhere else: it declared a perfectly
+// healthy gateway unhealthy, told the user to go read the log, and exited 1.
+//
+// freshness.activeGatewayPort() is the single resolver every reader now shares — pid file,
+// then the autostart record, then CHEAPER_PORT, then 8787. Required lazily so this module
+// keeps costing nothing to load.
+function gatewayPort() { return require('./freshness').activeGatewayPort(); }
 
 function isGatewayRunning() {
   try {
@@ -26,9 +38,9 @@ function isGatewayRunning() {
   } catch { return false; }
 }
 
-function healthCheck() {
+function healthCheck(port) {
   return new Promise((resolve) => {
-    const req = http.get(`http://localhost:${PORT}/healthz`, (res) => {
+    const req = http.get(`http://localhost:${port}/healthz`, (res) => {
       let d = '';
       res.on('data', (x) => (d += x));
       res.on('end', () => {
@@ -41,10 +53,10 @@ function healthCheck() {
   });
 }
 
-async function waitForHealthy(timeoutMs) {
+async function waitForHealthy(timeoutMs, port) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (await healthCheck()) return true;
+    if (await healthCheck(port)) return true;
     await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
   }
   return false;
@@ -56,9 +68,13 @@ async function ensureGatewayUp() {
     console.log(c.dim('  Gateway not running — starting it...'));
     await gateway.start([], { open: false }); // launch opens the browser itself, so no [ENTER] prompt here
   }
-  const healthy = await waitForHealthy(HEALTH_TIMEOUT_MS);
+  // Resolved AFTER the start, never before: a gateway we just spawned writes the port it
+  // actually bound into the pid file, so reading it earlier would health-check the port we
+  // guessed instead of the one that is now serving.
+  const port = gatewayPort();
+  const healthy = await waitForHealthy(HEALTH_TIMEOUT_MS, port);
   if (!healthy) {
-    console.log(c.red(`  Gateway did not become healthy on port ${PORT} within ${HEALTH_TIMEOUT_MS / 1000}s.`));
+    console.log(c.red(`  Gateway did not become healthy on port ${port} within ${HEALTH_TIMEOUT_MS / 1000}s.`));
     console.log(c.dim('  Check the log:  ') + P.GATEWAY_LOG);
     console.log(c.dim('  Or try:  ') + 'cheaper gateway start');
     return false;
@@ -106,6 +122,11 @@ async function run(argv = [], opts = {}) {
   const ok = await ensureGatewayUp();
   if (!ok) { process.exitCode = 1; return; }
 
+  // Re-resolved here rather than returned by ensureGatewayUp(), whose boolean is a contract
+  // `cheaper export` reads (export.js:57). By this point a gateway that was just started has
+  // recorded its port, so both callers see the same answer.
+  const port = gatewayPort();
+
   // Deep-link to a specific dashboard tab (dashboard/reports/logs/monitor) so
   // `cheaper logs`, `cheaper reports`, etc. open the RIGHT view, not the generic page.
   //
@@ -113,7 +134,7 @@ async function run(argv = [], opts = {}) {
   // during start-up, so reading it earlier would hand the browser a token-less URL and
   // 401 the very first dashboard a new user ever opens.
   const tab = (opts && opts.tab) || '';
-  const dashUrl = withToken(`http://localhost:${PORT}/dashboard` + (tab ? '#' + tab : ''));
+  const dashUrl = withToken(`http://localhost:${port}/dashboard` + (tab ? '#' + tab : ''));
 
   refreshPeek();
   if (o.open) openDashboard(dashUrl);
@@ -121,7 +142,7 @@ async function run(argv = [], opts = {}) {
   console.log('');
   // Print the URL WITHOUT the secret. It is copied into chats, screenshots and issue
   // reports; the browser already has the tokened copy it needs.
-  console.log('  ' + c.green(`http://localhost:${PORT}/dashboard` + (tab ? '#' + tab : '')));
+  console.log('  ' + c.green(`http://localhost:${port}/dashboard` + (tab ? '#' + tab : '')));
   console.log('  ' + c.bold('live monitor running') + c.dim(' — Ctrl-C to stop (the gateway keeps running)'));
   console.log('');
 

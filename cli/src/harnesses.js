@@ -10,7 +10,17 @@ const { HARNESSES: BASE_HARNESSES, isInstalled, historyDirFor } = require('./pee
 
 // Harnesses peek/adapters.js doesn't yet track for token accounting, but that
 // `cheaper install` should still be able to DETECT (home dir and/or CLI bin
-// on PATH) so tagline/routing wiring can reach them too. These are
+// on PATH) so the end-of-chat savings-LINE instruction can be written for them
+// too.
+//
+// Deliberately not called "routing": detecting a harness here does not route any
+// of its calls, and neither does installing into it. Nothing in this codebase
+// ever SETS ANTHROPIC_BASE_URL — every occurrence of that name is a print
+// statement telling the user to export it themselves. All `cheaper install`
+// does for a non-Claude harness is append a Markdown instruction block to its
+// global-instructions file. The earlier "tagline/routing" wording had users
+// reading "✓ wired" and believing their traffic was now going through the
+// gateway, when nothing had been pointed at it. These are
 // detection-only stand-ins — no `collect` parser, so they never affect
 // `cheaper peek`'s savings math. Anything already in peek/adapters.js
 // (claude-code, codex, gemini, grok, opencode, copilot, pi, cursor) is

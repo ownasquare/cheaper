@@ -6,27 +6,60 @@
 const { c } = require('./util');
 const { report } = require('./freshness');
 
+// COLOUR IS THE WHOLE INTERFACE HERE. A reader scans this block for something that is
+// not green and stops there; anything rendered green is, in practice, not read. So a
+// state that needs action must never be green, and a state that could not be CHECKED
+// must never be green either:
+//
+//   stopped     the gateway is installed and current but is not running. This was
+//               `ok` -> green('current') with the words "not running" dimmed beside
+//               it, which is how a completely dead router read as healthy.
+//   broken      present but structurally wrong — a wiped settings key, a registry
+//               entry pointing at a deleted directory. Red, because unlike 'stale'
+//               nothing is merely out of date: the feature is off.
+//   unverified  the check COULD NOT RUN (unreadable/unparseable file). Amber, never
+//               green and never dim: "could not determine" must not read as "fine",
+//               and it is not the same claim as "broken" either.
 const MARK = {
   ok: () => c.green('current'),
   stale: () => c.amber('STALE'),
   restart: () => c.amber('RESTART NEEDED'),
+  stopped: () => c.amber('STOPPED'),
+  broken: () => c.red('BROKEN'),
+  unverified: () => c.amber('CANNOT VERIFY'),
   missing: () => c.dim('not installed'),
   unknown: () => c.dim('unknown'),
 };
 
-// The single most useful sentence: what is out of date and the exact command to fix it.
-// Returns '' when everything that is installed is current.
+// States that mean "a human has to do something", as opposed to 'missing' (a component
+// this user never asked for) and 'ok'.
+const NEEDS_ACTION = new Set(['stale', 'restart', 'stopped', 'broken', 'unverified']);
+
+// The single most useful sentence: what needs attention and the exact command to fix it.
+// Returns '' when everything that is installed is current, running, and verifiable.
+//
+// Staleness keeps its own aggregated sentence because its remedy is shared across
+// components ("install then restart", in that order). The rest carry their own remedy
+// in their hint and are named individually — an aggregated "out of date" line would be
+// a lie about a gateway that is merely stopped, or about a check that never ran.
 function summarize(rep) {
-  const bad = rep.items.filter((i) => i.state === 'stale' || i.state === 'restart');
-  if (!bad.length) return '';
-  // Union the remedies across components. Order matters: installing after a restart
-  // would leave the freshly-started process holding the pre-install code again.
-  const needInstall = bad.some((i) => (i.hint || '').includes('install'));
-  const needRestart = bad.some((i) => (i.hint || '').includes('restart'));
-  const cmds = [];
-  if (needInstall) cmds.push('cheaper install --all');
-  if (needRestart) cmds.push('cheaper gateway restart');
-  return `${bad.map((i) => i.label).join(', ')} out of date — run: ${cmds.join(' && ')}`;
+  const stale = rep.items.filter((i) => i.state === 'stale' || i.state === 'restart');
+  const parts = [];
+  if (stale.length) {
+    // Union the remedies across components. Order matters: installing after a restart
+    // would leave the freshly-started process holding the pre-install code again.
+    const needInstall = stale.some((i) => (i.hint || '').includes('install'));
+    const needRestart = stale.some((i) => (i.hint || '').includes('restart'));
+    const cmds = [];
+    if (needInstall) cmds.push('cheaper install --all');
+    if (needRestart) cmds.push('cheaper gateway restart');
+    parts.push(`${stale.map((i) => i.label).join(', ')} out of date — run: ${cmds.join(' && ')}`);
+  }
+  for (const i of rep.items) {
+    if (i.state === 'stale' || i.state === 'restart') continue;
+    if (NEEDS_ACTION.has(i.state)) parts.push(`${i.label}: ${i.hint}`);
+  }
+  return parts.join('; ');
 }
 
 async function print(opts = {}) {
@@ -53,4 +86,7 @@ async function print(opts = {}) {
   return rep;
 }
 
-module.exports = { print, summarize };
+// MARK is exported so a test can assert the COLOUR a state renders in, not merely its
+// words. The P0.5 defect had entirely correct words ("not running") in green ink, and a
+// text-only assertion would have passed on it.
+module.exports = { print, summarize, MARK, NEEDS_ACTION };

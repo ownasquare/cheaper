@@ -8,6 +8,18 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// --- sandbox HOME BEFORE paths.js is loaded ----------------------------------------
+// The tagline resolves its gateway port from ~/.cheaper/gateway.pid before falling back to
+// CHEAPER_PORT, and paths.js reads the home directory once at require time. Without this,
+// the tagline test below would read the DEVELOPER'S real pid file: it sets CHEAPER_PORT to a
+// port with nothing on it precisely to force the estimate path, and a real gateway recorded
+// in the real pid file would be probed instead — so the suite would pass or fail depending
+// on whether the machine running it happens to have a gateway up.
+const HOME_SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-home-'));
+process.env.HOME = HOME_SANDBOX;
+process.env.USERPROFILE = HOME_SANDBOX;
+test.after(() => { fs.rmSync(HOME_SANDBOX, { recursive: true, force: true }); });
+
 const { contentTier, modelTier, effectiveTier } = require('../src/peek/classify');
 const { estimateCall, detectFamily } = require('../src/peek/pricing');
 const { realizedFromRecords, buildTagline, fromGateway } = require('../src/peek/tagline');
@@ -584,8 +596,15 @@ test('total session spend is cache-aware; routed savings reported separately', (
   assert.match(line, / This session ran 3\.0M tokens, worth 🔴 about \$19\.50 at list API rates\.$/);
 });
 
+// `routingAttributed: true` is REQUIRED of any fixture that expects the credited wording.
+// buildTagline fails closed on it (see tagline.test.js's P2.4 block): a result shape that
+// never established WHO chose the models renders the mix without the "Cheaper.app saved …
+// by running" claim. These three fixtures are hand-written stand-ins for what
+// realizedFromRecords/fromGateway produce, and both of those set the field, so omitting it
+// here was the fixture being out of date rather than the renderer being wrong.
 test('brand renders as a markdown link when requested', () => {
   const r = { ceilingModel: 'claude-opus-4', topModel: 'claude-opus-4', dollarsSaved: 5,
+    routingAttributed: true,
     tokensCredited: 1e6, creditedCalls: 1, savedByModel: { 'claude-sonnet-4-5': 1 },
     extraByModel: {}, extraCost: 0, totalSpent: 10, totalTokens: 2e6, exact: false };
   const md = buildTagline(r, '[Cheaper.app](https://cheaper.app)');
@@ -594,6 +613,7 @@ test('brand renders as a markdown link when requested', () => {
 
 test('color cues: 🟢 on savings, 🔴 on spend; ANSI adds real colour', () => {
   const r = { ceilingModel: 'claude-opus-4', topModel: 'claude-opus-4', dollarsSaved: 5,
+    routingAttributed: true,
     tokensCredited: 1e6, creditedCalls: 1, savedByModel: { 'claude-sonnet-4-5': 1 },
     extraByModel: {}, extraCost: 0, totalSpent: 10, totalTokens: 2e6, exact: false };
   // Markdown/plain can't colour text, so an emoji dot carries the cue in the chat.
@@ -625,6 +645,7 @@ test('honesty: unknown models are unpriceable and never invent a saving', () => 
 
 test('exact (gateway) savings drop the "about " qualifier; estimate keeps it', () => {
   const mk = (exact) => ({ ceilingModel: 'claude-opus-4', dollarsSaved: 1.23,
+    routingAttributed: true,
     tokensCredited: 3e6, creditedCalls: 4, extraByModel: {}, extraCost: 0,
     savedByModel: { 'claude-haiku-4-5': 3, 'claude-sonnet-4-5': 1 }, exact });
   const est = buildTagline(mk(false));
@@ -892,6 +913,29 @@ test('lifetime ledger: idempotent per chat, sums across chats, honest about exac
   }
 });
 
+// A port with nothing on it: bind, read what the kernel assigned, release. Hardcoding a
+// number would make the tests below a coin flip against whatever else this machine is
+// running, and their whole subject is telling "answered" apart from "refused".
+function freePort() {
+  return new Promise((resolve) => {
+    const srv = require('http').createServer(() => {});
+    srv.listen(0, '127.0.0.1', () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
+// A listener that answers 401 to everything. It proves a live HTTP server on the port while
+// leaving /metrics unreadable — so the dashboard link is warranted but the money stays on
+// the transcript estimate, which is what keeps every dollar asserted below unchanged.
+function listener401() {
+  return new Promise((resolve) => {
+    const srv = require('http').createServer((req, res) => { res.writeHead(401); res.end('no'); });
+    srv.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+}
+
 test('tagline run: brand links to /love, appends lifetime, idempotent per chat', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'peek-run-'));
   const proj = path.join(dir, '.claude', 'projects', 'demo');
@@ -910,10 +954,13 @@ test('tagline run: brand links to /love, appends lifetime, idempotent per chat',
   const savedPort = process.env.CHEAPER_PORT;
   process.env.CHEAPER_PEEK_HOME = dir;
   process.env.CHEAPER_LEDGER_FILE = path.join(dir, 'lifetime.json');
-  process.env.CHEAPER_PORT = '59421'; // nothing listening → forces the estimate path
+  // Nothing listening → forces the estimate path, and (below) proves the "See logs" link is
+  // withheld when nothing answered.
+  process.env.CHEAPER_PORT = String(await freePort());
   const logs = [];
   const orig = console.log;
   console.log = (s) => logs.push(String(s));
+  let live = null;
   try {
     for (const m of ['fsutil', 'adapters', 'scan', 'ledger', 'tagline']) {
       delete require.cache[require.resolve('../src/peek/' + m)];
@@ -924,11 +971,19 @@ test('tagline run: brand links to /love, appends lifetime, idempotent per chat',
     const j1 = JSON.parse(logs[logs.length - 1]);
     await tag.run({ ...opts, json: true });                 // 2nd run, SAME chat
     const j2 = JSON.parse(logs[logs.length - 1]);
-    await tag.run({ ...opts, format: 'markdown' });          // rendered line
+    await tag.run({ ...opts, format: 'markdown' });          // rendered line, gateway DOWN
     var rendered = logs[logs.length - 1];
     var life1 = j1.lifetime; var life2 = j2.lifetime;
+
+    // The SAME chat, the SAME numbers, with something actually listening on the port.
+    live = await listener401();
+    var livePort = live.address().port;
+    process.env.CHEAPER_PORT = String(livePort);
+    await tag.run({ ...opts, format: 'markdown' });          // rendered line, gateway UP
+    var renderedLive = logs[logs.length - 1];
   } finally {
     console.log = orig;
+    if (live) await new Promise((r) => live.close(r));
     if (savedHome === undefined) delete process.env.CHEAPER_PEEK_HOME; else process.env.CHEAPER_PEEK_HOME = savedHome;
     if (savedLedger === undefined) delete process.env.CHEAPER_LEDGER_FILE; else process.env.CHEAPER_LEDGER_FILE = savedLedger;
     if (savedPort === undefined) delete process.env.CHEAPER_PORT; else process.env.CHEAPER_PORT = savedPort;
@@ -946,8 +1001,20 @@ test('tagline run: brand links to /love, appends lifetime, idempotent per chat',
   // Brand renders as a markdown link to the /love page, and the lifetime line is appended.
   assert.ok(rendered.startsWith('[Cheaper.app](https://cheaper.app/love)'), 'brand → /love: ' + rendered);
   assert.match(rendered, / Lifetime savings: 🟢 about \$84\.00 and 2\.0M tokens\./);
-  // The "See logs" link to the local dashboard is the very last thing on the line.
-  assert.ok(rendered.endsWith(' [See logs](http://localhost:59421/dashboard)'), 'See logs suffix: ' + rendered);
+  // The "See logs" link is a CLAIM that the page resolves, so it is printed only when
+  // something answered on the port — and when it is printed it is the very last thing on the
+  // line. Both halves are asserted here, against the SAME chat, because "either way is fine"
+  // is exactly how the original bug survived: the link was a constant, guarded by `if (!url)`
+  // on a string that could never be falsy, so users clicked it and got
+  // ERR_CONNECTION_REFUSED.
+  assert.ok(!/See logs/.test(rendered),
+    'nothing was listening — no link may be offered: ' + rendered);
+  assert.ok(!/localhost/.test(rendered), 'not even a bare URL: ' + rendered);
+  assert.ok(renderedLive.endsWith(` [See logs](http://localhost:${livePort}/dashboard)`),
+    'a live listener earns the link, last, on the port that answered: ' + renderedLive);
+  // The line either side of the link is identical: a link is not a licence to change money.
+  assert.equal(renderedLive.slice(0, renderedLive.indexOf(' [See logs]')), rendered,
+    'the link is the ONLY difference between the two renders\n' + rendered + '\n' + renderedLive);
 });
 
 test('regression: no "$" in the tagline is ever preceded by "~" or "-"', () => {

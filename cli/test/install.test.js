@@ -217,4 +217,271 @@ test('util.js::ask stays a plain prompt — it must NOT invent an empty answer',
     'a close-handler here would turn "no answer" into "the default"\n' + fn);
 });
 
+// --------------------------------------------------------------------------
+// 5. THE AUTOSTART OFFER MUST NOT FOLLOW A FAILED GATEWAY INSTALL
+// --------------------------------------------------------------------------
+//
+// install.js built its post-install notes from `results.map(r => r.key)`, which contains
+// the ok:false rows too. So `chosen.includes('gateway')` stayed true when installGateway()
+// threw, and the one-time offer at the very bottom of run() invited the user to register a
+// login entry that would run `cheaper gateway serve` against a ~/.cheaper/gateway that was
+// never written — a supervised, restarted, permanent crash loop, offered as the last thing
+// a failed install says.
+//
+// The offer is counted rather than executed: offerOnce() is looked up through the module
+// object at call time (`require('./autostart').offerOnce()`), so replacing the property on
+// the cached module is enough, and no real login entry is ever registered by these tests.
+function runInstallCountingOffers(args) {
+  const autostart = require('../src/autostart');
+  const realOffer = autostart.offerOnce;
+  let offered = 0;
+  autostart.offerOnce = async () => { offered += 1; };
+
+  const lines = [];
+  const origLog = console.log;
+  console.log = (...a) => lines.push(a.join(' '));
+  // node:test sets process.exitCode as soon as any test in this FILE fails, so read it
+  // against a pinned baseline rather than against the runner's running state.
+  const runnerCode = process.exitCode;
+  process.exitCode = 0;
+  return (async () => {
+    let code;
+    try {
+      await require('../src/install').run(args);
+      code = process.exitCode;
+    } finally {
+      console.log = origLog;
+      autostart.offerOnce = realOffer;
+      process.exitCode = runnerCode;
+    }
+    return { offered, code, out: strip(lines.join('\n')) };
+  })();
+}
+
+test('a gateway that FAILED to install is never offered as a login entry', async () => {
+  const P = require('../src/paths');
+  // A real installGateway() failure, not a stub: copyDir() mkdirs GATEWAY_DIR, and mkdir
+  // over an existing FILE is ENOTDIR/EEXIST. This is the shape of a ~/.cheaper left broken
+  // by a half-finished earlier run.
+  fs.rmSync(P.GATEWAY_DIR, { recursive: true, force: true });
+  fs.mkdirSync(P.CHEAPER_DIR, { recursive: true });
+  fs.writeFileSync(P.GATEWAY_DIR, 'not a directory');
+
+  let r;
+  try { r = await runInstallCountingOffers(['gateway']); }
+  finally { fs.rmSync(P.GATEWAY_DIR, { recursive: true, force: true }); }
+
+  assert.ok(/✗|gateway:/.test(r.out) || r.code === 1,
+    'the precondition failed: installGateway() was supposed to throw here\n' + r.out);
+  assert.strictEqual(r.code, 1, 'a failed component must still exit non-zero\n' + r.out);
+  assert.strictEqual(r.offered, 0,
+    'the autostart offer fired after a FAILED gateway install: the user was invited to ' +
+    'register a login entry that runs `cheaper gateway serve` against a directory that ' +
+    'does not exist, which launchd would then restart forever\n' + r.out);
+});
+
+test('a gateway that installed SUCCESSFULLY is still offered — the gate is not an off switch', async () => {
+  const P = require('../src/paths');
+  fs.rmSync(P.GATEWAY_DIR, { recursive: true, force: true });
+
+  const r = await runInstallCountingOffers(['gateway']);
+
+  assert.strictEqual(r.code, 0, 'the happy path must stay 0\n' + r.out);
+  assert.ok(fs.existsSync(path.join(P.GATEWAY_DIR, 'app')),
+    'the precondition failed: the gateway did not install\n' + r.out);
+  assert.strictEqual(r.offered, 1,
+    'gating the offer on success must not delete the offer\n' + r.out);
+});
+
+// --------------------------------------------------------------------------
+// 6. UNINSTALL: A DEREGISTRATION THAT FAILED MUST NOT READ AS DONE
+// --------------------------------------------------------------------------
+//
+// These drive uninstall.js's real code with autostart.js's disable() replaced by a stub,
+// restored in a finally. No launchctl/systemctl/schtasks is invoked and no real entry is
+// touched; only the sandbox HOME above is written to.
+function withStubbedAutostart(stub, fn) {
+  const autostart = require('../src/autostart');
+  const saved = {};
+  for (const k of Object.keys(stub)) saved[k] = autostart[k];
+  Object.assign(autostart, stub);
+  try { return fn(); } finally { Object.assign(autostart, saved); }
+}
+
+const FAILED_DISABLE = {
+  isRegisteredOnDisk: () => true,
+  disable: () => ({
+    ok: false, state: 'registered',
+    msg: 'autostart -> NOT confirmed removed (launchd still lists it)',
+  }),
+};
+
+// Plant the two things the login entry actually points at: ProgramArguments[1] is
+// ~/.cheaper/cli/bin/cheaper.js and it serves out of ~/.cheaper/gateway.
+function plantSupervisedFiles(P) {
+  fs.mkdirSync(P.GATEWAY_DIR, { recursive: true });
+  fs.writeFileSync(path.join(P.GATEWAY_DIR, 'marker'), 'x');
+  fs.mkdirSync(path.join(P.CLI_HOME, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(P.CLI_HOME, 'bin', 'cheaper.js'), '#!/usr/bin/env node\n');
+}
+
+test('the pre-deregistration row reports disable()\'s REAL ok, not a hardcoded true', () => {
+  const P = require('../src/paths');
+  plantSupervisedFiles(P);
+
+  const results = withStubbedAutostart(FAILED_DISABLE,
+    () => require('../src/uninstall').uninstall({ components: ['gateway'] }));
+
+  const row = results.find((r) => r.key === 'autostart');
+  assert.ok(row, JSON.stringify(results, null, 2));
+  assert.match(row.msg, /NOT confirmed removed/, row.msg);
+  assert.strictEqual(row.ok, false,
+    'a literal `ok: true` printed a green ✓ against the words "NOT confirmed removed", and ' +
+    'run()\'s `results.some(r => !r.ok)` therefore saw nothing and exited 0 while the ' +
+    'supervisor was still registered\n' + JSON.stringify(results, null, 2));
+  assert.ok(results.some((r) => !r.ok),
+    'this is the value run() turns into the non-zero exit code a script can read');
+});
+
+test('a plain `cheaper uninstall` ABORTS gateway + cli when the entry will not deregister', () => {
+  const P = require('../src/paths');
+  plantSupervisedFiles(P);
+
+  const results = withStubbedAutostart(FAILED_DISABLE,
+    () => require('../src/uninstall').uninstall({}));
+
+  const by = (k) => results.find((r) => r.key === k);
+  assert.ok(by('autostart') && by('autostart').ok === false,
+    'the autostart row must be red first\n' + JSON.stringify(results, null, 2));
+  for (const k of ['gateway', 'cli']) {
+    assert.ok(by(k) && by(k).ok === false,
+      `${k} must be refused, not removed\n` + JSON.stringify(results, null, 2));
+    assert.match(by(k).msg, /Deregister it first/, by(k).msg);
+    assert.match(by(k).msg, /cheaper autostart disable/,
+      'the refusal must name the command that clears the entry\n' + by(k).msg);
+  }
+  assert.ok(fs.existsSync(path.join(P.GATEWAY_DIR, 'marker')),
+    '~/.cheaper/gateway was deleted while a LaunchAgent still pointed at it — the entry now ' +
+    'retries a deleted binary at every login\n' + JSON.stringify(results, null, 2));
+  assert.ok(fs.existsSync(path.join(P.CLI_HOME, 'bin', 'cheaper.js')),
+    'ProgramArguments[1] of the still-registered plist was deleted, so there is no `cheaper` ' +
+    'command left on the machine to disable it\n' + JSON.stringify(results, null, 2));
+  // Unrelated components are NOT held hostage: nothing supervises the hook.
+  assert.ok(by('hook') && by('hook').ok, JSON.stringify(results, null, 2));
+});
+
+test('once disable() SUCCEEDS the same uninstall removes gateway + cli as before', () => {
+  const P = require('../src/paths');
+  plantSupervisedFiles(P);
+
+  const results = withStubbedAutostart({
+    isRegisteredOnDisk: () => true,
+    disable: () => ({ ok: true, state: 'absent', msg: 'autostart -> deregistered' }),
+  }, () => require('../src/uninstall').uninstall({}));
+
+  assert.ok(!fs.existsSync(P.GATEWAY_DIR),
+    'the abort must be conditional on the failure, not a permanent refusal\n' +
+    JSON.stringify(results, null, 2));
+  const gw = results.find((r) => r.key === 'gateway');
+  assert.ok(gw && gw.ok, JSON.stringify(results, null, 2));
+});
+
+// --------------------------------------------------------------------------
+// 6b. --purge MUST NOT CLAIM A DIRECTORY IT DID NOT DELETE
+// --------------------------------------------------------------------------
+//
+// util.js::removePath swallows every error by contract (`try { fs.rmSync(…) } catch {}`),
+// so uninstall.js's purge row cannot learn anything from calling it. The failure that was
+// reproduced: ~/.cheaper survives (permissions, an open handle, a locked file), the row
+// still prints "✓ removed ~/.cheaper (incl. metrics.db)", run()'s
+// `results.some(r => !r.ok)` sees nothing, and the command exits 0 — a provisioning
+// script is told the machine was wiped while metrics.db is still sitting there.
+//
+// The undeletable directory is produced by making fs.rmSync fail for exactly that ONE
+// path. removePath closes over the same `fs` module object this file requires, so this is
+// the real code path with a real error — and it needs no chmod, no root check and no
+// platform carve-out, unlike a permissions-based setup which is a no-op on Windows and
+// bypassed when the suite runs as root.
+function withUnremovable(targetPath, fn) {
+  const realRm = fs.rmSync;
+  fs.rmSync = (p, opts) => {
+    if (path.resolve(p) === path.resolve(targetPath)) {
+      const e = new Error(`EACCES: permission denied, rmdir '${p}'`);
+      e.code = 'EACCES';
+      throw e;
+    }
+    return realRm(p, opts);
+  };
+  try { return fn(); } finally { fs.rmSync = realRm; }
+}
+
+test('--purge reports ok:false and names the survivor when ~/.cheaper is still there', () => {
+  const P = require('../src/paths');
+  fs.mkdirSync(P.CHEAPER_DIR, { recursive: true });
+  fs.writeFileSync(path.join(P.CHEAPER_DIR, 'metrics.db'), 'x');
+
+  const results = withUnremovable(P.CHEAPER_DIR, () => withStubbedAutostart({
+    isRegisteredOnDisk: () => false,
+  }, () => require('../src/uninstall').uninstall({ components: ['hook'], purge: true })));
+
+  const row = results.find((r) => r.key === 'purge');
+  assert.ok(row, JSON.stringify(results, null, 2));
+  // Precondition: the directory really did survive the purge.
+  assert.ok(fs.existsSync(P.CHEAPER_DIR),
+    'the precondition failed: ~/.cheaper was removed, so there is nothing to mis-report');
+
+  assert.strictEqual(row.ok, false,
+    'a literal `ok: true` printed "✓ removed ' + P.CHEAPER_DIR + '" for a directory that is ' +
+    'still on disk, and run()\'s `results.some(r => !r.ok)` therefore exited 0 on a machine ' +
+    'that was never purged\n' + JSON.stringify(results, null, 2));
+  assert.ok(!/^removed /.test(row.msg),
+    'the message must not open by claiming the removal happened\n' + row.msg);
+  assert.match(row.msg, /could NOT remove/, row.msg);
+  assert.match(row.msg, /metrics\.db/,
+    'the row must name what actually survived, not just that something did\n' + row.msg);
+  assert.ok(row.msg.includes(P.CHEAPER_DIR),
+    'and the path the reader has to deal with\n' + row.msg);
+  assert.match(row.msg, /rm -rf|rmdir \/s/,
+    'a failure the user cannot act on is only half reported\n' + row.msg);
+  assert.ok(results.some((r) => !r.ok),
+    'this is the value run() turns into the non-zero exit code a script can read');
+
+  fs.rmSync(P.CHEAPER_DIR, { recursive: true, force: true });
+});
+
+test('--purge still reports ok:true when ~/.cheaper is genuinely gone', () => {
+  const P = require('../src/paths');
+  fs.mkdirSync(P.CHEAPER_DIR, { recursive: true });
+  fs.writeFileSync(path.join(P.CHEAPER_DIR, 'metrics.db'), 'x');
+
+  const results = withStubbedAutostart({ isRegisteredOnDisk: () => false },
+    () => require('../src/uninstall').uninstall({ components: ['hook'], purge: true }));
+
+  const row = results.find((r) => r.key === 'purge');
+  assert.ok(!fs.existsSync(P.CHEAPER_DIR),
+    'the precondition failed: the purge did not delete ~/.cheaper\n' + JSON.stringify(results, null, 2));
+  assert.strictEqual(row.ok, true,
+    'the verification must not turn a successful purge red — that would train readers to ' +
+    'ignore the row\n' + JSON.stringify(results, null, 2));
+  assert.match(row.msg, /removed /, row.msg);
+});
+
+// --------------------------------------------------------------------------
+// 7. ONE COPY OF THE DON'T-SIGNAL-THE-WRONG-PROCESS GATE
+// --------------------------------------------------------------------------
+
+test('uninstall.js uses gateway.js\'s pidLooksLikeGateway instead of a second copy', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'uninstall.js'), 'utf8');
+  assert.ok(!/spawnSync\('ps'|spawnSync\('tasklist'/.test(src),
+    'two copies of a gate that decides whether to SIGTERM a pid drift: only one of them ' +
+    'got the win32 fix for tasklist exiting 0 on "no tasks match"\n');
+  assert.match(src, /require\('\.\/gateway'\)\.pidLooksLikeGateway/,
+    'the surviving copy must be the exported one in gateway.js');
+
+  // And it must still answer false for a pid that is not ours, which is what keeps
+  // stopGatewayIfRunning from signalling a stale pid's new owner.
+  const { pidLooksLikeGateway } = require('../src/gateway');
+  assert.strictEqual(pidLooksLikeGateway(1), false, 'pid 1 is init, never our uvicorn');
+});
+
 test.after(() => { fs.rmSync(SANDBOX, { recursive: true, force: true }); });

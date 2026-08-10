@@ -218,6 +218,19 @@ function installPlugin() {
   return msg;
 }
 
+// Register the login entry that starts the gateway at every login. Reaching this
+// function at all requires the user to have NAMED autostart (`cheaper install autostart`
+// or picking it in the menu) — see the DEFAULT_KEYS comment below.
+function installAutostart() {
+  const r = require('./autostart').enable([]);
+  // enable() prints its own detail block (what was written, how to remove it) and answers
+  // ok:false for anything it could not VERIFY. Throwing here is what turns that into the
+  // red ✗ and the non-zero exit code the loop below already produces for a failed
+  // component — an unverified login daemon must never be reported with a green tick.
+  if (!r.ok) throw new Error(r.msg);
+  return r.msg;
+}
+
 // skill/agents/hook/gateway are the reliable, discovered-location default set.
 // plugin is an opt-in managed packaging of skill+agents+hook (mutually exclusive).
 const COMPONENTS = [
@@ -227,7 +240,19 @@ const COMPONENTS = [
   { key: 'gateway', label: 'Gateway (proxy that routes every API call + monitor)', fn: installGateway },
   { key: 'plugin', label: 'Plugin (managed bundle of skill+agents+hook; alt. to the above)', fn: installPlugin },
   { key: 'cli', label: 'CLI (a `cheaper` command on your PATH)', fn: installCliLauncher },
+  // LAST on purpose: when several components are named in one run, the gateway and the
+  // CLI copy it supervises must already be on disk before a login entry is pointed at
+  // them (autostart.js refuses outright if ~/.cheaper/cli is missing).
+  { key: 'autostart', label: 'Autostart (opt-in login entry that keeps the gateway running)', fn: installAutostart },
 ];
+// NOTE: 'autostart' is deliberately absent, and `all` below is built from this list, so
+// NEITHER a bare `cheaper install` NOR `cheaper install --all` can ever register a login
+// daemon. install.js already refuses to install ordinary components when it cannot ask
+// (see the non-TTY branch in run()); a self-restarting service that survives the terminal
+// which created it, starts a listener at every login, and shows up in the user's own
+// System Settings needs a stronger gate than "the default happened to include it".
+// It is reachable by naming it — `cheaper install autostart`, the interactive picker, or
+// `cheaper autostart enable` — and by nothing else.
 const DEFAULT_KEYS = ['skill', 'agents', 'hook', 'gateway'];
 
 // Accept plurals + synonyms so `install hooks`, `install agent`, `install rules`
@@ -240,6 +265,10 @@ const ALIASES = {
   gateway: ['gateway'], proxy: ['gateway'],
   plugin: ['plugin'], bundle: ['plugin'],
   cli: ['cli'],
+  // Aliases for autostart exist so `install login-item` / `install daemon` resolve
+  // instead of falling through to "Nothing selected" — but NONE of them is reachable
+  // from `all`, which is DEFAULT_KEYS and does not contain autostart.
+  autostart: ['autostart'], login: ['autostart'], daemon: ['autostart'],
   rules: ['skill', 'agents', 'hook'], rule: ['skill', 'agents', 'hook'],
   policy: ['skill', 'agents', 'hook'], router: ['skill', 'agents', 'hook'],
   all: DEFAULT_KEYS.slice(),
@@ -276,20 +305,36 @@ function install({ components } = {}) {
 function status() {
   let hookWired = false;
   try { hookWired = JSON.stringify(readJSON(P.SETTINGS, {}).hooks || {}).includes('router-policy'); } catch { /* ignore */ }
+  // `autostartOnDisk` is FILESYSTEM EVIDENCE ONLY: a plist/unit exists (on Windows, an
+  // enable record does). It deliberately does not shell out to launchctl/systemctl/
+  // schtasks, because `cheaper status` runs on every invocation and those probes are the
+  // slow part — but that means it cannot see a user who switched the entry off in Login
+  // Items. Every caller must therefore print it as "an entry exists", never as "it is
+  // running", and point at `cheaper autostart status` for the real answer.
+  let autostartOnDisk = false;
+  try { autostartOnDisk = require('./autostart').isRegisteredOnDisk(); } catch { autostartOnDisk = false; }
   return {
     skill: fs.existsSync(path.join(P.SKILLS_DIR, 'adaptive-model-router')),
     agents: AGENT_FILES.every((f) => fs.existsSync(path.join(P.AGENTS_DIR, f))),
     hook: hookWired,
     plugin: pluginRegistered(),
     gateway: fs.existsSync(P.GATEWAY_DIR),
+    autostartOnDisk,
   };
 }
 
-// Wire the tagline/routing line into every detected harness OTHER than
-// Claude Code, using whatever tagline_install.js already knows how to write
-// (its TARGETS list). Harnesses detected but not in TARGETS are reported,
-// never guessed at with an invented mechanism. Read from `detected` (already
-// computed by the caller) so this and the printed summary never disagree.
+// Wire the TAGLINE into every detected harness OTHER than Claude Code, using whatever
+// tagline_install.js already knows how to write (its TARGETS list). Harnesses detected
+// but not in TARGETS are reported, never guessed at with an invented mechanism. Read from
+// `detected` (already computed by the caller) so this and the printed summary never
+// disagree.
+//
+// It is a TAGLINE and nothing else. This used to be described as the "tagline/routing"
+// line, which read as though wiring it made the harness route through Cheaper — it does
+// not, and cannot: the line is a one-shot `cheaper peek --tagline` that REPORTS what
+// adaptive routing would have saved. Routing happens only when a tool's API calls go
+// through the gateway. Saying "tagline/routing" here is the same class of defect as a
+// green tick for an unverified start, so the slash is gone from every message below.
 function installEverywhereElse(detected) {
   const others = detected.filter((h) => !CLAUDE_HARNESS_KEYS.has(h.key));
   const summary = [];
@@ -330,9 +375,10 @@ async function run(argv) {
   console.log(c.amber('\n  Cheaper installer') + c.dim('  — adaptive Claude model routing\n'));
 
   // --harness <key> targeting a NON-Claude tool: wire just that one harness's
-  // tagline/routing line (whatever tagline_install.js knows how to write) and
-  // stop. Claude's component set (skill/agents/hook/gateway/plugin/cli) has
-  // no meaning for another harness, so it's never invoked here.
+  // tagline (whatever tagline_install.js knows how to write) and stop. It wires a
+  // savings LINE, not routing — see installEverywhereElse. Claude's component set
+  // (skill/agents/hook/gateway/plugin/cli/autostart) has no meaning for another
+  // harness, so it's never invoked here.
   if (harnessFlag && !CLAUDE_HARNESS_KEYS.has(harnessFlag)) {
     if (!TAGLINE_HARNESS_KEYS.has(harnessFlag)) {
       console.log(c.red(`  No adapter yet for harness "${harnessFlag}".`) +
@@ -411,6 +457,12 @@ async function run(argv) {
   // did not do what was asked, so it must not report success.
   if (results.some((r) => !r.ok)) process.exitCode = 1;
   chosen = results.map((r) => r.key); // reflect plugin-supersede filtering for the notes below
+  // The rows that actually SUCCEEDED. `chosen` above is every row, ok:false included, so
+  // `chosen.includes('gateway')` was true even when installGateway() threw — and the
+  // autostart offer at the bottom of this function then asked the user to register a login
+  // entry for a gateway that is not on disk. Offering to supervise a component that failed
+  // to install is the same class of claim as a green tick on an unverified start.
+  const installed = new Set(results.filter((r) => r.ok).map((r) => r.key));
   console.log(c.dim('\n  Done. Notes:'));
   if (chosen.includes('gateway'))
     console.log(c.dim('   • Start the gateway:  ') + 'cheaper gateway start' +
@@ -437,7 +489,7 @@ async function run(argv) {
 
     const elseResults = installEverywhereElse(detected);
     if (elseResults.length) {
-      console.log(c.amber('\n  Wiring the Cheaper.app savings line to other detected harnesses:'));
+      console.log(c.amber('\n  Wiring the Cheaper.app savings TAGLINE to other detected harnesses:'));
       for (const r of elseResults) {
         if (r.action === 'wired') console.log('  ' + c.green('✓') + ' ' + r.label.padEnd(22) + c.dim('tagline wired'));
         else if (r.action === 'no-adapter') console.log('  ' + c.dim('–') + ' ' + r.label.padEnd(22) + c.dim('detected, no adapter yet'));
@@ -445,8 +497,33 @@ async function run(argv) {
         else console.log('  ' + c.red('✗') + ' ' + r.label.padEnd(22) + c.red(r.error || 'failed'));
       }
     }
-    console.log(c.dim('\n  Summary: Claude Code -> full component install; other detected harnesses -> tagline/routing'));
-    console.log(c.dim('  line only (via `cheaper peek --tagline`). Target one harness with `cheaper install --harness <key>`.\n'));
+    // Say plainly what was NOT done. The old wording ("tagline/routing line only") let a
+    // reader finish this install believing their other harnesses now route through
+    // Cheaper. They do not: a tagline reports savings after the fact and moves no call.
+    // The one command that actually configures routing is printed, so the gap is closed
+    // in the same breath as it is admitted.
+    console.log(c.dim('\n  Summary: Claude Code -> full component install; other detected harnesses -> the'));
+    console.log(c.dim('  Cheaper.app savings TAGLINE only (via `cheaper peek --tagline`).'));
+    console.log('  ' + c.amber('No ROUTING was configured for them') +
+      c.dim(' — a tagline reports what routing would have saved; it does not route a single call.'));
+    console.log(c.dim('  Routing is the gateway. Start it, then point the tool at it:'));
+    console.log('    cheaper gateway start' + c.dim('   then   ') +
+      'export ANTHROPIC_BASE_URL=http://localhost:' + require('./gateway').DEFAULT_PORT);
+    console.log(c.dim('  Target one harness with `cheaper install --harness <key>`.\n'));
+  }
+
+  // THE ONE-TIME AUTOSTART OFFER, last of all.
+  //
+  // It is a no-op unless BOTH stdin and stdout are TTYs (the openurl.js:22-24 guard), it
+  // defaults to no, Enter is no, and the answer is persisted to ~/.cheaper/autostart.json
+  // so this is asked at most once per machine. It is also skipped entirely unless a
+  // gateway was actually installed — offering to autostart a service the user did not
+  // install is noise, and noise is how a prompt becomes a nag.
+  //
+  // `installed`, not `chosen`: a gateway row that THREW must not reach this offer.
+  if (installed.has('gateway')) {
+    try { await require('./autostart').offerOnce(); }
+    catch (e) { console.log(c.dim(`  (skipped the autostart question: ${e.message})`)); }
   }
 }
 

@@ -168,6 +168,14 @@ function realizedFromRecords(records) {
   // 'assistant', so it never fires. Gating on source alone would zero out 7 of 8
   // harnesses — so trust sub-agent attribution when this session carries any, and
   // otherwise fall back to "every call not on the baseline model".
+  //
+  // THE FALLBACK IS A COST DIFFERENCE, NOT AN ATTRIBUTION. "every call not on the baseline
+  // model" says nothing about WHO picked those models. Codex records are hardcoded
+  // source:'user' (adapters.js::collectCodex), so the fallback fires on every Codex session
+  // there has ever been, and buildTagline then rendered past-tense credit — "saved … by
+  // running X instead of Y" — for a chat in which Cheaper routed nothing at all. The
+  // eligible set is still the right set of rows to price; `routedAware` travels out with the
+  // result so the RENDERER can state the difference without claiming the cause.
   const routedAware = priced.some((r) => r.source === 'subagent');
   const eligible = routedAware ? priced.filter((r) => r.source === 'subagent')
                                : priced.filter((r) => idOf(r) !== ceilingModel);
@@ -242,6 +250,10 @@ function realizedFromRecords(records) {
   // them is understating the session. Publish the coverage so it can be stated.
   const examined = (records || []).length;
   return { ceilingModel, topModel, dollarsSaved: net, gross, extraCost, wouldHave,
+           // Established, not assumed: true ONLY when this chat carried rows tagged as
+           // sub-agent work, which is the sole transcript evidence that a model choice was
+           // delegated rather than made by the harness itself.
+           routingAttributed: routedAware,
            savedPct: wouldHave > 0 ? Math.round((net / wouldHave) * 100) : 0,
            tokensCredited, creditedCalls, offsetCalls, savedByModel, extraByModel,
            totalSpent, totalTokens, calls: priced.length,
@@ -295,6 +307,10 @@ function fromGateway(summary) {
   };
   return {
     population,
+    // The gateway is the routing decision. Its `downgraded_by_model` counts rows where the
+    // model SERVED differed from the model REQUESTED — a substitution only the gateway can
+    // have performed — so credit here is measured, not inferred from a model mix.
+    routingAttributed: true,
     ceilingModel: summary.baseline_model,
     topModel: summary.top_model || summary.baseline_model,
     dollarsSaved: dol.saved || 0,
@@ -314,14 +330,61 @@ function fromGateway(summary) {
   };
 }
 
-// Best-effort GET to the local gateway for exact, session-scoped metrics. Resolves
-// to the parsed summary or null. Never throws; short timeout so a stopped gateway
-// (the common case) costs us almost nothing before we fall back to the estimate.
+// HOW THE GATEWAY PROBE ENDED — five facts that must never collapse into one.
+//
+// This used to resolve a bare `null` for every non-answer, so "nothing is listening on
+// that port", "it answered but rejected our token", "it was too slow" and "we never asked"
+// were byte-identical to the caller. That single conflation is what let an UNREACHABLE
+// gateway print a savings line AND a dashboard link with no warning at all, while a merely
+// STALE one — the strictly less broken case — got an explicit warning.
+//
+// NOT_PROBED is the one that matters most: it is not evidence the gateway is down, so it
+// must never produce the "not reachable" notice, and it is not evidence the gateway is up,
+// so it must not produce the "See logs" link either. TIMEOUT is the same shape of unknown:
+// a gateway busy for longer than the budget is alive, and telling that user to run
+// `cheaper gateway start` would be advice for a problem they do not have.
+const PROBE = {
+  NOT_PROBED: 'not-probed',   // no session id — the request was never made at all
+  ANSWERED: 'answered',       // HTTP 200 with a parseable JSON summary
+  REJECTED: 'rejected',       // a listener answered with a non-200 (401 = wrong/absent token)
+  MALFORMED: 'malformed',     // a listener answered 200 with a body we could not parse
+  TIMEOUT: 'timeout',         // no answer inside the budget — alive-but-slow is indistinguishable
+  UNREACHABLE: 'unreachable', // socket error (ECONNREFUSED) — nothing is serving that port
+};
+
+// Something spoke HTTP on the port. Deliberately WEAKER than ANSWERED: a 401, or a body we
+// could not parse, still proves a live listener, and that is the entire claim the "See logs"
+// link makes — that the page resolves, not that /metrics was readable. Requiring ANSWERED
+// here would hide the dashboard from exactly the users whose gateway is up but whose token
+// file is stale, which is the population most in need of it.
+function gatewayIsListening(outcome) {
+  return outcome === PROBE.ANSWERED || outcome === PROBE.REJECTED || outcome === PROBE.MALFORMED;
+}
+
+// One reader for the port, so a notice, a link and a request can never name different ones.
+//
+// It resolves through freshness.activeGatewayPort() — pid file, then the autostart record,
+// then CHEAPER_PORT, then 8787 — rather than reading the environment here. THIS line is the
+// one place a false alarm is guaranteed to be read: it prints at the end of every chat.
+// Hardcoding the default made gatewayFallbackNotice tell a user whose gateway is healthy on
+// 8788 (where autostart.pickPort() moves it whenever 8787 is busy, without their shell ever
+// hearing about it) that no gateway was reachable and that they should start one — on every
+// single chat, forever. Required lazily so the Stop hook pays for it only when a tagline is
+// actually being built.
+function gatewayPort() { return require('../freshness').activeGatewayPort(); }
+
+// Best-effort GET to the local gateway for exact, session-scoped metrics. Resolves to
+// `{ summary, outcome, status, timeoutMs }` — never throws, never rejects. `summary` is the
+// parsed body or null exactly as before; `outcome` is the PROBE fact the caller needs to
+// tell "measured" from "unmeasured" from "unknown". Short timeout so a stopped gateway (the
+// common case) costs us almost nothing before we fall back to the estimate.
 function fetchGatewaySession(sessionId, timeoutMs = 600) {
   return new Promise((resolve) => {
-    const port = process.env.CHEAPER_PORT || '8787';
+    const port = gatewayPort();
     let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const finish = (summary, outcome, status) => {
+      if (!done) { done = true; resolve({ summary, outcome, status: status || null, timeoutMs }); }
+    };
     try {
       const req = http.get({
         host: '127.0.0.1', port,
@@ -333,14 +396,20 @@ function fetchGatewaySession(sessionId, timeoutMs = 600) {
         headers: require('../token').tokenHeaders(),
         timeout: timeoutMs,
       }, (res) => {
-        if (res.statusCode !== 200) { res.resume(); return finish(null); }
+        if (res.statusCode !== 200) { res.resume(); return finish(null, PROBE.REJECTED, res.statusCode); }
         let data = '';
         res.on('data', (d) => { data += d; if (data.length > 4e6) req.destroy(); });
-        res.on('end', () => { try { finish(JSON.parse(data)); } catch { finish(null); } });
+        res.on('end', () => {
+          // A 200 we cannot parse is NOT the same as no gateway: something is serving the
+          // port. Reporting it as UNREACHABLE would print "start it with: cheaper gateway
+          // start" at a process that is already running.
+          try { finish(JSON.parse(data), PROBE.ANSWERED, 200); }
+          catch { finish(null, PROBE.MALFORMED, 200); }
+        });
       });
-      req.on('error', () => finish(null));
-      req.on('timeout', () => { req.destroy(); finish(null); });
-    } catch { finish(null); }
+      req.on('error', () => finish(null, PROBE.UNREACHABLE));
+      req.on('timeout', () => { req.destroy(); finish(null, PROBE.TIMEOUT); });
+    } catch { finish(null, PROBE.UNREACHABLE); }
   });
 }
 
@@ -386,9 +455,28 @@ function tint(str, kind, format) {
 
 // The local dashboard URL and the "See logs" suffix appended at the very END of the
 // line — the charts / historical / per-tool / lifetime view (served by the gateway).
-function dashboardUrl(o) {
-  return (o && o.logsUrl) || process.env.CHEAPER_DASHBOARD_URL ||
-    `http://localhost:${process.env.CHEAPER_PORT || '8787'}/dashboard`;
+//
+// PRINTED ONLY WHEN SOMETHING IS ACTUALLY LISTENING. This used to return the localhost URL
+// unconditionally, and logsSuffix appended it guarded only by `if (!url)` — i.e. guarded by
+// nothing, since the string was a constant that could not be falsy. Nothing anywhere checked
+// the gateway was up. That is the user's bug report verbatim: the product printed a link,
+// they clicked it, and the browser said ERR_CONNECTION_REFUSED.
+//
+// The gate REUSES the probe computeSavings already performed. Issuing a second GET here
+// would double the tagline's only network cost, on a Stop hook that runs on every assistant
+// turn against a 15 s SIGTERM budget — and would still be racing the same gateway.
+//
+// An operator-declared URL (opts.logsUrl / CHEAPER_DASHBOARD_URL) is exempt: it may name a
+// host this probe never touched, so gating it on 127.0.0.1:CHEAPER_PORT would suppress a
+// link that works. That URL is the operator's assertion; the localhost default is OUR
+// assumption, and only our assumption needs evidence.
+function dashboardUrl(o, probe) {
+  const declared = (o && o.logsUrl) || process.env.CHEAPER_DASHBOARD_URL;
+  if (declared) return declared;
+  // NOT_PROBED and TIMEOUT land here too: "we could not determine" prints no link, because
+  // a link is a claim that the page resolves and we have no evidence that it does.
+  if (!gatewayIsListening(probe && probe.outcome)) return '';
+  return `http://localhost:${gatewayPort()}/dashboard`;
 }
 function logsSuffix(format, url) {
   if (!url) return '';
@@ -482,6 +570,18 @@ function buildTagline(r, brand, format) {
     shown.push(`${rest} other model${rest === 1 ? '' : 's'}`);
   }
 
+  // DID ANYTHING ESTABLISH THAT *CHEAPER* CHOSE THESE MODELS? The dollar figure is a
+  // difference between two model prices and is true either way; "Cheaper.app saved" is a
+  // claim about causation, and only a producer that checked can support it.
+  //
+  // FAILS CLOSED. Absent field means the producer did not establish attribution, and an
+  // unestablished cause must not render as an established one — the same rule the rest of
+  // this file applies to unpriceable rows and withheld counterfactuals. Both producers in
+  // this module set the field explicitly (realizedFromRecords from `routedAware`, fromGateway
+  // from the fact that a substitution is what it measures), so `undefined` can only reach
+  // here from a shape nobody vouched for.
+  const attributed = r.routingAttributed === true;
+
   const realSaving = r.dollarsSaved >= SHOW_MIN_USD && r.creditedCalls > 0 &&
     r.tokensCredited > 0 && shown.length > 0 && r.ceilingModel;
   if (realSaving) {
@@ -493,15 +593,31 @@ function buildTagline(r, brand, format) {
     const offset = off.length
       ? ` — after ${money(r.extraCost)} more on ${joinAnd(off)}`
       : '';
-    return `${brand} saved ${tint(amt, 'save', format)} and ${fmtTokens(r.tokensCredited)} tokens ` +
-      `by running ${joinAnd(shown)} instead of ${r.ceilingModel}${offset}, at list API rates.${spend}`;
+    if (attributed) {
+      return `${brand} saved ${tint(amt, 'save', format)} and ${fmtTokens(r.tokensCredited)} tokens ` +
+        `by running ${joinAnd(shown)} instead of ${r.ceilingModel}${offset}, at list API rates.${spend}`;
+    }
+    // SAME NUMBER, NO CREDIT. Dropping the figure would be its own dishonesty — the cost
+    // difference is real and the reader is entitled to it. What changes is the verb: the
+    // sentence describes the session's model mix in the past tense and states, in the line
+    // itself, that nothing here ties that mix to Cheaper. "saved … by running" is removed
+    // entirely rather than hedged, because a hedge next to a brand name still reads as a
+    // claim.
+    return `${brand}: this chat ran ${joinAnd(shown)} against a ceiling of ${r.ceilingModel} — ` +
+      `${tint(amt, 'save', format)} and ${fmtTokens(r.tokensCredited)} tokens under what ` +
+      `${r.ceilingModel} would have cost for that work${offset}, at list API rates. ` +
+      `No call in this chat is tagged as routed work, so Cheaper claims no credit for it.${spend}`;
   }
 
   // Routing cost MORE than the baseline would have. Say so plainly rather than
   // printing a cheerful "no saving warranted" line over a real negative.
   if (r.dollarsSaved <= -SHOW_MIN_USD && r.ceilingModel &&
       Object.keys(r.extraByModel || {}).length) {
-    return `${brand} claims no saving on this chat — routed work cost ` +
+    // The mirror image of the credit problem: unattributed, "routed work cost $X more" blames
+    // Cheaper for a model the harness picked. Wrong in the user's favour is still wrong, and
+    // the same evidence is missing, so the same noun phrase has to go.
+    const blamed = attributed ? 'routed work' : 'the models this chat used';
+    return `${brand} claims no saving on this chat — ${blamed} cost ` +
       `${money(-r.dollarsSaved)} more than ${r.ceilingModel} would have.${spend}`;
   }
 
@@ -567,10 +683,58 @@ function emitEvents(records, opts) {
   } catch { return null; }
 }
 
-async function computeSavings(opts, preRecords) {
+// The stderr notice that must accompany a fallback to the transcript estimate.
+//
+// SYMMETRY IS THE WHOLE POINT. A gateway on an OLDER BUILD already warned here; an
+// UNREACHABLE one said nothing at all — so the one case where routing definitively did NOT
+// happen was also the only case with no warning, and the user read "Cheaper.app saved $12"
+// off a dead gateway and reasonably concluded routing was working. Same channel, same
+// CHEAPER_QUIET gate, same "here is the fix" shape as the stale-build warning.
+//
+// Three sentences for three different facts, because one "not reachable" would misdiagnose
+// two of them: a refused socket is proof nothing is serving the port, a timeout is not
+// (alive-and-slow looks identical from here), and a non-200 is a live gateway we were not
+// allowed to read — telling that user to run `gateway start` sends them after a process that
+// is already running. ANSWERED and NOT_PROBED return '': one has nothing to report, and the
+// other never asked and must not imply it did.
+function gatewayFallbackNotice(probe) {
+  const at = ':' + gatewayPort();
+  const tail = ' — this figure is a local estimate, not measured routing.';
+  switch (probe && probe.outcome) {
+    case PROBE.UNREACHABLE:
+      return `cheaper: gateway not reachable on ${at}${tail} Start it with: cheaper gateway start`;
+    case PROBE.TIMEOUT:
+      return `cheaper: gateway on ${at} did not answer within ${probe.timeoutMs} ms${tail}`;
+    case PROBE.REJECTED:
+      return `cheaper: gateway on ${at} answered HTTP ${probe.status}, so its measurements `
+        + `could not be read${tail} Fix with: cheaper gateway restart`;
+    case PROBE.MALFORMED:
+      return `cheaper: gateway on ${at} answered with a body this build could not parse${tail}`
+        + ' Fix with: cheaper gateway restart';
+    default:
+      return '';
+  }
+}
+
+// `probeOut`, when supplied, receives HOW the gateway probe ended. An out-parameter rather
+// than a wrapped return value because computeSavings' return shape is this module's public
+// contract (buildTagline, the ledger and --json all read it), and rather than a second GET
+// from run() because that is precisely the duplicated request the "See logs" gate must not
+// cost.
+async function computeSavings(opts, preRecords, probeOut) {
   const sid = opts.session || (opts.transcript ? sessionStem(opts.transcript) : null);
+  // Seeded BEFORE any early return, so a caller can never read an absent or stale probe as
+  // "answered". No session id means the request was never made — neither evidence the
+  // gateway is up nor evidence it is down.
+  const probe = { outcome: PROBE.NOT_PROBED, status: null, timeoutMs: null, port: gatewayPort() };
+  if (probeOut) Object.assign(probeOut, probe);
   if (sid) {
-    const summary = await fetchGatewaySession(sid);
+    const probed = await fetchGatewaySession(sid);
+    probe.outcome = probed.outcome;
+    probe.status = probed.status;
+    probe.timeoutMs = probed.timeoutMs;
+    if (probeOut) Object.assign(probeOut, probe);
+    const summary = probed.summary;
     if (summary && !gatewayIsCurrent(summary)) {
       // Prefer the transcript estimate — which is at least computed by THIS build and
       // is honestly marked "about" — over an unhedged number from unknown-age code.
@@ -601,6 +765,12 @@ async function computeSavings(opts, preRecords) {
       // with no rows — or with no priceable rows — yields null and falls through here.
       if (g) return g; // exact, real, and SIGNED — no "about " qualifier
     }
+    // Reached only when the gateway did NOT supply the number below. Silent for ANSWERED
+    // (the stale-build branch above has already spoken, or the summary simply had no
+    // priceable row for this chat — a live gateway that watched the chat and found nothing
+    // to price is not a routing failure to warn about).
+    const notice = gatewayFallbackNotice(probe);
+    if (notice && !process.env.CHEAPER_QUIET) console.error(notice);
   }
   const records = preRecords || collectSessionRecords(opts).records;
   return realizedFromRecords(records); // may be null
@@ -629,7 +799,11 @@ async function run(opts = {}) {
   // (the storage append is 4.4 ms; the scan is not), so scanning twice — once to price
   // and once to emit — would double the hook's cost against a 15 s SIGTERM budget.
   const { records } = collectSessionRecords(o);
-  const result = await computeSavings(o, records);
+  // ONE probe, two consumers: computeSavings elects the number from it, and the "See logs"
+  // link is gated on it. A second GET here would double the tagline's network cost for a
+  // fact the first request already established.
+  const probe = {};
+  const result = await computeSavings(o, records, probe);
   const emitted = emitEvents(records, o);
   const line = buildTagline(result, brandFor(o.format), o.format);
   // Record THIS chat's realized saving in the lifetime ledger, keyed by session id so
@@ -655,8 +829,10 @@ async function run(opts = {}) {
   } catch { tot = null; }
   const lifetime = lifetimeSentence(tot, o.format);
   let out = line ? line + lifetime : lifetime.trimStart();
-  // A "See logs" link to the local dashboard at the very end of every rendered line.
-  if (out) out += logsSuffix(o.format, dashboardUrl(o));
+  // A "See logs" link to the local dashboard at the end of every rendered line — but only
+  // when the probe found something listening. An unreachable gateway now prints no link
+  // rather than one that resolves to ERR_CONNECTION_REFUSED.
+  if (out) out += logsSuffix(o.format, dashboardUrl(o, probe));
   if (o.json) {
     console.log(JSON.stringify({
       // Provenance ships WITH the numbers. A rate stale by months is otherwise
@@ -667,6 +843,11 @@ async function run(opts = {}) {
       full: out,            // per-chat line + lifetime sentence — what actually prints
       lifetime: tot || null,
       source: result ? (result.exact ? 'gateway' : 'estimate') : 'none',
+      // WHY the source is what it is, machine-readably. `source: 'estimate'` alone cannot
+      // distinguish "the gateway measured nothing worth reporting" from "the gateway is
+      // dead", and that ambiguity is what let a dead gateway read as a working one.
+      gateway: { probe: probe.outcome, port: probe.port, status: probe.status,
+                 listening: gatewayIsListening(probe.outcome) },
       // What the per-call store actually wrote this run. `written: 0` with
       // `reason: 'no-op'` is the healthy steady state on a long chat, not a failure.
       events: emitted || null,
@@ -678,4 +859,8 @@ async function run(opts = {}) {
 }
 
 module.exports = { run, computeSavings, realizedFromRecords, fromGateway, buildTagline, money,
-                   gatewayIsCurrent };
+                   gatewayIsCurrent,
+                   // Exported so the probe's five outcomes can be asserted on directly. A
+                   // notice that fires for the wrong outcome sends a user after the wrong
+                   // fix, and that is not visible from the rendered line at all.
+                   PROBE, gatewayIsListening, gatewayFallbackNotice, dashboardUrl };

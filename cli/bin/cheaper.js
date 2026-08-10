@@ -11,17 +11,35 @@ const HELP = `
     cheaper <command> [options]
 
   ${c.bold('Commands')}
-    install [skill agents hook gateway plugin] [--all]
+    install [skill agents hook gateway plugin cli autostart] [--all]
                         Install components into your Claude environment.
                         --all / no args = skill+agents+hook+gateway (the
                         reliable set). "plugin" is a managed bundle of
                         skill+agents+hook — install it instead of those three.
+                        "autostart" is NOT in --all and never will be: a login
+                        daemon is opt-in only. Name it, or use "autostart enable".
     uninstall [components] [--purge]
                         Remove installed components (default: all). --purge
                         also deletes ~/.cheaper (including gateway metrics).
-    gateway start       Start the routing gateway (proxy + monitor).
+    gateway start       Start the routing gateway (proxy + monitor).  --port N
     gateway stop        Stop the gateway.
+    gateway restart     Stop it, WAIT for the port to actually come free, then start
+                        a fresh process. The fix for a stale running build. Exits
+                        non-zero saying why rather than reporting a start it could
+                        not make.  --port N
     gateway status      Is the gateway running?
+    gateway serve       Run it in the FOREGROUND and exit with its status — this is
+                        what launchd/systemd supervise. Installs no deps.  --port N
+    gateway prepare     Install the gateway's Python deps and refresh its files,
+                        once, before "serve". Never run this from a service unit.
+    autostart enable    OPT IN: register a per-user login entry that runs
+                        "cheaper gateway serve" and restarts it if it crashes.
+                        Never enabled by "cheaper install" or --all. Prints the
+                        exact file it writes and the exact command to remove it.
+                        --port N
+    autostart disable   Deregister that entry AND delete the file it wrote.
+    autostart status    Registered? Switched off by you in Login Items? Do the
+                        node/python paths baked in at enable time still exist?
     dashboard           Open the live localhost dashboard in your browser
                         (starts the gateway if needed). launch = Dashboard.
                         --json              the same data, for scripts
@@ -145,6 +163,12 @@ async function main() {
       return require('../src/uninstall').run(rest);
     case 'gateway':
       return require('../src/gateway').run(rest);
+    // A top-level command, not a `gateway` subcommand, deliberately: `gateway <x>` acts
+    // on a process that exists right now, while `autostart <x>` edits a persistent
+    // registration that outlives every process here. Filing "register a login daemon"
+    // under the same verb as "stop the server" is how someone runs it by accident.
+    case 'autostart':
+      return require('../src/autostart').run(rest);
     // Every localhost view has a print equivalent. The NO-FLAG default is unchanged in
     // all four cases — it opens the browser, which is muscle memory — and `--terminal`
     // / `--json` are strictly additive.
@@ -188,11 +212,20 @@ async function main() {
       const s = require('../src/install').status();
       const yn = (b) => (b ? c.green('installed') : c.dim('not installed'));
       console.log('');
-      console.log('  skill    ' + yn(s.skill));
-      console.log('  agents   ' + yn(s.agents));
-      console.log('  hook     ' + yn(s.hook));
-      console.log('  plugin   ' + (s.plugin ? c.green('registered + enabled') : c.dim('not installed')));
-      console.log('  gateway  ' + yn(s.gateway));
+      // Label column widened from 9 to 10 so `autostart` — the longest name here — still
+      // has a gap before its value instead of being glued to it.
+      console.log('  skill     ' + yn(s.skill));
+      console.log('  agents    ' + yn(s.agents));
+      console.log('  hook      ' + yn(s.hook));
+      console.log('  plugin    ' + (s.plugin ? c.green('registered + enabled') : c.dim('not installed')));
+      console.log('  gateway   ' + yn(s.gateway));
+      // Filesystem evidence only (install.js::status explains why). It says an ENTRY
+      // EXISTS — not that launchd/systemd has it loaded, and not that the user has left
+      // it switched on — so it names the command that can answer that instead of
+      // implying this line already did.
+      console.log('  autostart ' + (s.autostartOnDisk
+        ? c.green('entry present') + c.dim('  (`cheaper autostart status` for whether it is actually live)')
+        : c.dim('not enabled')));
       require('../src/gateway').status();
       // Existence is not freshness. Installed-but-stale and running-but-stale both
       // look identical to the checks above, and both silently produce wrong numbers.
