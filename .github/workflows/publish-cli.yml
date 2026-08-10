@@ -36,6 +36,25 @@ jobs:
       HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: A release tag with no NPM_TOKEN is a FAILED release, not a skipped step
+        # Every step below is gated on env.HAS_NPM, which is false when the NPM_TOKEN
+        # secret is absent or empty. GitHub records a skipped step as neither success nor
+        # failure, so the JOB still reported "Publish cheaperapp to npm: success" — a
+        # green tick, on a release tag, having published nothing at all.
+        #
+        # That is what happened on v0.4.1 (run 31359357043): the whole test suite passed,
+        # the publish job went green, and npm stayed on 0.4.0. The only way to notice was
+        # to query the registry afterwards and disbelieve the tick.
+        #
+        # This job only runs on a tag (see the job-level `if`), and a tag means "publish
+        # this version". If we cannot, that is a failure — the gate exists so that
+        # `… && announce-release` cannot fire on a release that never left the building.
+        if: env.HAS_NPM != 'true'
+        run: |
+          echo "::error::NPM_TOKEN is not configured for this repository, so ${GITHUB_REF_NAME} was NOT published to npm. Every publish step was skipped and this job would otherwise have reported success."
+          echo "Add an npm automation token as the NPM_TOKEN repository secret, then re-push the tag:"
+          echo "  git push origin :refs/tags/${GITHUB_REF_NAME} && git push origin ${GITHUB_REF_NAME}"
+          exit 1
       - uses: actions/setup-node@v4
         if: env.HAS_NPM == 'true'
         with:
