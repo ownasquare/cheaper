@@ -121,9 +121,21 @@ echo "=== 10. desktop with no matching installer -> ERROR, not a benign skip ===
 fresh_workspace
 mkdir -p "$WS/cheaper-desktop/dist"
 scenario "a missing installer fails the run" 1 "MISSING is not 'nothing to do'" desktop
-scenario "and it names the stale key" 1 "cheaper-windows-x64.exe" desktop
+# Assert on a LOCAL-owned key. This previously grepped for cheaper-windows-x64.exe, which
+# went vacuous the moment CI-owned keys started being listed in their own line: the string
+# was still present, just no longer as a MISSING key. A test that passes for a reason it
+# was not written for is worse than no test.
+scenario "and it names the missing LOCAL key" 1 "cheaper-macos-arm64.dmg" desktop
 
-echo "=== 11. --allow-partial-platforms accepts it, and still names the keys ==="
+echo "=== 11. CI-owned keys are reported, never counted as missing ==="
+fresh_workspace
+mkdir -p "$WS/cheaper-desktop/dist"
+scenario "ci-owned keys are named as not-ours" 1 "not this step's to upload" desktop
+# The MISSING count must be 2 — the two macOS keys — not 9. If CI-owned keys leaked into
+# it, a mac-only workstation would fail with seven phantom blockers it can do nothing about.
+scenario "only the 2 local keys count as MISSING" 1 "2 MISSING from dist/" desktop
+
+echo "=== 12. --allow-partial-platforms accepts it, and still names the keys ==="
 fresh_workspace
 mkdir -p "$WS/cheaper-desktop/dist"
 scenario "authorised partial release exits 0" 0 "PARTIAL RELEASE" desktop --allow-partial-platforms

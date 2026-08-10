@@ -1068,16 +1068,42 @@ step_desktop(){
     return
   fi
   say "cheaper-desktop/package.json version: $desktopv — installers must match this to be uploaded"
-  local uploaded=0 refused=0 failed=0 skipped=0 rc skipped_keys=""
+  local uploaded=0 refused=0 failed=0 skipped=0 rc skipped_keys="" ci_keys=""
+  # Third field: WHO owns this key.
+  #   local — built on this machine (`npm run dist:mac`) and uploaded from here. macOS
+  #           only, because the signing identity lives in this Keychain.
+  #   ci    — built and uploaded by the 3-OS matrix in
+  #           cheaper-desktop/.github/workflows/release.yml on a v* tag. Windows needs a
+  #           Windows runner; Linux needs real fpm/AppImage tooling (the one attempt to
+  #           build Linux on Apple Silicon produced a 96-byte empty .deb).
+  #
+  # Without this distinction the step could not tell "this platform's artifact should be
+  # here and isn't" from "this platform has never been built here and never will be", and
+  # a mac-only workstation got four MISSING errors on every single run. An error that
+  # fires every time is an error nobody reads — which is how the genuinely stale Windows
+  # and Linux keys stayed unnoticed. `ci` keys are REPORTED, never counted as missing;
+  # the release workflow fails its own job if it cannot update them.
   for spec in \
-    '*-arm64.dmg|cheaper-macos-arm64.dmg' \
-    '*-x64.dmg|cheaper-macos-x64.dmg' \
-    '*.exe|cheaper-windows-x64.exe' \
-    '*-amd64.deb|cheaper-linux-amd64.deb' \
-    '*-x86_64.rpm|cheaper-linux-x86_64.rpm' \
-    '*-x86_64.AppImage|cheaper-linux-x86_64.AppImage'
+    '*-arm64.dmg|cheaper-macos-arm64.dmg|local' \
+    '*-x64.dmg|cheaper-macos-x64.dmg|local' \
+    '*.exe|cheaper-windows-x64.exe|ci' \
+    '*-amd64.deb|cheaper-linux-amd64.deb|ci' \
+    '*-x86_64.rpm|cheaper-linux-x86_64.rpm|ci' \
+    '*-x86_64.AppImage|cheaper-linux-x86_64.AppImage|ci' \
+    '*-arm64.deb|cheaper-linux-arm64.deb|ci' \
+    '*-aarch64.rpm|cheaper-linux-arm64.rpm|ci' \
+    '*-arm64.AppImage|cheaper-linux-arm64.AppImage|ci'
   do
-    local glob="${spec%%|*}" key="${spec#*|}"
+    local glob="${spec%%|*}" rest="${spec#*|}"
+    local key="${rest%%|*}" owner="${rest#*|}"
+    # A ci-owned key with nothing in dist/ is the normal case on a workstation, and is
+    # reported rather than counted. If an artifact IS present it is still version-checked
+    # and uploaded — a locally-built Linux package is not ignored just because CI usually
+    # makes it.
+    if [ "$owner" = ci ] && [ -z "$(find "$DESKTOP/dist" -maxdepth 1 -name "$glob" 2>/dev/null)" ]; then
+      ci_keys="$ci_keys${ci_keys:+, }$key"
+      continue
+    fi
     put_r2 "$glob" "$key" "$desktopv" "cheaper-desktop/package.json"; rc=$?
     case $rc in
       0) uploaded=$((uploaded+1)) ;;
@@ -1090,6 +1116,12 @@ step_desktop(){
     esac
   done
   hr
+  # State the CI-owned keys this run did not touch, every time, even on a fully green
+  # run. They are not failures — but "this step said nothing about Windows" must never be
+  # readable as "Windows is up to date".
+  if [ -n "$ci_keys" ]; then
+    say "not this step's to upload (built and pushed by the release workflow on a v$desktopv tag): $ci_keys"
+  fi
   # A MISSING artifact is not "nothing to do", and warning about it was the bug.
   #
   # Every key in the list above is a STABLE R2 key — cheaper-windows-x64.exe is the same
