@@ -31,3 +31,9 @@ docs/handoffs/
 .playwright-shots/
 .playwright-report/
 test-results/
+
+# Throwaway git fixtures created by scripts/test-deploy-preflight.sh. They are real
+# repos with their own bare remotes, and while the test runs they would otherwise show
+# up as untracked work in THIS repo — which the deploy pre-flight (correctly) refuses on.
+scripts/.preflight-testws/
+scripts/.preflight-pusher/
