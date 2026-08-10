@@ -116,6 +116,16 @@
 #   All three repos are checked even for a single-step run, because the surfaces are
 #   coupled (desktop reads cli/package.json's version; the website advertises both).
 #   The `git` step itself is NOT gated — it is the tool that clears these blockages.
+#   The same pre-flight also requires that cheaper-app/CHANGELOG.md's FIRST '## ' heading
+#   names the exact version in cli/package.json. CHANGELOG.md is the single source of
+#   truth for cheaper-web/web/changelog.html, and on 2026-08-10 that page's newest entry
+#   was 0.3.0 and its intro asserted "the currently published CLI is cheaper@0.3.0" while
+#   npm and dl.cheaper.app both served 0.4.1 — two releases of a live page telling every
+#   visitor a false "current" version, because nothing had ever compared the two numbers.
+#   A changelog that names a DIFFERENT version and a changelog whose version cannot be
+#   determined at all (file missing, unreadable, or no parseable '## ' heading) are
+#   reported as different refusals: the first means write a new section, the second means
+#   the file's shape is broken and bumping a number would not help.
 #
 # PARTIAL RELEASES (desktop step):
 #   Every R2 destination is a STABLE key (cheaper-windows-x64.exe is the same object each
@@ -731,29 +741,140 @@ preflight_repo(){  # $1 dir  $2 friendly-name  -> 0 releasable, 1 NOT (reasons p
   return 0
 }
 
+# ---- pre-flight: does CHANGELOG.md describe the version about to ship? ------
+# WHY THIS EXISTS, and it is not hypothetical. cheaper-app/CHANGELOG.md is the SINGLE
+# SOURCE OF TRUTH for user-facing release notes: cheaper-web/web/changelog.html is built
+# from it, and that page's intro asserts in prose which CLI version is "currently
+# published". Nothing ever compared that file to the version this script actually ships.
+#
+# Observed live on 2026-08-10: changelog.html's newest entry was 0.3.0 and its intro read
+# "The currently published CLI is cheaper@0.3.0", while npm served cheaper@0.4.1 and
+# dl.cheaper.app served 0.4.1 installers. The site had been TWO WHOLE RELEASES stale, and
+# had been asserting a false "current" version to every visitor for both of them. Nothing
+# anywhere noticed, because nothing ever put the two numbers side by side — deploys ran
+# green through this very script the entire time it was true.
+#
+# It sits with the other release-readiness checks, not after them, for the same reason
+# they are here: it asks whether the artefacts that DESCRIBE a release agree with the
+# release. And it must run BEFORE the publishing steps, because once `cli` has published
+# the number, the changelog is already wrong in public and an npm version is immutable.
+#
+# The two failure modes are reported DIFFERENTLY on purpose. "The changelog names a
+# different version" tells the operator to write a new section. "I could not work out what
+# version the changelog names" tells them the file's shape is broken. Collapsing the second
+# into the first would send someone to bump a version in a file whose problem is not the
+# version — and collapsing either one into silence is the whole defect above.
+pf_changelog_note(){ PREFLIGHT_CHANGELOG_CONSEQUENCE="$1"; }
+PREFLIGHT_CHANGELOG_CONSEQUENCE=""
+
+preflight_changelog(){  # -> 0 releasable, 1 NOT (reason printed)
+  local file="$APP/CHANGELOG.md" cliver heading ver rc today
+  today="$(date +%Y-%m-%d 2>/dev/null)"
+
+  # The comparison needs BOTH numbers. read_version() returns the empty string for a
+  # missing file, malformed JSON, an absent "version" key and a non-string one alike — so
+  # an empty answer here means "I could not read what is shipping", which is a refusal.
+  # Treating it as a pass would make this gate silently vacuous exactly when the release
+  # identity is already broken.
+  cliver="$(read_version "$CLI/package.json")"
+  if [ -z "$cliver" ]; then
+    pf_bad "CHANGELOG: cannot determine which version CHANGELOG.md must describe — $CLI/package.json is missing, malformed, or has no \"version\" key, so there is no number to compare against. 'Cannot compare' is not 'they agree'."
+    pf_changelog_note "nothing has checked whether the release notes describe this release — the version being published could not be read out of cli/package.json at all"
+    return 1
+  fi
+
+  if [ ! -f "$file" ]; then
+    pf_bad "CHANGELOG: cannot determine which version CHANGELOG.md describes — $file DOES NOT EXIST. It is the source the published release notes are built from; with no file there is nothing to build them from and no way to tell what cheaper.app/changelog will keep advertising as current."
+    say "    fix: create $file, newest release first, starting with a '## $cliver — ${today:-YYYY-MM-DD}' section."
+    pf_changelog_note "cheaper.app/changelog will keep serving whatever it was last built from — there is no CHANGELOG.md naming $cliver at all"
+    return 1
+  fi
+  if [ ! -r "$file" ]; then
+    pf_bad "CHANGELOG: cannot determine which version CHANGELOG.md describes — $file exists but is NOT READABLE. Unreadable is not 'up to date'."
+    pf_changelog_note "cheaper.app/changelog was never checked against $cliver — CHANGELOG.md could not be read"
+    return 1
+  fi
+
+  # The newest release is BY DEFINITION the first '## ' heading (versions descend). grep
+  # exits 1 for "no such line" and >=1 for a read error; those are different answers and
+  # only one of them is about the file's contents.
+  heading="$(grep -m1 '^## ' "$file" 2>/dev/null)"; rc=$?
+  if [ "$rc" -gt 1 ]; then
+    pf_bad "CHANGELOG: cannot determine which version CHANGELOG.md describes — reading $file FAILED (grep exit $rc). A read failure is not an up-to-date changelog."
+    pf_changelog_note "cheaper.app/changelog was never checked against $cliver — CHANGELOG.md could not be read"
+    return 1
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$heading" ]; then
+    pf_bad "CHANGELOG: cannot determine which version CHANGELOG.md describes — $file contains NO '## ' heading at all, so it names no release whatsoever."
+    say "    fix: add a '## $cliver — ${today:-YYYY-MM-DD}' section at the TOP of $file."
+    pf_changelog_note "cheaper.app/changelog will be built from a file that names no release at all, so nothing there describes $cliver"
+    return 1
+  fi
+
+  ver="$(printf '%s\n' "$heading" | awk '{print $2}')"
+  if ! printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$'; then
+    # Deliberately NOT reported as a version mismatch. "## Unreleased" or a heading with
+    # the wrong dash would otherwise be printed as "newest entry is Unreleased but
+    # cli/package.json says 0.4.1", sending the operator to bump a version number when the
+    # actual defect is the heading's shape and no amount of bumping would fix it.
+    pf_bad "CHANGELOG: cannot determine which version CHANGELOG.md describes — its first '## ' heading is \"$heading\", whose version field ('${ver:-<empty>}') is not a version number."
+    say "    the heading shape is exactly:  ## <semver> — <YYYY-MM-DD>   (em dash, spaces around it)"
+    say "    this is NOT a version mismatch — do not bump anything. Fix the heading in $file first."
+    pf_changelog_note "cheaper.app/changelog will be built from a file whose newest heading names no readable version, so nothing confirms it describes $cliver"
+    return 1
+  fi
+
+  if [ "$ver" != "$cliver" ]; then
+    pf_bad "CHANGELOG: newest entry is $ver but cli/package.json says $cliver — the release notes do not describe the version this run would publish."
+    say "    this is the 2026-08-10 condition exactly: cheaper.app/changelog named 0.3.0 as the current CLI while npm and dl.cheaper.app served 0.4.1, for two releases running."
+    say "    fix: add a '## $cliver — ${today:-YYYY-MM-DD}' section at the TOP of $file describing what changed, then re-run."
+    pf_changelog_note "cheaper.app/changelog will keep naming $ver as the current release while npm and dl.cheaper.app serve $cliver"
+    return 1
+  fi
+
+  ok "CHANGELOG.md: newest entry is $ver — matches cli/package.json, so the published release notes describe what is about to ship"
+  return 0
+}
+
 # Memoised so a multi-step run pays for the fetches once and prints one verdict.
 PREFLIGHT_VERDICT=""   # "" not yet run | ready | blocked
+# Tracked SEPARATELY so the --allow-unreleasable branch can name the consequence it is
+# actually overriding. One combined flag made the override print "what goes live will not
+# match origin/main" to an operator whose git was spotless and whose changelog was stale —
+# a false statement that also points at the wrong file.
+PREFLIGHT_GIT_BLOCKED=0
+PREFLIGHT_CHANGELOG_BLOCKED=0
 require_releasable(){  # 0 = proceed with the shipping steps, 1 = stop
   if [ -z "$PREFLIGHT_VERDICT" ]; then
     b "⓪ pre-flight — does the git history describe what is about to ship?"
-    say "every repo must be on '$RELEASE_BRANCH', clean, and level with origin before anything is published."
-    local blocked=0
-    preflight_repo "$APP"     "cheaper-app"     || blocked=1
-    preflight_repo "$DESKTOP" "cheaper-desktop" || blocked=1
-    preflight_repo "$WEB"     "cheaper-web"     || blocked=1
-    if [ "$blocked" -eq 0 ]; then PREFLIGHT_VERDICT=ready; else PREFLIGHT_VERDICT=blocked; fi
+    say "every repo must be on '$RELEASE_BRANCH', clean, and level with origin, and CHANGELOG.md must name the version being published, before anything is published."
+    preflight_repo "$APP"     "cheaper-app"     || PREFLIGHT_GIT_BLOCKED=1
+    preflight_repo "$DESKTOP" "cheaper-desktop" || PREFLIGHT_GIT_BLOCKED=1
+    preflight_repo "$WEB"     "cheaper-web"     || PREFLIGHT_GIT_BLOCKED=1
+    preflight_changelog                         || PREFLIGHT_CHANGELOG_BLOCKED=1
+    if [ "$PREFLIGHT_GIT_BLOCKED" -eq 0 ] && [ "$PREFLIGHT_CHANGELOG_BLOCKED" -eq 0 ]; then
+      PREFLIGHT_VERDICT=ready
+    else
+      PREFLIGHT_VERDICT=blocked
+    fi
   fi
 
   if [ "$PREFLIGHT_VERDICT" = ready ]; then
-    ok "pre-flight: all three repos are on '$RELEASE_BRANCH', clean, and level with origin — what ships is what GitHub shows"
+    ok "pre-flight: all three repos are on '$RELEASE_BRANCH', clean, and level with origin, and CHANGELOG.md names the shipping version — what ships is what GitHub shows"
     return 0
   fi
 
   if $ALLOW_UNRELEASABLE; then
     # Loud, and it names the consequence rather than the flag. An override that prints
-    # "(overridden)" teaches the operator nothing the next time they read the log.
+    # "(overridden)" teaches the operator nothing the next time they read the log. Each
+    # consequence is printed only when that check is the one being overridden.
     warn "pre-flight BLOCKED above, but --allow-unreleasable was passed — shipping anyway."
-    warn "what goes live will NOT match what origin/$RELEASE_BRANCH shows. Anyone auditing this release from GitHub will be reading the wrong tree."
+    if [ "$PREFLIGHT_GIT_BLOCKED" -eq 1 ]; then
+      warn "what goes live will NOT match what origin/$RELEASE_BRANCH shows. Anyone auditing this release from GitHub will be reading the wrong tree."
+    fi
+    if [ "$PREFLIGHT_CHANGELOG_BLOCKED" -eq 1 ]; then
+      warn "release notes overridden: $PREFLIGHT_CHANGELOG_CONSEQUENCE."
+    fi
     return 0
   fi
 

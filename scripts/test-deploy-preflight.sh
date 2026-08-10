@@ -11,6 +11,26 @@ T="$(cd "$(dirname "$0")" && pwd)"
 WS="$T/.preflight-testws"
 PASS=0; FAIL=0
 
+# Writes cheaper-app/CHANGELOG.md with $1 as its newest heading. Called with no argument
+# it writes a file containing no '## ' heading at all.
+changelog_app(){
+  printf '# Changelog\n\nWhat changed in each release of the Cheaper CLI.\n\n' > "$WS/cheaper-app/CHANGELOG.md"
+  if [ "$#" -gt 0 ]; then
+    printf '%s\nA release happened.\n- a bullet\n\n' "$1" >> "$WS/cheaper-app/CHANGELOG.md"
+  fi
+  return 0
+}
+
+# Re-commits and pushes cheaper-app so a CHANGELOG edit made AFTER fresh_workspace does not
+# leave the repo dirty. Without this, every changelog scenario would also trip the DIRTY
+# check and pass on the wrong ✗ line — a test that is green for a reason it was not written
+# for is worse than no test.
+app_commit(){
+  git -C "$WS/cheaper-app" add -A
+  git -C "$WS/cheaper-app" commit -q -m "${1:-changelog fixture}"
+  git -C "$WS/cheaper-app" push -q origin main
+}
+
 fresh_workspace(){
   rm -rf "$WS"
   mkdir -p "$WS/remotes"
@@ -29,6 +49,13 @@ fresh_workspace(){
   mkdir -p "$WS/cheaper-app/cli"
   printf '{"name":"cheaper","version":"9.9.9"}\n' > "$WS/cheaper-app/cli/package.json"
   printf '{"name":"cheaper-desktop","version":"9.9.9"}\n' > "$WS/cheaper-desktop/package.json"
+  # A CHANGELOG whose newest '## ' heading names the SAME version as cli/package.json, in
+  # the exact shape the format contract specifies (## <semver> — <YYYY-MM-DD>, em dash).
+  # It is part of the baseline fixture rather than one scenario's setup because the
+  # changelog gate runs on every pre-flight: without this, all fourteen pre-existing
+  # scenarios would start refusing for a reason none of them was written to test, and the
+  # positive ones would go red while proving nothing.
+  changelog_app '## 9.9.9 — 2026-08-10'
   # The workspace-root script is deliberately NOT inside any repo, matching the real
   # layout before the symlink section below rearranges it.
   cp "$T/cheaper-deploy.sh" "$WS/cheaper-deploy.sh"
@@ -55,6 +82,26 @@ scenario(){
     printf '  FAIL  %s\n' "$name"; FAIL=$((FAIL+1))
     $ok_rc  || printf '        expected exit %s, got %s\n' "$want_rc" "$rc"
     $ok_txt || printf '        expected output to contain: %s\n' "$want_txt"
+    printf '%s\n' "$out" | sed 's/^/        | /' | head -n 25
+  fi
+}
+
+# $1 name  $2 expected-exit  $3 grep pattern that must NOT appear  $4... args to the script
+# The mirror of scenario(). Some refusals are wrong not because they are missing text but
+# because they carry the WRONG diagnosis, and only an absence assertion can catch that.
+scenario_absent(){
+  local name="$1" want_rc="$2" bad_txt="$3"; shift 3
+  local out rc
+  out="$("$WS/cheaper-deploy.sh" "$@" 2>&1)"; rc=$?
+  local ok_rc=false ok_txt=false
+  [ "$rc" = "$want_rc" ] && ok_rc=true
+  printf '%s' "$out" | grep -q -- "$bad_txt" || ok_txt=true
+  if $ok_rc && $ok_txt; then
+    printf '  PASS  %s  (exit %s)\n' "$name" "$rc"; PASS=$((PASS+1))
+  else
+    printf '  FAIL  %s\n' "$name"; FAIL=$((FAIL+1))
+    $ok_rc  || printf '        expected exit %s, got %s\n' "$want_rc" "$rc"
+    $ok_txt || printf '        output must NOT contain: %s\n' "$bad_txt"
     printf '%s\n' "$out" | sed 's/^/        | /' | head -n 25
   fi
 }
@@ -206,6 +253,69 @@ else
   printf '%s\n' "$order_out" | sed 's/^/        | /' | head -n 20
   FAIL=$((FAIL+1))
 fi
+
+echo
+echo "=== 15. CHANGELOG.md naming the shipping version -> gate PASSES ==="
+# The gate must be satisfiable, and satisfied for the RIGHT reason. Asserting on the
+# version number in the ok line, not on a generic "pre-flight ready", so a gate that
+# stopped reading the file entirely could not still print a tick.
+fresh_workspace
+scenario "changelog naming 9.9.9 matches cli/package.json" 0 "newest entry is 9.9.9" docker
+
+echo "=== 16. CHANGELOG.md two releases stale -> BLOCKED (the 2026-08-10 condition) ==="
+# Live on 2026-08-10: cheaper-web/web/changelog.html's newest entry was 0.3.0 and its
+# intro asserted "The currently published CLI is cheaper@0.3.0", while npm served 0.4.1
+# and dl.cheaper.app served 0.4.1 installers. Two releases of a public page stating a
+# false current version, because nothing had ever compared the two numbers.
+fresh_workspace
+changelog_app '## 0.3.0 — 2026-07-02'
+app_commit "leave the changelog two releases behind"
+scenario "a stale changelog is refused" 1 "newest entry is 0.3.0" docker
+# BOTH numbers, or the operator cannot tell what to write without going and looking.
+scenario "and it names the version actually shipping" 1 "cli/package.json says 9.9.9" docker
+scenario "and nothing was published" 1 "nothing was deployed" docker
+
+echo "=== 17. CHANGELOG.md missing -> BLOCKED with the DISTINCT could-not-determine message ==="
+# Deleted and COMMITTED: an uncommitted deletion would also trip the DIRTY check, and the
+# scenario would then pass off the wrong ✗ line while proving nothing about this gate.
+fresh_workspace
+rm -f "$WS/cheaper-app/CHANGELOG.md"
+app_commit "remove the changelog entirely"
+scenario "a missing changelog is refused" 1 "cannot determine which version CHANGELOG.md describes" docker
+scenario "and it says the file does not exist" 1 "DOES NOT EXIST" docker
+# The load-bearing half. "Could not determine" reported as a version mismatch would send
+# the operator to bump a number in a file that is not there — and reported as nothing at
+# all would render as "fine", which is the original defect.
+scenario_absent "and it is NOT dressed up as a version mismatch" 1 "cli/package.json says" docker
+
+echo "=== 18. CHANGELOG.md with no parseable '## ' heading -> BLOCKED, same distinct message ==="
+fresh_workspace
+changelog_app '## Unreleased'
+app_commit "a heading that names no version"
+scenario "an unparseable heading is refused" 1 "cannot determine which version CHANGELOG.md describes" docker
+scenario "and it quotes the heading it could not read" 1 "Unreleased" docker
+scenario "and it tells the operator NOT to bump anything" 1 "NOT a version mismatch" docker
+scenario_absent "and it is NOT dressed up as a version mismatch" 1 "cli/package.json says" docker
+
+echo "--- 18b. no '## ' heading at all is the same could-not-determine answer ---"
+fresh_workspace
+changelog_app          # prose only, zero '## ' headings
+app_commit "a changelog that names no release at all"
+scenario "a headingless changelog is refused" 1 "cannot determine which version CHANGELOG.md describes" docker
+scenario "and it says there is no heading" 1 "NO '## ' heading at all" docker
+
+echo "=== 19. --allow-unreleasable ships, and NAMES the changelog consequence ==="
+# The override must survive the new gate, and — like every other refusal here — it must
+# name what it is overriding rather than printing "(overridden)". A stale changelog waved
+# through silently is indistinguishable from the two releases that shipped that way.
+fresh_workspace
+changelog_app '## 0.3.0 — 2026-07-02'
+app_commit "stale changelog, overridden"
+scenario "override ships past a stale changelog" 0 "release notes overridden" docker --allow-unreleasable
+scenario "and names what the site will keep saying" 0 "keep naming 0.3.0 as the current release" docker --allow-unreleasable
+# git is spotless here, so the git consequence would be a FALSE statement pointing the
+# operator at the wrong file. Each override line is printed only for the check it covers.
+scenario_absent "and does not claim git diverged when it did not" 0 "will NOT match what origin/main shows" docker --allow-unreleasable
 
 echo
 echo "──────────────────────────────────────────"
