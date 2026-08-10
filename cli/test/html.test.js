@@ -4128,3 +4128,50 @@ test('report.html: money() renders a negative with ASCII hyphen-minus, not U+221
   assert.strictEqual(rendered, '-$12.50');
   assert.ok(!rendered.includes('−'), 'the rendered figure still contains U+2212');
 });
+
+test('report.html: every label a producer can emit has tooltip text, on both runtimes', () => {
+  // chips() renders `LABEL_TEXT[l] || l`, so a slug with no entry still DRAWS — it just
+  // silently degrades its tooltip to the raw slug ("dated by frozen day"), which states
+  // the name of the caveat and none of its content. That is the one failure mode a chip
+  // must not have: the chip exists precisely to explain why a figure is qualified.
+  //
+  // The two producers are read directly rather than restated as a literal list, because a
+  // hand-copied list is the same drift this file exists to catch — the tenth slug would be
+  // added to reporting.py and to nobody's copy of the vocabulary. Both runtimes are scanned
+  // because the label vocabulary is shared: report.html is served from the Python side, but
+  // `cheaper savings` renders peek/store.js's windows through the same names, and a slug
+  // that appears on one side today is routinely mirrored to the other.
+  const py = fs.readFileSync(path.join(APP, 'reporting.py'), 'utf8');
+  const storeJs = fs.readFileSync(path.join(__dirname, '..', 'src', 'peek', 'store.js'), 'utf8');
+
+  const slugs = new Set();
+  // `labels.append("x")` / `labels.push('x')`
+  for (const m of py.matchAll(/labels\.append\(\s*["']([a-z_]+)["']\s*\)/g)) slugs.add(m[1]);
+  for (const m of storeJs.matchAll(/labels\.push\(\s*["']([a-z_]+)["']\s*\)/g)) slugs.add(m[1]);
+  // the early-return literals: `"labels": ["x"]` / `labels: ['x']`
+  for (const src of [py, storeJs]) {
+    for (const m of src.matchAll(/["']?labels["']?\s*:\s*\[([^\]]*)\]/g)) {
+      for (const q of m[1].matchAll(/["']([a-z_]+)["']/g)) slugs.add(q[1]);
+    }
+  }
+
+  // Guard the SCANNER, not just the map. If a refactor renames `labels.append`, the
+  // regexes above quietly match nothing and this test passes over an empty set — a green
+  // check proving only that it stopped looking.
+  assert.ok(slugs.size >= 9,
+    `the label scanner found only ${slugs.size} slug(s) (${[...slugs].join(', ')}); it has `
+    + 'lost track of the producers rather than proven them covered');
+  for (const known of ['not_covered', 'dollars_suppressed', 'state_unreadable',
+                       'dated_by_frozen_day', 'store_newer_than_reader']) {
+    assert.ok(slugs.has(known), `the scanner no longer sees the "${known}" producer`);
+  }
+
+  const mapSrc = /var LABEL_TEXT = \{([\s\S]*?)\n  \};/.exec(scriptBlocks(readReport()).join('\n'));
+  assert.ok(mapSrc, 'report.html no longer declares a LABEL_TEXT map');
+  const covered = new Set([...mapSrc[1].matchAll(/^\s*([a-z_]+)\s*:/gm)].map((m) => m[1]));
+
+  const missing = [...slugs].filter((s) => !covered.has(s)).sort();
+  assert.deepStrictEqual(missing, [],
+    `these labels can be emitted but have no LABEL_TEXT entry in report.html, so their `
+    + `chip's tooltip falls back to the raw slug: ${missing.join(', ')}`);
+});

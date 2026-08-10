@@ -717,8 +717,10 @@
     dollars_suppressed: 'More than a fifth of this window’s tokens are unpriceable, so no dollar figure is claimed. Call and token counts are exact.',
     tombstoned: 'Sessions deleted with `cheaper forget` are excluded from these totals.',
     incomplete: 'Some events have no usable timestamp and are excluded from every bucket.',
+    dated_by_frozen_day: 'Some events have no usable timestamp and are placed in this period by the calendar day frozen on the row, at that row’s own recorded UTC offset. They are included and priced at that same day — this is provenance, not an exclusion.',
     provisional: 'A session in this window is still open; these figures are provisional.',
-    store_newer_than_reader: 'This savings store was written by a newer Cheaper; it refuses to guess at its contents.'
+    store_newer_than_reader: 'This savings store was written by a newer Cheaper; it refuses to guess at its contents.',
+    state_unreadable: 'The savings store’s state.json could not be read, so its coverage intervals and its `cheaper forget` tombstones are unknown. No totals are claimed here rather than risk silently re-including a session you deleted.'
   };
 
   function chips(labels){
