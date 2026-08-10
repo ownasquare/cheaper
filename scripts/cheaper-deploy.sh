@@ -183,6 +183,30 @@ WEB="$WORKSPACE/cheaper-web"
 # this workspace and never was; the deploy track is main, established by what this script
 # does rather than by anything that used to declare it. See the pre-flight gate below.
 RELEASE_BRANCH="main"
+# Purging is part of publishing, not an optimisation. Both surfaces this script writes to
+# sit behind the Cloudflare cache: installers on dl.cheaper.app carry max-age=14400, and
+# the site's HTML is cached at the edge. A successful upload therefore keeps serving the
+# PREVIOUS bytes until the TTL expires — which twice looked exactly like a deploy that had
+# not landed, once for 50 minutes on three R2 keys, once for a whole site redeploy.
+PURGE="$APP/scripts/cf-purge.js"
+DL_BASE="https://dl.cheaper.app"
+purge_urls(){  # $@ = URLs. Reports, never fatal: the bytes ARE uploaded either way.
+  [ "$#" -gt 0 ] || return 0
+  if [ ! -f "$PURGE" ]; then
+    warn "missing $PURGE — NOT purging; the CDN will serve the previous bytes until its TTL expires"
+    return 0
+  fi
+  local out rc
+  out="$(node "$PURGE" "$@" 2>&1)"; rc=$?
+  case "$rc" in
+    0) ok "$out" ;;
+    2) warn "CLOUDFLARE_API_TOKEN not set — uploaded, but NOT purged. dl.cheaper.app/cheaper.app will keep serving the previous version for up to 4 hours." ;;
+    *) # A failed purge is not a failed upload, and must not be reported as one — but it
+       # does mean nobody can SEE the release yet, so it is louder than a silent skip.
+       warn "cache purge FAILED — the new bytes are uploaded but the CDN is still serving the old ones. Purge manually, or wait out the TTL."
+       printf '%s\n' "$out" | sed 's/^/      /' ;;
+  esac
+}
 R2_BUCKET="cheaper-downloads"
 NPM_PKG="cheaper"
 # The ownasquare Cloudflare account. Set explicitly: an ambient CLOUDFLARE_ACCOUNT_ID
@@ -919,8 +943,31 @@ step_web(){
   # CLOUDFLARE_API_TOKEN — a true failure with a false cause, which sends the operator
   # to re-issue a token that was never the problem.
   [ -d "$WEB" ] || { err "missing $WEB — cannot deploy the website (checkout cheaper-web next to this script)"; return; }
-  ( cd "$WEB" && $WRANGLER deploy ) && ok "website deployed" \
-    || err "wrangler deploy failed (is CLOUDFLARE_API_TOKEN set?)"
+  if ( cd "$WEB" && $WRANGLER deploy ); then
+    ok "website deployed"
+    # Purge every page the site actually serves, on both hostnames. Derived from the
+    # files in web/ rather than a hand-kept list, because a hand-kept list silently stops
+    # covering the page you just added — which is the same class of bug as everything
+    # else in this file.
+    #
+    # Both forms are purged for each page: cheaper.app/<name>.html 307s to
+    # cheaper.app/<name>, and it is the REDIRECT TARGET that gets cached and served, so
+    # purging only the .html form leaves the copy readers actually receive untouched.
+    local urls=() page name host
+    while IFS= read -r page; do
+      name="$(basename "$page" .html)"
+      for host in "https://cheaper.app" "https://www.cheaper.app"; do
+        if [ "$name" = "index" ]; then
+          urls+=("$host/" "$host/index.html")
+        else
+          urls+=("$host/$name" "$host/$name.html")
+        fi
+      done
+    done < <(find "$WEB/web" -maxdepth 1 -name '*.html' 2>/dev/null | sort)
+    purge_urls "${urls[@]+"${urls[@]}"}"
+  else
+    err "wrangler deploy failed (is CLOUDFLARE_API_TOKEN set?)"
+  fi
 }
 
 # ---- desktop: installers -> R2 --------------------------------------------
@@ -1097,6 +1144,7 @@ step_desktop(){
   fi
   say "cheaper-desktop/package.json version: $desktopv — installers must match this to be uploaded"
   local uploaded=0 refused=0 failed=0 skipped=0 rc skipped_keys="" ci_keys=""
+  local uploaded_urls=()
   # Third field: WHO owns this key.
   #   local — built on this machine (`npm run dist:mac`) and uploaded from here. macOS
   #           only, because the signing identity lives in this Keychain.
@@ -1134,7 +1182,7 @@ step_desktop(){
     fi
     put_r2 "$glob" "$key" "$desktopv" "cheaper-desktop/package.json"; rc=$?
     case $rc in
-      0) uploaded=$((uploaded+1)) ;;
+      0) uploaded=$((uploaded+1)); uploaded_urls+=("$DL_BASE/$key") ;;
       1) refused=$((refused+1)) ;;
       2) skipped=$((skipped+1)); skipped_keys="$skipped_keys${skipped_keys:+, }$key" ;;
       3) failed=$((failed+1)) ;;
@@ -1144,6 +1192,11 @@ step_desktop(){
     esac
   done
   hr
+  # Purge exactly what was uploaded. dl.cheaper.app serves these with max-age=14400, so
+  # without this the download button hands out the PREVIOUS installer for up to four
+  # hours after a green release — and a HEAD request confirms the old etag, which reads
+  # as "the upload silently failed" rather than "the edge has not caught up".
+  purge_urls "${uploaded_urls[@]+"${uploaded_urls[@]}"}"
   # State the CI-owned keys this run did not touch, every time, even on a fully green
   # run. They are not failures — but "this step said nothing about Windows" must never be
   # readable as "Windows is up to date".
