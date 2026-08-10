@@ -351,7 +351,24 @@ def pday_of(ts_ms: int | float, tzo_minutes: int | None = None) -> str | None:
             return None
     try:
         shifted = datetime.utcfromtimestamp(ms / 1000.0 + off * 60)
-        return shifted.strftime("%Y-%m-%d")
+        # `.date().isoformat()` and NOT `strftime("%Y-%m-%d")`. `%Y` zero-padding for
+        # years < 1000 is a property of the platform's libc, not of Python: BSD/macOS
+        # pads to four digits ('0001-01-01'), glibc does not ('1-01-01'). This file ran
+        # on macOS for its whole life and the drift was therefore invisible until
+        # `check-period-parity.js` executed on `ubuntu-latest` for the first time and
+        # reported `138 of 2097 disagree`, every one of them a calendar-edge instant:
+        #     [UTC] JS  pday|-62135596800000|"__undefined__"|0001-01-01
+        #     [UTC] PY  pday|-62135596800000|"__undefined__"|1-01-01
+        # `pday` is a PRICE DATE and the key rows are bucketed by, so a year that loses
+        # its padding is a mis-keyed bucket that also sorts and range-compares wrong
+        # against every correctly-padded neighbour -- not a cosmetic string. The
+        # cross-runtime contract is four digits ALWAYS, fixed by `periods.js::pdayOf`,
+        # which ends `${String(y).padStart(4, '0')}-${m}-${d}`; `date.isoformat()` is
+        # pure Python ('%04d-%02d-%02d'), touches no libc, and so is the only spelling
+        # that means the same thing on the developer's Mac and in the gateway's own
+        # Docker container. Verified on glibc 2.41 and on macOS: identical for every
+        # year 1..9999, and identical to `strftime` for every year >= 1000.
+        return shifted.date().isoformat()
     except (OverflowError, OSError, ValueError):
         # Outside the representable calendar (year 1..9999). `periods.js::pdayOf`
         # applies the SAME bound and also returns null, so neither runtime invents a
@@ -371,7 +388,18 @@ def local_bounds_label(frm: int | None, to: int | None, tz: str | None) -> str:
     def fmt(v):
         if v is None:
             return "—"
-        return _local(int(v), z).strftime("%Y-%m-%d %H:%M")
+        # Formatted field-by-field rather than with `strftime("%Y-%m-%d %H:%M")`, for
+        # the reason spelled out at `pday_of`: `%Y` pads to four digits on BSD/macOS
+        # libc and does NOT on glibc, so year < 1000 reads '0001-01-01 00:00' on a
+        # developer's Mac and '1-01-01 00:00' in the gateway's Linux container. This
+        # label is reachable with a caller-supplied bound -- `reporting.py`'s export
+        # writes it as `period_bounds_label` from the request's own `from`/`to` -- and
+        # a header whose stated job is to make an export reproducible must not depend
+        # on which libc rendered it. Identical to the old `strftime` for every year
+        # >= 1000, which is every bound any real period produces.
+        d = _local(int(v), z)
+        return (f"{d.year:04d}-{d.month:02d}-{d.day:02d} "
+                f"{d.hour:02d}:{d.minute:02d}")
     off = _local(int(to if to is not None else (frm or 0)), z).utcoffset() or timedelta(0)
     total = int(off.total_seconds())
     sign = "+" if total >= 0 else "-"

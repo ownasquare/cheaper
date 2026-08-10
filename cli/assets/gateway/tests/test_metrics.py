@@ -596,6 +596,58 @@ def test_pday_of_is_total_and_never_raises_on_an_unrepresentable_instant():
     assert periods.pday_of(PROMO_EDGE_TS * 1000, PROMO_EDGE_TZO) == "2026-08-31"
 
 
+def test_a_pday_year_is_always_four_digits_on_every_libc():
+    """A `pday` is a PRICE DATE -- the key rows are bucketed, sorted and range-compared
+    by -- so its year must be four digits ALWAYS. `periods.js::pdayOf` fixes that
+    contract literally, ending `${String(y).padStart(4, '0')}-${m}-${d}`.
+
+    `periods.py::pday_of` rendered it with `strftime("%Y-%m-%d")` instead, and `%Y`
+    zero-padding for years < 1000 is a property of the platform's C library, not of
+    Python: BSD/macOS libc pads, glibc does not. Every session before this one validated
+    on macOS, so the drift was invisible until `check-period-parity.js` ran on
+    `ubuntu-latest` for the first time and reported `138 of 2097 disagree` -- JS
+    '0001-01-01' against Python '1-01-01'. Every Linux host runs the unpadded form,
+    INCLUDING the gateway's own Docker container.
+
+    HONEST NOTE about what this test can and cannot watch fail, because a test claiming
+    more than it does is the defect this file exists to prevent: on BSD libc a reverted
+    `strftime("%Y-%m-%d")` produces these same padded strings and this test still passes.
+    It cannot fail on a Mac, because the bug does not exist on a Mac. It is a GLIBC
+    detector, and the Linux lane of `ci.yml` is where it earns its place -- alongside
+    `test_a_reconstructed_offset_is_refused_outside_the_calendar`, whose
+    `== "0001-01-01"` had been asserting this contract all along and was simply never
+    executed on a platform that could break it.
+    """
+    # The first representable instant, across the reconstruction path (`tzo` absent) and
+    # the explicit path, east and west. All four are year 1.
+    for tzo in (0, 330, -480, None):
+        got = periods.pday_of(periods.CAL_MIN_MS, tzo)
+        if got is None:              # the reconstruction path may refuse; that is its
+            continue                 # documented answer and a different test's subject
+        assert got == "0001-01-01", f"tzo={tzo!r} rendered an unpadded year: {got!r}"
+
+    # The whole sub-1000 range, where the two libcs differ, plus the first year they
+    # agree on -- so a regression cannot hide in the boundary.
+    for ms, want in ((-62135596800000, "0001-01-01"),      # year 1
+                     (-61851600000000, "0010-01-01"),      # year 10
+                     (-59011459200000, "0100-01-01"),      # year 100
+                     (-30641760000000, "0999-01-01"),      # year 999
+                     (-30610224000000, "1000-01-01")):     # year 1000 -- libcs agree
+        assert periods.pday_of(ms, 0) == want
+
+    # Structural, not just value-equal: ten characters, YYYY-MM-DD, for every one of them.
+    for ms in (-62135596800000, -59011459200000, 0, 1788220800000):
+        day = periods.pday_of(ms, 0)
+        assert day is not None and len(day) == 10 and day[4] == "-" and day[7] == "-"
+
+    # The same `%Y` hazard, same file: `local_bounds_label` is written into the export
+    # header as `period_bounds_label` from the REQUEST's own bounds, so a caller can
+    # reach year < 1000 there too, and an export header whose stated job is to make the
+    # export reproducible must not depend on which libc rendered it.
+    label = periods.local_bounds_label(periods.CAL_MIN_MS, periods.CAL_MIN_MS, "UTC")
+    assert label.startswith("0001-01-01 00:00"), label
+
+
 def test_one_undatable_row_does_not_take_down_the_whole_audit_log():
     """The row is UNPRICEABLE and VISIBLY COUNTED. Every other row keeps its dollars."""
     with tempfile.TemporaryDirectory() as d:
