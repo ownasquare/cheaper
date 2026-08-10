@@ -93,18 +93,35 @@ beladed handoff document sitting in the desktop repo root. `cheaper-deploy.sh` s
 byte-identical (`sha256 c70e9811…`) to the copy at its canonical path before removing the
 stray; the canonical copy is untouched.
 
-## Known state at the time of writing — NOT blockers, but read before releasing
+## Known state at the time of writing — ALL THREE NOW CLOSED
 
-- **`cheaper-desktop/dist/` holds two versions.** 6 artifacts at `0.4.0` and **7 stale ones
-  at `0.1.0`**. `put_r2()` selects by filename version against the expected version rather
-  than by directory order, so the stale set will not be uploaded — this is a designed-for
-  case, not luck. Clearing them anyway would remove the only thing that selection logic is
-  standing between.
-- **No Windows `Cheaper-Setup-0.4.0.exe` in `dist/`.** `win-unpacked/` exists but no
-  installer. The desktop step will report a benign skip for that key ("build it, or it comes
-  from CI"), not a failure.
-- **`cli/package.json` and `cheaper-desktop/package.json` are both `0.4.0`.** The deploy
-  refuses to upload when these disagree, so the lockstep is a precondition, not a courtesy.
+*Superseded by `2026-08-09-preflight-gate-and-the-dead-release-matrix.md`. Kept here with
+the original wording, and one correction, because two of the three were understated.*
+
+- ~~**`cheaper-desktop/dist/` holds two versions.**~~ **CORRECTION — this was wrong in a way
+  that mattered.** The original text said the stale `0.1.0` set "will not be uploaded — a
+  designed-for case, not luck", which is true and beside the point. Three of the six keys
+  (`*-amd64.deb`, `*-x86_64.rpm`, `*-x86_64.AppImage`) matched **only** a `0.1.0` file,
+  because the `0.4.0` Linux build produced `arm64` artifacts and those globs ask for
+  `x86_64`. `put_r2()` would have refused each one and `step_desktop` would have exited 1.
+  Not a harmless leftover — a run-failing condition. Cleared: the 7 stale `0.1.0` artifacts
+  are deleted, along with `Cheaper-0.4.0-arm64.deb`, which was a **96-byte empty `ar`
+  archive** (a failed build that matched no glob and would have been a corrupt package the
+  moment an arm64 deb key was added).
+- ~~**No Windows `Cheaper-Setup-0.4.0.exe`.**~~ **ROOT CAUSE FOUND AND FIXED.** It was never
+  a build that produced nothing — it was a build that never ran. `release.yml` carried
+  `if: matrix.os == 'macos-latest' && secrets.APPLE_API_KEY_P8 != ''`, and the `secrets`
+  context is not available in a step-level `if:`. That does not evaluate to false; it makes
+  the whole workflow file invalid, so GitHub created **zero jobs** and every run failed in
+  0s with the generic "This run likely failed because of a workflow file issue" — no
+  annotation, no job, nothing naming the line. Confirmed on runs `31354189948` and
+  `31176699507` (both 0s, both `total_count: 0`); the last good run predates the step.
+  The 3-OS matrix had therefore not built once since **2026-08-07**. Fixed by hoisting the
+  test to job-level `env:` (the pattern the same file already used for `HAS_AZURE_SIGNING`),
+  and pinned by `cheaper-desktop/scripts/check-workflows.js`, wired into `npm test`.
+- **`cli/package.json` and `cheaper-desktop/package.json` are both `0.4.0`.** Unchanged and
+  still true — the deploy refuses to upload when these disagree, so the lockstep is a
+  precondition, not a courtesy.
 
 ## What would prevent a recurrence
 
@@ -115,4 +132,9 @@ A pre-flight assertion in the same spirit — *"HEAD is on the expected release 
 that branch is in sync with origin, or stop"* — would have caught this on the first deploy
 after the feature branch was created, instead of after six commits.
 
-That check is **not** implemented here; this document records the gap rather than closing it.
+**CLOSED — the check now exists.** `require_releasable()` in
+`cheaper-app/scripts/cheaper-deploy.sh` runs after `git` and before anything publishes, and
+refuses on wrong branch, detached HEAD, dirty tree, unpushed commits, or a tree behind
+origin — in all three repos, even for a single-step run. 16 scenarios in
+`scripts/test-deploy-preflight.sh` cover it, including the exact 2026-08-09 condition.
+Full write-up: `2026-08-09-preflight-gate-and-the-dead-release-matrix.md`.
