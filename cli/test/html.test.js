@@ -4175,3 +4175,56 @@ test('report.html: every label a producer can emit has tooltip text, on both run
     `these labels can be emitted but have no LABEL_TEXT entry in report.html, so their `
     + `chip's tooltip falls back to the raw slug: ${missing.join(', ')}`);
 });
+
+test('report.html: every state that claims no figure is warned, and no warn slug is a typo', () => {
+  // chips() paints `warn` on the states where NO FIGURE CAN BE CLAIMED, as distinct from the
+  // states that merely QUALIFY one (partial_coverage, tombstoned, incomplete,
+  // dated_by_frozen_day, provisional). Both directions of that list fail silently:
+  //
+  //   1. A no-figure state left OUT renders the page's strongest disclaimer as an aside.
+  //      `state_unreadable` did exactly that — it declines to publish totals at all, and
+  //      said so in the same weight as "these figures are provisional".
+  //
+  //   2. A slug MISSPELLED inside the list (`l === 'stat_unreadable'`) is a comparison that
+  //      can never be true. Nothing throws, no chip is ever warned, and the tooltip gate
+  //      above still passes, because the map lookup and the CSS class are independent reads.
+  //      A test that restated the list as a literal would share the typo and prove nothing.
+  //
+  // So the expression is read back out of the source and checked against LABEL_TEXT, which
+  // the gate above has already pinned to the producers. Comments are stripped first, so a
+  // slug that only appears in prose above the expression cannot be counted as live code.
+  const script = stripComments(scriptBlocks(readReport()).join('\n'));
+
+  const warnSrc = /var warn = \(([\s\S]*?)\)\s*\?\s*' warn'\s*:\s*'';/.exec(script);
+  assert.ok(warnSrc, 'report.html no longer declares the chips() warn expression');
+  const warned = new Set([...warnSrc[1].matchAll(/l === '([a-z_]+)'/g)].map((m) => m[1]));
+
+  // Guard the scanner itself, as the gate above does — but as a PURE VACUITY GUARD, with a
+  // floor of one rather than of four. A floor set to the number of slugs this test also
+  // asserts membership for would be doing two jobs at once, and the wrong one would win:
+  // deleting `state_unreadable` from the expression drops the count to three, so the floor
+  // fires FIRST and reports "the scanner has lost track of the expression" for a source that
+  // the scanner in fact read perfectly. That misdirects the next maintainer to the regex
+  // instead of to the deleted slug. Watched happening, then decoupled — the floor now only
+  // catches an extraction that yielded nothing at all, and the named checks below carry the
+  // semantics with messages that say what is actually wrong.
+  assert.ok(warned.size >= 1,
+    'the warn scanner extracted no slug at all from the chips() warn expression; its shape '
+    + 'has changed and every assertion below would pass by vacuity');
+
+  const mapSrc = /var LABEL_TEXT = \{([\s\S]*?)\n  \};/.exec(script);
+  assert.ok(mapSrc, 'report.html no longer declares a LABEL_TEXT map');
+  const covered = new Set([...mapSrc[1].matchAll(/^\s*([a-z_]+)\s*:/gm)].map((m) => m[1]));
+
+  const unknown = [...warned].filter((s) => !covered.has(s)).sort();
+  assert.deepStrictEqual(unknown, [],
+    `chips() warns on slug(s) that LABEL_TEXT does not define, so no producer emits them and `
+    + `the comparison can never fire: ${unknown.join(', ')}`);
+
+  for (const noFigure of ['not_covered', 'dollars_suppressed', 'store_newer_than_reader',
+                          'state_unreadable']) {
+    assert.ok(warned.has(noFigure),
+      `"${noFigure}" tells the reader that no figure can be claimed for this window, but `
+      + 'chips() renders it unemphasised, in the same weight as a mere qualification');
+  }
+});

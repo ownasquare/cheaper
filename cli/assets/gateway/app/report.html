@@ -727,8 +727,15 @@
     labels = labels || [];
     if (!labels.length) return '';
     return '<div>' + labels.map(function(l){
+      // The warn class marks the states where NO FIGURE CAN BE CLAIMED — not the states
+      // that merely qualify one. `state_unreadable` belongs with the other three and was
+      // missing: it is emitted when state.json cannot be read, so coverage intervals and
+      // `cheaper forget` tombstones are both unknown, and reporting.py:809-828 declines to
+      // publish totals rather than risk silently re-including a session the user deleted.
+      // That is the same refusal `store_newer_than_reader` makes one line down, and it was
+      // rendering unemphasised — the strongest disclaimer on the page, styled as an aside.
       var warn = (l === 'not_covered' || l === 'dollars_suppressed' ||
-                  l === 'store_newer_than_reader') ? ' warn' : '';
+                  l === 'store_newer_than_reader' || l === 'state_unreadable') ? ' warn' : '';
       return '<span class="chip' + warn + '" title="' + esc(LABEL_TEXT[l] || l) + '">' +
              esc(String(l).replace(/_/g, ' ')) + '</span>';
     }).join('') + '</div>';
