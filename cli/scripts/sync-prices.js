@@ -11,6 +11,7 @@
 //
 //   node scripts/sync-prices.js          write the gateway table
 //   node scripts/sync-prices.js --check  exit 1 if it is stale (CI / test guard)
+//   anything else                        exit 2, WITHOUT writing (see the argv loop below)
 
 // There used to be two gateway copies (a dev tree + the npm-shipped cli/assets/gateway)
 // kept in step by hand, so a fix to one never reached users. They are now ONE directory
@@ -21,6 +22,23 @@ const fs = require('fs');
 const path = require('path');
 const { CATALOG, CATALOG_AS_OF, resolveModel } = require('../src/peek/models');
 const { REPRESENTATIVE, ROUTE_TARGET_BY_TIER } = require('../src/peek/pricing');
+// THE INTERPRETER IS RESOLVED BY THE SHIPPED CODE, not by a name written into this file.
+//
+// This script used to call `execFileSync('python3', …)` directly. That is a THIRD answer to
+// "how do I find Python", and it was the wrong one: on a stock python.org Windows install
+// with "Add python.exe to PATH" left unchecked — the DEFAULT — `python3` resolves only to
+// the Microsoft Store alias stub, so the call threw ENOENT on a machine that HAS a working
+// Python 3. This gate is the FIRST command in `npm test`, so that ENOENT blocked the entire
+// suite before any other gate ran. The other two parity gates had already been migrated to
+// the shared launcher; this one was left behind — one behaviour, two implementations, which
+// is the exact defect class the parity gates exist to catch, reproduced in their own
+// plumbing.
+const { pyExe, PY_CANDIDATES, launcherLabel } = require('../src/gateway');
+
+// Every candidate is NAMED so the failure line is checkable against what was actually
+// attempted, and so a candidate added to the shared list appears here without anyone
+// remembering to edit this string.
+const NO_PY = `no usable Python 3 (tried: ${PY_CANDIDATES.map(launcherLabel).join(', ')})`;
 
 const REPO = path.resolve(__dirname, '../..');
 // One gateway copy now: cli/assets/gateway is the single source npm ships, and the
@@ -60,7 +78,29 @@ const targets = [
   ['cli/assets/gateway/app/model_prices.json', path.join(GATEWAY, 'model_prices.json'), table],
 ];
 
-const check = process.argv.includes('--check');
+// ARGV IS PARSED, not sampled. This used to be `process.argv.includes('--check')`, which
+// is not an argument parser: it asks whether ONE exact string is present and treats every
+// other spelling as absent. Absent here is the WRITE mode, so `--chek` (or `--dry-run`, or
+// `-c`) did not "do nothing" — it regenerated cli/assets/gateway/app/model_prices.json from
+// the JS catalog, printed `wrote …`, and exited 0. A CI line written to VERIFY the table
+// would instead have MADE it in sync and reported success: a gate structurally incapable of
+// failing, absorbing a genuine catalog drift into a tracked file that the other gates and
+// the shipped npm package both read. The two later gates each grew a real parser; this one,
+// the only one that MUTATES anything, never did.
+//
+// Exit 2, matching check-period-parity.js and check-policy-parity.js, is deliberately
+// distinct from the 1 a real staleness or parity failure uses, so a CI log can tell "the
+// gate ran and found drift" from "the gate was invoked wrong".
+//
+// This runs BEFORE the write loop below — the whole point is that a mistyped flag must not
+// reach an fs.writeFileSync.
+let check = false;
+for (const a of process.argv.slice(2)) {
+  if (a === '--check') { check = true; continue; }
+  console.error(`sync-prices: unknown argument '${a}' (usage: [--check])`);
+  process.exit(2);
+}
+
 let stale = 0;
 for (const [label, dest, next] of targets) {
   const prev = fs.existsSync(dest) ? fs.readFileSync(dest, 'utf8') : null;
@@ -195,7 +235,9 @@ function jsAnswers(ids, at) {
   return out;
 }
 
-function pyAnswers(ids, at) {
+// `py` is always a resolved {cmd, args} launcher — the caller below refuses to call this
+// with null, so there is no "no interpreter" branch hiding in here to mistake for a pass.
+function pyAnswers(py, ids, at) {
   const { execFileSync } = require('child_process');
   const script = [
     'import json,sys',
@@ -209,34 +251,51 @@ function pyAnswers(ids, at) {
       + '"cost":cost_of_model(i,1e6,1e6,at=at)}',
     'print(json.dumps(out))',
   ].join('\n');
-  const raw = execFileSync('python3', ['-c', script], {
+  // The launcher's OWN args lead: `py -3 -c <script>`, never `py -c <script>` (which runs
+  // the launcher's default Python — not necessarily the one `pyExe()` probed).
+  const raw = execFileSync(py.cmd, [...py.args, '-c', script], {
     input: JSON.stringify(ids), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
   });
   return JSON.parse(raw);
 }
 
 let parityFailures = 0;
-try {
-  const ids = parityProbes();
-  const at = CATALOG_AS_OF; // fixed date so the comparison is deterministic
-  const js = jsAnswers(ids, at);
-  const py = pyAnswers(ids, at);
-  const near = (a, b) => (a == null || b == null) ? a === b : Math.abs(a - b) < 1e-9;
-  for (const id of ids) {
-    const a = js[id], b = py[id];
-    if (!b) { console.error('PARITY: python returned nothing for ' + id); parityFailures++; continue; }
-    if (a.family !== b.family || a.priceable !== b.priceable || !near(a.cost, b.cost)) {
-      console.error('PARITY MISMATCH ' + id
-        + '\n  js:     ' + JSON.stringify(a)
-        + '\n  python: ' + JSON.stringify(b));
-      parityFailures++;
-    }
-  }
-  if (!parityFailures) console.log('cross-runtime parity: ' + ids.length + ' ids agree');
-} catch (e) {
-  // A missing python3 must not silently pass the guard in CI.
-  console.error('PARITY CHECK COULD NOT RUN: ' + (e && e.message));
+// Resolved BEFORE the probes are built, and reported in the SAME SHAPE the other two gates
+// use. A missing interpreter is not a pricing defect, but it is not a pass either: an unrun
+// parity gate is indistinguishable from a passing one unless it says so on stderr and exits
+// non-zero. This branch used to be reachable only as an ENOENT caught below, which read as
+// "this machine is broken" rather than "the dependency is missing and every candidate was
+// tried" — and it fired on a stock Windows Python that was, in fact, perfectly usable.
+const launcher = pyExe();
+if (launcher === null) {
+  console.error('PARITY CHECK DID NOT RUN — ' + NO_PY);
   parityFailures++;
+} else {
+  try {
+    const ids = parityProbes();
+    const at = CATALOG_AS_OF; // fixed date so the comparison is deterministic
+    const js = jsAnswers(ids, at);
+    const py = pyAnswers(launcher, ids, at);
+    const near = (a, b) => (a == null || b == null) ? a === b : Math.abs(a - b) < 1e-9;
+    for (const id of ids) {
+      const a = js[id], b = py[id];
+      if (!b) { console.error('PARITY: python returned nothing for ' + id); parityFailures++; continue; }
+      if (a.family !== b.family || a.priceable !== b.priceable || !near(a.cost, b.cost)) {
+        console.error('PARITY MISMATCH ' + id
+          + '\n  js:     ' + JSON.stringify(a)
+          + '\n  python: ' + JSON.stringify(b));
+        parityFailures++;
+      }
+    }
+    if (!parityFailures) console.log('cross-runtime parity: ' + ids.length + ' ids agree');
+  } catch (e) {
+    // The launcher already answered `--version` successfully, so it EXISTS. Anything that
+    // fails from here is the payload — pricing.py raising, a JSON parse failure — and that
+    // is a real failure to report, not a missing dependency to explain away. The launcher
+    // is named so the line says WHICH interpreter produced it.
+    console.error(`PARITY CHECK COULD NOT RUN (${launcherLabel(launcher)}): ` + (e && e.message));
+    parityFailures++;
+  }
 }
 
 if (stale || parityFailures || targetFailures) {

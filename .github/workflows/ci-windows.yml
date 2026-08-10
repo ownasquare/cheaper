@@ -1,0 +1,105 @@
+name: CI (Windows)
+
+# The Windows lane for the JS<->Python launcher contract.
+#
+# WHY IT EXISTS: every Windows claim in this repo's parity-gate work was REASONED from
+# launcher semantics and never executed. `cli/src/gateway.js` carries `py -3` as its third
+# Python candidate specifically because a stock python.org install with "Add python.exe to
+# PATH" left unchecked — the DEFAULT — resolves `python3` and `python` only to the Microsoft
+# Store alias stub. Nothing in CI has ever run a single line of that reasoning on Windows.
+# `cli/scripts/sync-prices.js` hardcoded `execFileSync('python3', …)` for months, hard-failing
+# the FIRST command of `npm test` on that platform, and no lane existed to notice.
+#
+# WHY IT IS A SEPARATE WORKFLOW AND NOT A JOB IN ci.yml: `publish-cli.yml` does
+# `uses: ./.github/workflows/ci.yml`, so every job in that file is a required gate for
+# `npm publish`. Windows is an UNPROVEN platform here — the first run of this lane is the
+# first evidence anyone has ever had — and a first-run failure on an unproven platform must
+# be information, not a release freeze on a package whose Linux and macOS behaviour is fully
+# tested. When this lane has been green for a while, MOVE it into ci.yml as a job; that is
+# the intended end state, not this file.
+#
+# NOTE, in the same spirit as ci.yml's: there is deliberately no `continue-on-error`, no
+# `|| true`, no `-k`/`--deselect`. Red means red here too. This lane simply does not hold the
+# release train while the platform is still being characterised.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-launcher:
+    name: Python launcher + portable parity gates (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Whichever of `python3` / `python` / `py -3` this provides is the point: pyExe() is
+      # supposed to find A usable Python 3 without anyone telling it which name works. No
+      # `pip install` step — every module these gates import (pricing, router, classify) is
+      # pure stdlib, verified by their import blocks.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # THE reason this lane exists. `sync-prices.js` is the gate that hardcoded `python3`;
+      # on this runner it must resolve an interpreter through src/gateway.js and get identical
+      # prices out of both runtimes. `.gitattributes` pins LF so the byte comparison inside it
+      # is not decided by Git for Windows' autocrlf.
+      - name: JS<->Python price-catalog parity gate
+        working-directory: cli
+        run: node scripts/sync-prices.js --check
+
+      # The largest parity corpus in the repo (144180 routing decisions) and fully portable:
+      # it drives its Python side with a `-c` payload and reads no timezone.
+      - name: JS<->Python routing-policy parity gate
+        working-directory: cli
+        run: node scripts/check-policy-parity.js --check
+
+      # The launcher contract itself: no gate spawns a literal interpreter name, every gate
+      # resolves through src/gateway.js, every spawn threads the launcher's prefix args, and a
+      # typo'd flag exits 2 instead of looking like a pass. Two BEHAVIOURAL tests in this file
+      # (the `py -3`-only shims) are POSIX-shell and report as SKIPPED here — that is stated
+      # in the file and visible in this log, not silent.
+      - name: Launcher-contract tests
+        working-directory: cli
+        run: node --test test/parity_gate_launcher.test.js
+
+      - name: CLI --help smoke
+        working-directory: cli
+        run: node bin/cheaper.js --help
+
+      # ---- WHAT THIS LANE DELIBERATELY DOES NOT RUN, and why -----------------------------
+      # Stated rather than omitted, because a short step list reads as "Windows is covered".
+      #
+      # * cli/scripts/check-period-parity.js — NOT portable as written, for two independent
+      #   reasons, neither of which is a JS<->Python drift:
+      #     1. Gates 2 and 3 inject each timezone with `TZ` on the child's environment
+      #        (`runIn()`). Node/V8 honours IANA zone names on Windows; CPython's
+      #        `datetime.astimezone()` (periods.py::local_offset_minutes) reads the OS zone,
+      #        and the Windows CRT cannot parse "America/Los_Angeles" — so the two sides would
+      #        be compared in DIFFERENT zones and report a disagreement that is an artifact of
+      #        the fixture harness. A false red is worse than no lane.
+      #     2. `periods.py` imports `zoneinfo.ZoneInfo`, and Windows ships no system tz
+      #        database, so it also needs `pip install tzdata`.
+      #   Gate 1 (period_bounds) passes its zones explicitly and IS portable, but the script
+      #   has no way to run gate 1 alone — and adding a flag that runs LESS of a gate is how a
+      #   CI line comes to look green while checking less. Getting this gate onto Windows means
+      #   installing tzdata and setting the OS zone per case (`tzutil /s`) instead of TZ, which
+      #   is real work, not a config tweak.
+      #
+      # * The full `node --test test/` suite — 400+ tests over transcript paths, home
+      #   directories and harness layouts, none of which has ever run on Windows. This lane
+      #   exists to prove the launcher contract; mixing in an unbounded set of unproven tests
+      #   would bury that signal under unrelated path failures. Widening it is deliberate,
+      #   separate work.
+      #
+      # * The gateway pytest suite and the Playwright E2E suite — ubuntu-only in ci.yml, and
+      #   they stay that way.

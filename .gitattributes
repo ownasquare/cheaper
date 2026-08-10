@@ -1,0 +1,19 @@
+# Line endings are identical on every platform, because a gate in this repo compares BYTES.
+#
+# `cli/scripts/sync-prices.js --check` regenerates the gateway's price table in memory and
+# requires it to equal the committed cli/assets/gateway/app/model_prices.json EXACTLY. Git
+# for Windows ships with autocrlf enabled, so a Windows checkout would hand that file back
+# with CRLF line endings, the byte comparison would fail, and the gate would report
+# `STALE: cli/assets/gateway/app/model_prices.json` — a checkout artifact wearing the
+# costume of a real price drift, on the one gate whose whole job is to be believed about
+# price drift. It is also the FIRST command in `npm test`, so it would take the suite with it.
+#
+# `eol=lf` rather than `text=auto` alone: `text=auto` normalises what is COMMITTED but still
+# lets the platform pick the working-tree ending, which is exactly the byte the gate reads.
+#
+# No tracked file in this repo contains a CR today (`git grep -Il $'\r'` is empty) and
+# macOS/Linux already check out LF, so this pins existing behaviour rather than changing it.
+* text=auto eol=lf
+
+# Detected as binary anyway; listed so a future image is never a candidate for conversion.
+*.png binary

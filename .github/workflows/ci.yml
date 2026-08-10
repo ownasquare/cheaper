@@ -67,11 +67,17 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       # cli/package.json's own "test" script already chains sync-prices --check,
-      # check-period-parity --check and `node --test test/` — but the two parity gates
-      # are run again explicitly below, by name, so a future edit to that script cannot
-      # silently drop one of them without this workflow's own step list still catching
-      # it, and so a failure names the exact gate in the Actions UI instead of "npm test
-      # failed, see log".
+      # check-period-parity --check, `node --test test/`, the --help smoke and
+      # check-policy-parity --check — but ALL THREE parity gates are run again explicitly
+      # below, by name, so a future edit to that script cannot silently drop one of them
+      # without this workflow's own step list still catching it, and so a failure names the
+      # exact gate in the Actions UI instead of "npm test failed, see log".
+      #
+      # The policy gate used to be the one gate WITHOUT a named step here, which made the
+      # paragraph above untrue for exactly the gate that edit could drop unnoticed: it is
+      # last in the chain in package.json, and the largest corpus of the three (144180
+      # routing decisions across 89 models). The duplicated ~7s is the same cost the other
+      # two steps already pay, for the same reason.
       - name: CLI test suite (node --test + parity gates + --help smoke)
         working-directory: cli
         run: npm test
@@ -83,6 +89,10 @@ jobs:
       - name: JS<->Python period-bucketing parity gate
         working-directory: cli
         run: node scripts/check-period-parity.js --check
+
+      - name: JS<->Python routing-policy parity gate
+        working-directory: cli
+        run: node scripts/check-policy-parity.js --check
 
       - name: Gateway pytest suite
         run: python3 -m pytest cli/assets/gateway/tests -q

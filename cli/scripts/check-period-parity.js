@@ -585,7 +585,24 @@ function placementParity(py) {
     + `${ZONES.length} zones × ${PLACEMENT_WINDOWS.length} windows (JS ↔ Python)`);
 }
 
-function main() {
+function main(argv) {
+  // ARGV IS PARSED, not ignored. `package.json` passes `--check` to all three gates for
+  // symmetry with `sync-prices.js`, which has a real write-vs-report-only mode; this gate
+  // has only one mode, so the flag is accepted and means nothing. That is not a reason to
+  // accept ANYTHING: an unknown flag exits rather than being swallowed, because a typo'd
+  // flag in a CI line must not look like a passing gate — the same rule
+  // `check-policy-parity.js` records, and the same failure shape (an unrun or half-run
+  // gate reporting like a green one) this whole file exists to prevent.
+  //
+  // Exit 2, distinct from the 1 that a real parity disagreement uses, so a CI log can tell
+  // "the gate ran and found drift" from "the gate was invoked wrong".
+  for (const a of (argv || [])) {
+    if (a !== '--check') {
+      console.error(`  period parity: unknown argument '${a}' (usage: [--check])`);
+      process.exit(2);
+    }
+  }
+
   // Resolved BEFORE any fixture work. With no interpreter there is nothing to diff, and
   // the failure should land immediately rather than after 1400 JS rows nobody compares.
   //
@@ -638,4 +655,4 @@ function main() {
   placementParity(exe);
 }
 
-main();
+main(process.argv.slice(2));

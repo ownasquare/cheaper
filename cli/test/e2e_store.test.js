@@ -127,11 +127,34 @@ test('E2E: a transcript becomes per-call events, and the savings land on the day
   assert.strictEqual(byKey.today.status, 'not_covered', 'nothing happened today');
   assert.strictEqual(byKey.today.estimated, null);
   assert.ok(byKey.today.labels.includes('not_covered'));
-  const older = byKey.month_earlier.estimated || byKey.quarter_earlier.estimated
-    || byKey.week_earlier.estimated;
-  assert.ok(older && older.calls === 3,
+  // WHICH row holds a nine-day-old chat is a function of TODAY'S DATE: `quarter_earlier`
+  // through most of a month, `month_earlier` early in one. This used to be resolved by
+  // guessing — `byKey.month_earlier.estimated || byKey.quarter_earlier.estimated || …` —
+  // and the guess broke on 2026-08-09 with the store answering perfectly correctly. An
+  // empty window that IS covered reports `status: 'partial'` with `{calls: 0, saved: 0}`,
+  // and `{calls: 0}` is TRUTHY, so the `||` chain stopped at the empty `month_earlier`
+  // (Aug 1 → Aug 3) and never reached the `quarter_earlier` row holding all three calls.
+  // A date-dependent test that passes on most days is a test that reports the calendar.
+  //
+  // So the row is found by what it CONTAINS, not by name — and the properties asserted are
+  // the ones the headline defect would violate, each independent of the date.
+  const holders = s1.ladder.filter((w) => w.estimated && w.estimated.calls > 0);
+  assert.strictEqual(holders.length, 1,
+    'exactly one ladder row may hold the calls; got: '
+    + JSON.stringify(holders.map((w) => [w.key, w.estimated.calls])));
+  const [holder] = holders;
+  const older = holder.estimated;
+  assert.strictEqual(older.calls, 3,
     'all three calls must bucket into the window that actually contains their timestamps');
   assert.ok(older.saved > 0, 'and carry a real, positive saving');
+  // The row's own BOUNDS must contain the event timestamps. Without this, "one row has the
+  // calls" would be satisfied by the wrong row — which is the original defect exactly.
+  assert.ok(when >= holder.from && when <= holder.to,
+    `the calls landed in '${holder.key}' (${new Date(holder.from).toISOString()} → `
+    + `${new Date(holder.to).toISOString()}), which does not contain the event timestamp `
+    + new Date(when).toISOString());
+  assert.notStrictEqual(holder.key, 'today',
+    'a nine-day-old chat reported under Today is the bucket-on-tagline-time defect itself');
 
   // The ladder is a PARTITION: its rows sum to lifetime, exactly.
   const sumCalls = s1.ladder.reduce((n, w) => n + ((w.estimated && w.estimated.calls) || 0), 0);
