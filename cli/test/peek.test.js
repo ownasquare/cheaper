@@ -383,8 +383,127 @@ test('a cheap-tier route target is genuinely cheaper than its mid target', () =>
     // DeepSeek publishes only two SKUs, so cheap === mid there by necessity.
     if (fam === 'deepseek') assert.equal(t.cheap, t.mid);
     else assert.ok(cheap < mid, `${fam}: cheap target (${t.cheap} $${cheap}) must undercut mid (${t.mid} $${mid})`);
-    assert.ok(mid <= top, `${fam}: mid target must not exceed top`);
+    // The cheap slot may never be the most expensive of the three. This is the price
+    // shape the SAVINGS arithmetic depends on — a downgrade that lands on the cheap
+    // target must not be able to cost more than staying at the top one.
+    assert.ok(cheap <= top, `${fam}: cheap target (${t.cheap} $${cheap}) must not exceed top (${t.top} $${top})`);
   }
+});
+
+// THERE IS DELIBERATELY NO `mid <= top` PRICE ASSERTION, AND RE-ADDING ONE IS A REGRESSION.
+//
+// It stood here until 2026-08-09 and read as an obvious sanity check. It was in fact a
+// PRICE PROXY FOR CAPABILITY, which models.js:59-64 explicitly forbids — "tier is NEVER a
+// price proxy … capability rank and price rank genuinely disagree" — and which the test
+// `capability tier and price rank are allowed to disagree` above asserts outright for
+// mistral-large-3 (opus, $2.00) vs mistral-medium-3.5 (sonnet, $9.00).
+//
+// Holding the ROUTE TABLE to mid <= top therefore made those two facts unsatisfiable
+// together for Mistral, and the table was the side that gave way: its mid slot was filled
+// with a haiku-tier model and its top slot with a sonnet-tier one. That is the exact defect
+// a route-target check exists to catch — a request answered below the tier it is reported
+// as — manufactured by the check itself. Both slots sat in sync-prices.js's
+// KNOWN_TIER_MISMATCHES ratchet for as long as this line stood, each naming it as the
+// blocker.
+//
+// WHAT REPLACES IT IS STRICTLY STRONGER, not weaker. `mid <= top` inferred capability
+// order from price; the route-target gate in sync-prices.js reads each target's DECLARED
+// capability tier out of the catalog and requires it to equal the slot it fills, for every
+// family and every tier. It permits exactly one exception — a family that publishes no
+// model of a tier falls back DOWN, never UP (DeepSeek's sonnet slot) — and it is a
+// ratchet: an unlisted mismatch fails, and a listed one that stops reproducing ALSO fails,
+// so the ledger cannot outlive its blockers. That gate runs inside this file, via the
+// `--check` exec in 'the gateway price table is in sync with the JS catalog' below.
+//
+// The one price property the arithmetic actually needs is asserted above: cheap < mid and
+// cheap <= top. Anything beyond that re-imports the conflation being removed.
+test('every route-target slot names a model OF THAT SLOT\'S TIER', () => {
+  const { ROUTE_TARGET, ROUTE_TARGET_BY_TIER } = require('../src/peek/pricing');
+  const { CATALOG } = require('../src/peek/models');
+  const { rank } = require('../src/peek/classify');
+  // Checked here as well as in sync-prices.js because this is the unit-level pin: the
+  // script gate can only fail as a whole, and a future edit that re-ratchets a family
+  // should have to defeat an assertion that names the family and the tier.
+  for (const [fam, tiers] of Object.entries(ROUTE_TARGET_BY_TIER)) {
+    const published = new Set(CATALOG.filter((e) => e.family === fam).map((e) => e.tier));
+    for (const [tierName, id] of Object.entries(tiers)) {
+      const entry = CATALOG.find((e) => e.id === id);
+      assert.ok(entry, `${fam}.${tierName} -> '${id}' is not a catalog id`);
+      if (entry.tier === tierName) continue;
+      // The ONLY legitimate divergence: this family publishes nothing of that tier, so
+      // the slot falls back to a LOWER one. Falling back UP would spend money the caller
+      // did not ask to spend, and is never allowed.
+      assert.ok(!published.has(tierName),
+        `${fam}.${tierName} -> '${id}' is tier '${entry.tier}', but ${fam} publishes a `
+        + `real ${tierName}-tier model — the slot must name it`);
+      assert.ok(rank(entry.tier) < rank(tierName),
+        `${fam}.${tierName} -> '${id}' is tier '${entry.tier}' — a gap may only fall DOWN`);
+    }
+  }
+  // Sanity: the bucket-keyed and tier-keyed views are the same table.
+  for (const [fam, b] of Object.entries(ROUTE_TARGET)) {
+    assert.deepEqual(ROUTE_TARGET_BY_TIER[fam],
+      { haiku: b.cheap, sonnet: b.mid, opus: b.top }, fam + ': the two views disagree');
+  }
+});
+
+// OpenAI's 272k long-context tier, pinned to the vendor's published sheet.
+//
+// This existed on the sheet and NOT in the catalog until 2026-08-09, so every request
+// over 272k input tokens on one of these six models was priced at the short rate —
+// input understated 2x and output 1.5x. It moved `actualCost`, which peek reports as
+// money already spent, so it was a wrong number in front of the user and not merely a
+// wrong counterfactual.
+//
+// Pinned per-model rather than as a shape check because the failure mode is a rate that
+// LOOKS plausible: every one of these is exactly 2x input and 1.5x output, so a generic
+// "long >= short" invariant (which models.js's catalog-shape test already applies) would
+// pass on a transposed or halved figure. The numbers themselves are the assertion.
+test('OpenAI long-context tiers match the published 272k sheet', () => {
+  const { CATALOG } = require('../src/peek/models');
+  const EXPECTED = {
+    'gpt-5.6-sol':   { over: 272000, in: 10, out: 45, cacheRead: 1 },
+    'gpt-5.6-terra': { over: 272000, in: 4, out: 18, cacheRead: 0.4 },
+    'gpt-5.6-luna':  { over: 272000, in: 0.4, out: 1.8, cacheRead: 0.04 },
+    'gpt-5.5':       { over: 272000, in: 10, out: 45, cacheRead: 1 },
+    'gpt-5.4':       { over: 272000, in: 5, out: 22.5, cacheRead: 0.5 },
+    'gpt-5.4-pro':   { over: 272000, in: 60, out: 270 },
+  };
+  for (const [id, want] of Object.entries(EXPECTED)) {
+    const e = CATALOG.find((x) => x.id === id);
+    assert.ok(e, id + ' is missing from the catalog');
+    assert.deepEqual(e.longContext, want, id + ': long-context tier drifted from the sheet');
+  }
+  // Every OTHER OpenAI model must have NO long tier. gpt-5.5-pro is the one to watch:
+  // third-party trackers assert it takes the same 2x/1.5x uplift, but OpenAI's own page
+  // shows it as <272k only, and this catalog does not encode a rate the vendor has not
+  // published. If that is ever corrected it must be corrected from the vendor sheet.
+  for (const e of CATALOG.filter((x) => x.family === 'openai')) {
+    if (EXPECTED[e.id]) continue;
+    assert.equal(e.longContext, undefined,
+      `${e.id} has a long-context tier that OpenAI does not publish`);
+  }
+});
+
+test('a call over 272k input is billed at the long tier, and one under it is not', () => {
+  const { costOfModel } = require('../src/peek/pricing');
+  // The threshold is on INPUT tokens and the higher rate applies to the WHOLE request,
+  // not to the excess — the same rule ratesFor() already applies to Google and xAI.
+  // 100k in / 10k out: short rates. 0.1 * 5 + 0.01 * 30 = 0.5 + 0.3
+  assert.equal(costOfModel('gpt-5.6-sol', { inFresh: 100000, outTok: 10000 }), 0.8);
+  // 300k in / 10k out: long rates on the whole thing. 0.3 * 10 + 0.01 * 45 = 3 + 0.45
+  assert.ok(Math.abs(costOfModel('gpt-5.6-sol', { inFresh: 300000, outTok: 10000 }) - 3.45) < 1e-9);
+  // Exactly at the threshold is still SHORT — the tier begins above it.
+  assert.equal(costOfModel('gpt-5.6-sol', { inFresh: 272000, outTok: 0 }), 272000 / 1e6 * 5);
+  assert.ok(Math.abs(costOfModel('gpt-5.6-sol', { inFresh: 272001, outTok: 0 }) - 272001 / 1e6 * 10) < 1e-9);
+  // Cache reads count toward the threshold (it is total input the provider tiers on),
+  // and the long cache-read rate is the published $1.00, not the short $0.50.
+  assert.ok(Math.abs(costOfModel('gpt-5.6-sol', { cacheRead: 300000, outTok: 0 }) - 0.3) < 1e-9);
+  // A cache WRITE at the long tier is derived inside the model's own sheet
+  // (lc.in * cacheWrite/in = 10 * 1.25), which reproduces OpenAI's published $12.50.
+  assert.ok(Math.abs(costOfModel('gpt-5.6-sol', { cacheCreate5m: 300000, outTok: 0 }) - 3.75) < 1e-9);
+  // A model with no long tier is unaffected at any size.
+  assert.equal(costOfModel('o1-pro', { inFresh: 1e6, outTok: 1e6 }), 750);
 });
 
 test('every representative model resolves to a real catalog entry', () => {

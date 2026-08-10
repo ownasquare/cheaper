@@ -62,7 +62,25 @@ const ROUTE_TARGET = {
   // explicitly here so it reads as a deliberate fact about the vendor's lineup rather
   // than the copy-paste slip it resembles.
   deepseek:  { cheap: 'deepseek-v4-flash', mid: 'deepseek-v4-flash', top: 'deepseek-v4-pro' },
-  mistral:   { cheap: 'ministral-3-8b',   mid: 'mistral-small-4', top: 'mistral-medium-3.5' },
+  // Mistral's mid slot held 'mistral-small-4' (tier haiku) and its top slot held
+  // 'mistral-medium-3.5' (tier sonnet), so a sonnet-tier request was answered one tier
+  // down and an auto-escalated hard request was answered by a MID-capability model
+  // WHILE BEING REPORTED AS TOP TIER — the same defect this file records for the
+  // gateway's OpenAI front end, whose top tier was `o3`.
+  //
+  // Both sat in sync-prices.js's KNOWN_TIER_MISMATCHES ratchet, and the blocker named
+  // there was a `mid <= top` PRICE assertion in peek.test.js. That assertion was the
+  // cause, not a constraint: models.js states that tier "is NEVER a price proxy" and
+  // that "Mistral's flagship costs less than its mid model", and peek.test.js's
+  // `capability tier and price rank are allowed to disagree` asserts exactly that for
+  // this pair. Requiring the mid target to cost no more than the top target therefore
+  // forced a wrong-tier model into both slots for the one family where the catalog
+  // says price and capability invert. The price assertion is gone; the slots now name
+  // the tier they are sold as, and the tier gate in sync-prices.js enforces it.
+  //
+  // mistral-large-3 is both the correct opus-tier target AND cheaper than the model it
+  // replaces ($0.5/$1.5 vs $1.5/$7.5), so this raises capability and lowers cost.
+  mistral:   { cheap: 'ministral-3-8b',   mid: 'mistral-medium-3.5', top: 'mistral-large-3' },
 };
 // Back-compat alias; sync-prices.js and the gateway JSON still read this name.
 const REPRESENTATIVE = ROUTE_TARGET;

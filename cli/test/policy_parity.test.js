@@ -91,10 +91,22 @@ test('every route target names a catalogued model, and never one ABOVE its slot'
   //
   //   deepseek.sonnet  LEGITIMATE — DeepSeek ships exactly two SKUs (flash = haiku,
   //                    pro = opus), so its mid slot has nothing of its own to name.
-  //   mistral.sonnet   DEFECT — mistral publishes real sonnet-tier models.
-  //   mistral.opus     DEFECT — mistral-large-3 is tier opus AND cheaper than the
-  //                    sonnet-tier model currently in the slot.
-  const EXPECTED_BELOW_SLOT = ['deepseek.sonnet', 'mistral.opus', 'mistral.sonnet'];
+  //
+  // THE LIST IS NOW EXACTLY ONE ENTRY, AND EVERY ENTRY ON IT IS LEGITIMATE. It carried
+  // two more until 2026-08-09, both defects and both Mistral:
+  //   mistral.sonnet   was 'mistral-small-4'    (tier haiku)  — mistral publishes real
+  //                    sonnet-tier models, so the slot was answering a mid request one
+  //                    tier down while reporting it as mid.
+  //   mistral.opus     was 'mistral-medium-3.5' (tier sonnet) — an auto-escalated hard
+  //                    request answered by a MID-capability model while reported as top.
+  // Both are FIXED, not re-ledgered: the slots now name 'mistral-medium-3.5' and
+  // 'mistral-large-3'. The blocker recorded against them in scripts/sync-prices.js was a
+  // `mid <= top` PRICE assertion in peek.test.js, which inferred capability order from
+  // price for the one family whose catalog says the two invert; it has been replaced by a
+  // direct per-slot tier assertion. Do not re-add either entry here to make a red run
+  // green — a below-slot target that is not a genuine published-tier gap is a defect, and
+  // this ledger is where that claim gets made explicitly.
+  const EXPECTED_BELOW_SLOT = ['deepseek.sonnet'];
   const below = [];
   for (const fam of Object.keys(ROUTE_TARGET_BY_TIER)) {
     for (const tier of TIERS) {
@@ -343,7 +355,14 @@ test('a real anti-saving still survives — the ceiling is not a clamp', () => {
 test('a same-tier route is priced as the SUBSTITUTION it is, not as no route', () => {
   // The largest case in the catalog. `o1-pro` and `gpt-5.6-sol` are both tier opus, so no
   // tier moves and `downgraded` stays false — but the caller is served a different model
-  // at 1/3 the price, and that is a saving the gateway really delivers.
+  // at a fraction of the price, and that is a saving the gateway really delivers.
+  //
+  // 715 -> 695 ON 2026-08-09, and the $20 is a correction, not a loss. This basket is
+  // 1M INPUT tokens, which is above OpenAI's 272k long-context threshold, so gpt-5.6-sol
+  // really bills its long tier here: $10 + $45 = $55, not the $5 + $30 = $35 the catalog
+  // used to charge for a request of this size. `o1-pro` publishes no long tier and stays
+  // at $150 + $600 = $750, so the honest delta is $750 - $55 = $695. The old $715
+  // was the arithmetic of a rate OpenAI does not offer at this prompt size.
   const toks = { inFresh: 1e6, outTok: 1e6 };
   const e = estimateCall('o1-pro', 1e6, 1e6, 'opus');
   assert.equal(e.routedTier, 'opus');
@@ -355,8 +374,8 @@ test('a same-tier route is priced as the SUBSTITUTION it is, not as no route', (
   // The whole defect, in one line: newCost must be the SERVED model's price.
   assert.equal(e.newCost, costOfModel(e.routedModel, toks));
   assert.notEqual(e.newCost, e.baselineCost);
-  assert.ok(Math.abs(e.saved - 715) < 1e-9, 'saved=' + e.saved);
-  assert.ok(Math.abs(e.gross - 715) < 1e-9);
+  assert.ok(Math.abs(e.saved - 695) < 1e-9, 'saved=' + e.saved);
+  assert.ok(Math.abs(e.gross - 695) < 1e-9);
   assert.equal(e.extra, 0);
 
   // Catalog-wide, so the fix is not one model deep. Every same-tier substitution must be
@@ -378,18 +397,54 @@ test('a same-tier route is priced as the SUBSTITUTION it is, not as no route', (
       if (Math.abs(est.saved) > 1e-12) { moved++; total += Math.abs(est.saved); }
     }
   }
-  // TWO numbers, because they are two different facts and conflating them is how "63"
+  // TWO numbers, because they are two different facts and conflating them is how "53"
   // would quietly become whatever the catalog happens to hold next.
-  //   73  same-tier routes that substitute a model at all
-  //   63  of those whose price actually differs — the population that was mispriced
+  //   63  same-tier routes that substitute a model at all
+  //   53  of those whose price actually differs — the population that was mispriced
   // The remaining 10 (claude-opus-4-8/-4-7/-4-6/-4-5 -> claude-opus-5, gpt-5.5 ->
   // gpt-5.6-sol, grok-4.20 -> grok-4.3, mistral-nemo -> ministral-3-8b) are real
   // substitutions onto an identically-priced model, so $0.00 is the CORRECT answer for
   // them — and it always was. They are counted here so that a future catalog edit which
   // moves one of them into the mispriced set cannot do it silently.
-  assert.equal(n, 73, 'same-tier substitutions in the shipped catalog');
-  assert.equal(moved, 63, 'of which this many really move a dollar at 1M/1M');
-  assert.ok(Math.abs(total - 1851.20) < 1e-6,
+  //
+  // THESE WERE 73 / 63 / $1851.20 UNTIL 2026-08-09, AND THE DROP IS THE POINT.
+  // Mistral's sonnet slot then held 'mistral-small-4', a HAIKU-tier model. Every
+  // sonnet-tier Mistral model therefore counted as a SAME-TIER substitution onto it —
+  // a mid request served by a cheap model, booked here as a same-tier saving. Exactly
+  // ten (model, content) pairs left the set when the slot was corrected to name a real
+  // sonnet model, and none entered:
+  //   * mistral-medium-3.5 /sonnet /opus — the sonnet slot now names this model itself,
+  //     so there is no substitution left to price (`substituted` false).
+  //   * magistral-medium, mixtral-8x22b, devstral-2, codestral /sonnet — each is cheaper
+  //     than the $9.00 sonnet target, so router.py's DOLLAR CEILING now walks them down
+  //     and they are honest tier DOWNGRADES (routedTier haiku), not same-tier routes.
+  //   * the same four /opus — the classifier calls these hard, so the QUALITY FLOOR stops
+  //     the ceiling from walking below the escalated tier and they PASS THROUGH instead.
+  // The $47.70 that left (1851.20 - 1803.50) is those ten pairs' old deltas against
+  // mistral-small-4's $0.75 basket: (9.00-0.75)*2 + (7.00-0.75)*2 + (8.00-0.75)*2 +
+  // (2.40-0.75)*2 + (1.20-0.75)*2 = 16.50 + 12.50 + 14.50 + 3.30 + 0.90. It was never a
+  // same-tier saving; it was a tier downgrade wearing a same-tier label.
+  //
+  // $1803.50 -> $1783.50 LATER ON 2026-08-09, when OpenAI's 272k long-context tiers were
+  // added to the catalog. `n` and `moved` did NOT move (63 and 53 both hold): no route
+  // changed its tier or its served model, because the ceiling ranks every OpenAI model on
+  // this same 1M/1M basket and the new rates preserved the existing order. Only the
+  // DOLLARS moved, in exactly seven same-tier pairs, and they reconcile to the cent:
+  //   gpt-5.6-sol is the openai opus target, and at 1M input it now costs $55 not $35,
+  //   so each of the SIX opus-tier models routed onto it books $20 less apparent saving
+  //   (gpt-5.5-pro, gpt-5.2-pro, gpt-5-pro, o1-pro, o1, o3-pro — none of which publishes
+  //   a long tier of its own, so their own cost is unchanged);
+  //   gpt-5.4-pro is the exception and moves the OTHER way (+$100), because it DOES
+  //   publish a long tier, so its own basket rose $210 -> $330 while its target rose only
+  //   $35 -> $55.
+  //   6 * (-20) + 100 = -20 = 1803.50 - 1783.50.
+  // Verified by reconstructing the OLD condition (the six longContext entries stripped
+  // back off), which reproduces 715 / 63 / 53 / $1803.50 exactly — the method is sound,
+  // so the numbers it yields under the new condition are trustworthy. Do NOT "restore"
+  // the $20: it was the arithmetic of a short-context rate applied to a 1M-token prompt.
+  assert.equal(n, 63, 'same-tier substitutions in the shipped catalog');
+  assert.equal(moved, 53, 'of which this many really move a dollar at 1M/1M');
+  assert.ok(Math.abs(total - 1783.50) < 1e-6,
     'the measured total the old line reported as $0.00: $' + total.toFixed(2));
 });
 

@@ -135,22 +135,26 @@ const { TIERS, rank } = require('../src/peek/classify');
 // RATCHET, not an excuse: a mismatch that is not listed here fails the gate, and a listed
 // one that no longer reproduces ALSO fails the gate, so the list cannot outlive its
 // blockers. Every entry names the exact blocker and the exact fix.
-const KNOWN_TIER_MISMATCHES = {
-  'mistral.sonnet':
-    "target 'mistral-small-4' is tier haiku, so Mistral's mid slot is filled by a cheap "
-    + "model and a sonnet-tier request is silently answered one tier down. Fix: point it "
-    + "at 'mistral-medium-3.5' (tier sonnet). BLOCKED BY cli/test/peek.test.js:343, whose "
-    + "`mid <= top` price invariant this correction would break — mistral-medium-3.5 "
-    + "prices at $9.00/2Mtok while the corrected top target prices at $2.00.",
-  'mistral.opus':
-    "target 'mistral-medium-3.5' is tier sonnet, so an auto-escalated hard request on a "
-    + "Mistral model is answered by a MID-capability model while reported as top tier. "
-    + "Fix: point it at 'mistral-large-3' (tier opus) — which is also CHEAPER "
-    + "($0.5/$1.5 vs $1.5/$7.5), so this correction raises quality and lowers cost. "
-    + "BLOCKED BY the same cli/test/peek.test.js:343 `mid <= top` invariant, which the "
-    + "catalog itself already contradicts (models.js:64: 'Mistral's flagship costs less "
-    + "than its mid model').",
-};
+//
+// EMPTY, AND THAT IS THE POINT — it is the ratchet's terminal state, not a disabled gate.
+// The machinery below is unchanged: an unlisted mismatch still fails, and a listed one
+// that no longer reproduces still fails, so this object can only ever shrink to nothing
+// and then stay there.
+//
+// It held two entries until 2026-08-09, both Mistral, both cleared by fixing the targets
+// rather than by widening the ledger:
+//   mistral.sonnet -> 'mistral-small-4'     (tier haiku)  — a mid request answered one
+//                                             tier down;
+//   mistral.opus   -> 'mistral-medium-3.5'  (tier sonnet) — an auto-escalated hard
+//                                             request answered by a MID-capability model
+//                                             while reported as top tier.
+// Each named the same blocker: a `mid <= top` PRICE assertion in cli/test/peek.test.js.
+// That assertion inferred capability order from price, which models.js:59-64 forbids
+// outright and which the catalog contradicts for this exact family ("Mistral's flagship
+// costs less than its mid model"), so it was the assertion — not the route table — that
+// was wrong. It is gone, replaced by a direct per-slot tier assertion; see the long note
+// at its former site in peek.test.js before re-introducing any price ordering here.
+const KNOWN_TIER_MISMATCHES = {};
 
 let targetFailures = 0;
 const seenMismatches = new Set();
