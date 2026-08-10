@@ -178,6 +178,35 @@ else
   printf '%s\n' "$out" | sed 's/^/        | /' | head -n 20
 fi
 
+echo "=== 14. step ORDER is the script's, never the order you typed ==="
+# The header claims `cli` runs LAST of the publishing steps because an npm version is
+# immutable while every other target overwrites. That claim is only true if the dispatch
+# order is structural — if naming steps on the command line could reorder them, an
+# operator typing `cli web` would publish an irreversible version BEFORE the reversible
+# web deploy, which is the exact failure the ordering exists to prevent.
+#
+# Asserted by asking for them in the WRONG order and reading which banner prints first.
+# `web` is used as the marker because its banner is unmistakable and it fails fast in the
+# stub workspace without needing credentials.
+fresh_workspace
+order_out="$("$WS/cheaper-deploy.sh" cli web 2>&1)"
+web_line="$(printf '%s' "$order_out" | grep -n 'web — wrangler deploy' | head -1 | cut -d: -f1)"
+cli_line="$(printf '%s' "$order_out" | grep -n 'cli — npm publish\|npm publish' | head -1 | cut -d: -f1)"
+if [ -n "$web_line" ] && [ -n "$cli_line" ] && [ "$web_line" -lt "$cli_line" ]; then
+  printf '  PASS  typing `cli web` still runs web BEFORE cli  (web@%s < cli@%s)\n' "$web_line" "$cli_line"
+  PASS=$((PASS+1))
+elif [ -n "$web_line" ] && [ -z "$cli_line" ]; then
+  # cli can legitimately not reach its banner in the stub (no npm identity); web having
+  # run at all still proves it was dispatched first.
+  printf '  PASS  typing `cli web` still runs web first (cli never reached its banner)\n'
+  PASS=$((PASS+1))
+else
+  printf '  FAIL  step order followed the command line instead of the script\n'
+  printf '        web banner at line %s, cli banner at line %s\n' "${web_line:-none}" "${cli_line:-none}"
+  printf '%s\n' "$order_out" | sed 's/^/        | /' | head -n 20
+  FAIL=$((FAIL+1))
+fi
+
 echo
 echo "──────────────────────────────────────────"
 printf 'pre-flight: %s passed, %s failed\n' "$PASS" "$FAIL"

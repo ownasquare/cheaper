@@ -6,7 +6,26 @@
 #   ./cheaper-deploy.sh cli web docker  # a subset (any order of the names below)
 #   ./cheaper-deploy.sh --help
 #
-# Steps (run in this order):  git → [PRE-FLIGHT] → cli → web → desktop → docker → verify
+# Steps (run in this order):  git → [PRE-FLIGHT] → web → desktop → docker → cli → verify
+#
+# `cli` IS LAST OF THE PUBLISHING STEPS, DELIBERATELY. Two reasons, and the first is the
+# load-bearing one:
+#
+#   * IT IS THE ONLY STEP THAT CANNOT BE TAKEN BACK. `wrangler deploy` overwrites, and an
+#     R2 `put` overwrites — re-run either and the mistake is gone. An npm version is
+#     IMMUTABLE, and unpublish is restricted to a 72-hour window after which the number is
+#     burned forever. Publishing it first meant a web or R2 failure later left a version
+#     live on npm that no other surface served, and the only remedy was to burn another
+#     version number. Running it after the reversible steps means a failure upstream of it
+#     costs nothing but a re-run.
+#   * IT IS THE ONLY STEP THAT NEEDS A HUMAN MID-RUN — npm's browser approval. Second in
+#     the order, it parked the whole deploy behind a browser tab before anything shipped.
+#
+# The tradeoff, stated rather than hidden: cheaper.app now goes live a few minutes BEFORE
+# the matching npm version exists, so `npx cheaper` briefly resolves to the previous
+# release while the site describes the new one. That window is small, self-healing, and
+# strictly preferable to an immutable publish stranded by a later failure — and `verify`
+# runs after `cli` precisely so the mismatch cannot end the run unnoticed.
 #   git      commit & push cheaper-app / cheaper-desktop / cheaper-web (asks per repo).
 #            This is what pushes the updated README.md to GitHub. It reports a repo
 #            "clean & in sync" ONLY when `git status` and `git log @{u}..HEAD` both
@@ -352,7 +371,10 @@ fi
 # match nothing: `./cheaper-deploy.sh dektop` printed the banner and "Done." with exit 0
 # while running literally no step. Validate every positional up front and die on the
 # first unknown one, naming the valid set.
-VALID_STEPS="git cli web desktop docker verify"
+# Listed in RUN order, not alphabetically, so `--help` and this list cannot disagree about
+# where the irreversible step sits. Naming steps on the command line still runs them in the
+# script's order, never the order you typed them.
+VALID_STEPS="git web desktop docker cli verify"
 for a in "$@"; do
   case " $VALID_STEPS " in
     *" $a "*) ;;
@@ -1408,7 +1430,7 @@ step_verify(){
 
 # ---- run ------------------------------------------------------------------
 have node || die "node is required"; have npm || die "npm is required"; have git || die "git is required"
-STEPS="${*:-git cli web desktop docker verify}"
+STEPS="${*:-git web desktop docker cli verify}"
 wants(){ printf ' %s ' "$STEPS" | grep -q " $1 "; }
 
 b "Cheaper deploy — running: $STEPS"
@@ -1425,14 +1447,26 @@ wants git     && { step_git;     }
 # pre-flight has already called err(), so the run exits 1 through the normal summary.
 if wants cli || wants web || wants desktop || wants docker; then
   if require_releasable; then
-    wants cli     && { step_cli;     }
     wants web     && { step_web;     }
     wants desktop && { step_desktop; }
     wants docker  && { step_docker;  }
+    # cli LAST of the publishing steps. See the header: every step above overwrites and
+    # can simply be re-run, an npm version cannot — it is immutable and unpublish closes
+    # after 72 hours. Published first, a later web/R2 failure stranded a live npm version
+    # no other surface served, and the only way out was to burn another version number.
+    # It is also the only step that stops to wait for a human (npm's browser approval),
+    # which second in the order parked the entire deploy before anything had shipped.
+    wants cli     && { step_cli;     }
   fi
 fi
 
-# LAST, and deliberately OUTSIDE the pre-flight gate. It publishes nothing, so
+# LAST — after `cli`, and that adjacency is the point. It asks the registry what version
+# is actually published and compares it to cli/package.json, so the npm publish that just
+# ran is CONFIRMED rather than assumed: `npm publish` printing `+ cheaper@x.y.z` is the
+# client reporting what it sent, not the registry reporting what it serves. It also
+# re-reads every page on cheaper.app and every installer key on dl.cheaper.app.
+#
+# Deliberately OUTSIDE the pre-flight gate, because it publishes nothing:
 # `./cheaper-deploy.sh verify` is a safe standalone health check of what is currently
 # live — including from a dirty tree, which is exactly when you most want to ask.
 wants verify && { step_verify; }
