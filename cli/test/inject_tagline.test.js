@@ -26,6 +26,27 @@ const PLUGIN = path.join(__dirname, '..', 'assets', 'plugin');
 const HOOK = path.join(PLUGIN, 'hooks', 'inject-tagline-cmd.js');
 const STOP_HOOK = path.join(PLUGIN, 'hooks', 'stop-tagline.js');
 
+// THE CLI UNDER TEST IS THIS REPOSITORY'S, PINNED EXPLICITLY.
+//
+// Without this the two end-to-end tests below inherited whatever `resolveCheaper()`
+// happened to find: CHEAPER_BIN, else a `cheaper` binary sitting next to the running
+// node, else a bare PATH lookup. On a developer machine with `npm i -g cheaper` that
+// resolves to the GLOBAL install — a different, older copy of this same CLI — so the
+// tests were green while never once exercising the working tree. On any clean machine it
+// resolves to nothing, and the two tests failed in opposite and equally useless ways:
+//
+//   * "injects the rendered savings line" FAILED, because no CLI means no line. That is
+//     the failure CI reported on 2026-08-09 (453 pass / 1 fail on ubuntu-latest while
+//     macOS showed 454/454), and it read as a Linux bug. It was not: it was the absence
+//     of a global install.
+//   * "injects nothing when there is no saving to report" PASSED — VACUOUSLY. It asserts
+//     an ABSENCE, and a hook that can find no CLI at all produces exactly that absence.
+//     It would have passed against a completely broken hook, and it did.
+//
+// The hermetic tests further down already pin CHEAPER_BIN to purpose-built stubs. These
+// two are the only ones that mean to run the real thing, so they must name it.
+const REAL_CLI = path.join(__dirname, '..', 'bin', 'cheaper.js');
+
 // A minimal Claude Code transcript with enough routed work for a real savings line:
 // an opus main loop plus sonnet sub-agent calls to be credited against it.
 function writeTranscript(dir) {
@@ -58,7 +79,7 @@ test('injects the rendered savings line, never a runnable command', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inj-'));
   const transcript = writeTranscript(dir);
   const r = runHook({ session_id: 'sess', cwd: dir, transcript_path: transcript },
-    { CHEAPER_LEDGER_FILE: path.join(dir, 'lifetime.json') });
+    { CHEAPER_LEDGER_FILE: path.join(dir, 'lifetime.json'), CHEAPER_BIN: REAL_CLI });
 
   assert.equal(r.status, 0, 'hook must always exit 0');
   const out = r.stdout || '';
@@ -92,10 +113,16 @@ test('injects nothing when there is no saving to report', () => {
   const f = path.join(dir, 'empty.jsonl');
   fs.writeFileSync(f, '');
   const r = runHook({ session_id: 'empty', cwd: dir, transcript_path: f },
-    { CHEAPER_LEDGER_FILE: path.join(dir, 'lifetime.json') });
+    { CHEAPER_LEDGER_FILE: path.join(dir, 'lifetime.json'), CHEAPER_BIN: REAL_CLI });
   assert.equal(r.status, 0);
   assert.ok(!/appending the following text/.test(r.stdout || ''),
     'no "append this" instruction without a line to append');
+  // NON-VACUITY: prove the silence came from "nothing to report" and not from "no CLI
+  // was ever found". Without this, the assertion above passes on any machine where the
+  // hook cannot resolve a CLI — which is every clean machine, including CI. The sibling
+  // test proves the same binary DOES produce a line when there is work to report, so the
+  // pair distinguishes a quiet hook from a broken one.
+  assert.ok(fs.existsSync(REAL_CLI), 'the CLI under test must exist, or this proves nothing');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
