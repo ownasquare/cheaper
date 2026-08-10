@@ -6,7 +6,7 @@
 #   ./cheaper-deploy.sh cli web docker  # a subset (any order of the names below)
 #   ./cheaper-deploy.sh --help
 #
-# Steps (run in this order):  git → [PRE-FLIGHT] → cli → web → desktop → docker
+# Steps (run in this order):  git → [PRE-FLIGHT] → cli → web → desktop → docker → verify
 #   git      commit & push cheaper-app / cheaper-desktop / cheaper-web (asks per repo).
 #            This is what pushes the updated README.md to GitHub. It reports a repo
 #            "clean & in sync" ONLY when `git status` and `git log @{u}..HEAD` both
@@ -42,6 +42,38 @@
 #            Refuses to build or upload anything if cli/package.json's version can't be
 #            read — it never invents a placeholder version, because the upload would
 #            overwrite cheaper-gateway-latest.tar.gz, the key every self-hoster pulls.
+#   verify   ASK THE PUBLIC URLS whether they agree with this workspace. Runs last, and
+#            is NOT pre-flight-gated because it publishes nothing — so
+#            `./cheaper-deploy.sh verify` is a safe standalone health check of what is
+#            live right now, including from a dirty tree.
+#
+# CACHE PURGE (web + desktop steps):
+#   An upload is not a publish. Installers on dl.cheaper.app carry max-age=14400 and the
+#   site's HTML is cached at the edge, so a successful upload keeps serving the PREVIOUS
+#   bytes until the TTL expires. Both steps therefore purge exactly what they wrote — the
+#   web step purges every page in web/ in BOTH URL forms, because /<name>.html 307s to
+#   /<name> and it is the redirect target that gets cached and served. A failed purge is
+#   reported but never fatal: the bytes ARE uploaded, and calling that a failed release
+#   would be its own false claim.
+#
+# POST-DEPLOY VERIFICATION (verify step):
+#   Every other step reports on the ACTION it took, never on the result. That gap
+#   produced a wrong answer at every layer of this stack in one week — keys serving the
+#   previous version behind a warm cache, Linux keys serving 0.1.0 for days while the
+#   site advertised 0.4.0, and a publish job reporting success having published nothing.
+#   The verify step states HOW STRONGLY each surface is proved rather than flattening
+#   everything into a tick:
+#     website      BYTE-IDENTICAL — sha256 of what the CDN returns vs the file on disk.
+#     macOS dmg    BYTE-IDENTICAL — R2's etag is the md5 for a single-part upload, so it
+#                  is compared to the local artifact's md5 with no download.
+#     CI artifacts SIZE-MATCHED against that release's own electron-updater manifest
+#                  (latest*.yml), fetched unauthenticated from the GitHub Release. There
+#                  is no local copy to hash; the manifest is the authoritative record.
+#     npm          the registry's `latest` dist-tag vs cli/package.json.
+#   "Could not check" is never "fine": it is counted separately and makes the run exit 1
+#   with INCOMPLETE rather than green. The one warning-not-error case is an artifact whose
+#   manifest is absent while the object itself answers 200 with a non-zero length — a
+#   genuinely weaker statement, labelled as one.
 #
 # Requires: node, npm, git, and CLOUDFLARE_API_TOKEN in your environment (wrangler/R2).
 # The docker step needs a running Docker daemon (it skips gracefully if absent).
@@ -189,6 +221,7 @@ RELEASE_BRANCH="main"
 # PREVIOUS bytes until the TTL expires — which twice looked exactly like a deploy that had
 # not landed, once for 50 minutes on three R2 keys, once for a whole site redeploy.
 PURGE="$APP/scripts/cf-purge.js"
+VERIFY="$APP/scripts/verify-live.js"
 DL_BASE="https://dl.cheaper.app"
 purge_urls(){  # $@ = URLs. Reports, never fatal: the bytes ARE uploaded either way.
   [ "$#" -gt 0 ] || return 0
@@ -319,7 +352,7 @@ fi
 # match nothing: `./cheaper-deploy.sh dektop` printed the banner and "Done." with exit 0
 # while running literally no step. Validate every positional up front and die on the
 # first unknown one, naming the valid set.
-VALID_STEPS="git cli web desktop docker"
+VALID_STEPS="git cli web desktop docker verify"
 for a in "$@"; do
   case " $VALID_STEPS " in
     *" $a "*) ;;
@@ -1344,9 +1377,38 @@ step_docker(){
   fi
 }
 
+# ---- verify: is what is LIVE what we just shipped? -------------------------
+# Every other step reports on the ACTION it took — the push succeeded, wrangler exited 0,
+# `r2 object put` said "Upload complete". None of them look at the RESULT, and that gap
+# produced a wrong answer at every layer of this stack in one week: three R2 keys served
+# the previous version for ~50 minutes after a green upload because the CDN had them
+# cached; the website served the previous build after a green redeploy for the same
+# reason; the Linux keys served 0.1.0 for DAYS while the site advertised 0.4.0; and a
+# publish job reported success having published nothing.
+#
+# In every one of those the deploy output was green and the live bytes were wrong. So the
+# last thing this script does is ask the public URLs, from outside, whether they agree
+# with this workspace.
+step_verify(){
+  b "⑥ verify — is what is LIVE what this workspace says should be live?"
+  if [ ! -f "$VERIFY" ]; then
+    err "missing $VERIFY — cannot verify the deploy, so this run has NOT established that anything shipped"
+    return
+  fi
+  node "$VERIFY" "$WORKSPACE"
+  case $? in
+    0) ok "verified: every surface serves what this workspace says it should" ;;
+    1) err "VERIFICATION FAILED — a live surface does not match this workspace (see the ✗ line(s) above). The deploy steps may all have succeeded; what is SERVED is still wrong." ;;
+    3) # Not a mismatch, but the run cannot claim the release is verified either — the
+       # same distinction git_repo() and put_r2() make between "wrong" and "could not look".
+       err "VERIFICATION INCOMPLETE — one or more surfaces could not be checked (see the ? line(s) above). Nothing here says they are wrong; it says nobody has established that they are right." ;;
+    *) err "the verifier itself failed to run — treat this release as unverified" ;;
+  esac
+}
+
 # ---- run ------------------------------------------------------------------
 have node || die "node is required"; have npm || die "npm is required"; have git || die "git is required"
-STEPS="${*:-git cli web desktop docker}"
+STEPS="${*:-git cli web desktop docker verify}"
 wants(){ printf ' %s ' "$STEPS" | grep -q " $1 "; }
 
 b "Cheaper deploy — running: $STEPS"
@@ -1369,6 +1431,11 @@ if wants cli || wants web || wants desktop || wants docker; then
     wants docker  && { step_docker;  }
   fi
 fi
+
+# LAST, and deliberately OUTSIDE the pre-flight gate. It publishes nothing, so
+# `./cheaper-deploy.sh verify` is a safe standalone health check of what is currently
+# live — including from a dirty tree, which is exactly when you most want to ask.
+wants verify && { step_verify; }
 
 # The human summary prints first, then the exit code agrees with it. Anything that
 # called err() — a REFUSED installer, a push/publish/deploy failure, an unreadable

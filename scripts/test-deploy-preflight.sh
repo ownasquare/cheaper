@@ -141,6 +141,22 @@ mkdir -p "$WS/cheaper-desktop/dist"
 scenario "authorised partial release exits 0" 0 "PARTIAL RELEASE" desktop --allow-partial-platforms
 scenario "and still says what those keys serve" 0 "PREVIOUS version" desktop --allow-partial-platforms
 
+echo "=== 13. verify is NOT pre-flight-gated — it publishes nothing ==="
+# The synthetic workspace has no cheaper-app/scripts/verify-live.js, so this exercises the
+# missing-verifier branch and makes NO network request. That is deliberate: the point here
+# is the WIRING (does verify run at all, and is it reached from a dirty tree), not the
+# verification itself, and a test suite that silently depends on the public internet fails
+# for reasons that have nothing to do with the code under test.
+fresh_workspace
+printf 'uncommitted\n' > "$WS/cheaper-web/file.txt"
+# If verify were inside the gated block, the pre-flight would refuse and this banner would
+# never print. Its presence on a DIRTY tree is the proof.
+scenario "verify runs on a dirty tree" 1 "⑥ verify" verify
+
+echo "=== 14. a missing verifier is an ERROR, not a silent skip ==="
+fresh_workspace
+scenario "missing verify-live.js fails the run" 1 "cannot verify the deploy" verify
+
 echo
 echo "=== workspace resolution: invoking through a symlink from elsewhere ==="
 fresh_workspace
