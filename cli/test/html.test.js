@@ -4664,3 +4664,122 @@ test('dashboard.html: render() invalidates, and showTab() forces past the loaded
     'showTab() consumes logsStale regardless of which page it lands on — a historical page '
     + 'says nothing about page 1');
 });
+
+// ===========================================================================
+// counts.unpriced WAS COMPUTED AND SHOWN TO NOBODY.
+//
+// metrics.py has published five named reasons a row contributed nothing to any dollar
+// figure — plus `unpriced_total`, `priced` and `examined` — since the pricing rewrite, and
+// no surface rendered any of it. A reader whose saving looked implausibly small had no way
+// to discover that (say) 40% of their calls named a model with no rate in the catalog.
+// Each reason has a DIFFERENT remedy, which is why the total alone would not do.
+// ===========================================================================
+
+const UNPRICED_FNS = ['num', 'esc', 'measuredValue', 'themeColor', 'renderUnpriced'];
+
+function unpricedDriver(cssVars) {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const wrap = { innerHTML: '' };
+  const doc = { getElementById(id) { return id === 'unpricedWrap' ? wrap : null; },
+                documentElement: {} };
+  const gcs = () => ({ getPropertyValue: (n) => (cssVars || {})[n] || '' });
+  const drive = new Function('document', 'getComputedStyle',
+    varSource(js, 'UNPRICED_REASONS') + '\n'
+    + UNPRICED_FNS.map((n) => fnSource(js, n)).join('\n\n')
+    + '\nreturn function(d){ renderUnpriced(d); };'
+  )(doc, gcs);
+  return (d) => { wrap.innerHTML = ''; drive(d); return wrap.innerHTML; };
+}
+
+const counts = (o) => ({ counts: Object.assign({ examined: 0, priced: 0, unpriced: {} }, o) });
+
+test('dashboard.html: every unpriced reason is named, counted and given its remedy', () => {
+  const html = unpricedDriver()(counts({
+    examined: 100, priced: 60,
+    unpriced: { estimated_usage: 20, non_2xx: 10, model_not_in_catalog: 7,
+                undatable: 2, cache_state_indeterminate: 1 },
+  }));
+  const t = text(html);
+  // Each reason appears with its own count — a lone total cannot be acted on, because the
+  // five remedies are different.
+  assert.match(t, /Token counts were estimated/, 'estimated_usage is not named');
+  assert.match(t, /did not succeed/, 'non_2xx is not named');
+  assert.match(t, /No published rate for that model/, 'model_not_in_catalog is not named');
+  assert.match(t, /No derivable calendar day/, 'undatable is not named');
+  assert.match(t, /Cache state unrecoverable/, 'cache_state_indeterminate is not named');
+  // …and the one that is usually the reader's to fix says so.
+  assert.match(t, /add the rate/,
+    'the catalog gap does not tell the reader it is the actionable one');
+  // The excluded total is stated as EXCLUDED, never as a zero contribution.
+  assert.match(t, /40 of 100 examined calls contributed nothing/,
+    `the excluded total is not stated; got: ${t.slice(0, 400)}`);
+  assert.match(t, /excluded, not counted as zero/,
+    'the panel does not distinguish an excluded row from a row that saved nothing');
+  // One bar segment per non-zero reason, plus the priced segment.
+  assert.strictEqual((html.match(/<i style="width:/g) || []).length, 6,
+    'the bar does not carry one segment per population');
+});
+
+test('dashboard.html: a reason with no rows is omitted rather than drawn at zero', () => {
+  const html = unpricedDriver()(counts({
+    examined: 10, priced: 8, unpriced: { estimated_usage: 2, non_2xx: 0 },
+  }));
+  assert.ok(!/did not succeed/.test(text(html)),
+    'a zero-count reason was listed, padding the legend with rows that describe nothing');
+  assert.strictEqual((html.match(/<i style="width:/g) || []).length, 2,
+    'a zero-width segment was emitted');
+});
+
+test('dashboard.html: a fully-priced window says so positively', () => {
+  // "Nothing was excluded" is a real, reassuring result and must not render as an empty
+  // panel that reads like a broken one.
+  const t = text(unpricedDriver()(counts({ examined: 42, priced: 42, unpriced: {} })));
+  assert.match(t, /Every one of the 42 examined calls could be priced/,
+    `a clean window did not say so; got: ${t.slice(0, 300)}`);
+});
+
+test('dashboard.html: the unpriced panel reconciles, and SAYS SO when it cannot', () => {
+  // metrics.py's own comment invites the reader to check priced + unpriced == examined.
+  // Printing the check is what makes the panel falsifiable instead of decorative.
+  const bad = text(unpricedDriver()(counts({
+    examined: 100, priced: 60, unpriced: { estimated_usage: 5 },
+  })));
+  assert.match(bad, /do not reconcile/,
+    'counts that cannot add up were rendered as though they did');
+  assert.match(bad, /report it/, 'the mismatch does not tell the reader what to do');
+
+  const good = text(unpricedDriver()(counts({
+    examined: 10, priced: 7, unpriced: { non_2xx: 3 },
+  })));
+  assert.ok(!/do not reconcile/.test(good), 'a reconciling panel claimed it did not');
+});
+
+test('dashboard.html: an older gateway that reports no coverage is not read as full coverage', () => {
+  // "This gateway does not report it" and "nothing was excluded" are different statements.
+  const silent = text(unpricedDriver()({ counts: { intercepted: 5 } }));
+  assert.match(silent, /does not report which calls could be priced/,
+    'a gateway publishing no unpriced block was silently treated as fully priced');
+  assert.match(silent, /cheaper gateway restart/, 'it does not say how to fix it');
+
+  const empty = text(unpricedDriver()(counts({ examined: 0, priced: 0, unpriced: {} })));
+  assert.match(empty, /No calls have been examined yet/,
+    'an empty store rendered as a coverage claim rather than as "nothing yet"');
+});
+
+test('dashboard.html: a TRUNCATED summary says its proportions describe a sample', () => {
+  const t = text(unpricedDriver()(counts({
+    examined: 5000, priced: 4000, unpriced: { estimated_usage: 1000 }, truncated: true,
+  })));
+  assert.match(t, /This is a SAMPLE/,
+    'a capped summary presented its proportions as though they covered the whole ledger');
+});
+
+test('dashboard.html: the unpriced swatches follow the cascade, not hard-coded hex', () => {
+  // Same rule the sparkline learned: a presentation attribute cannot carry var(), so the
+  // colour is resolved in JS — and it must be resolved FROM THE THEME.
+  const html = unpricedDriver({ '--green': '#047857', '--amber': '#b45309' })(counts({
+    examined: 10, priced: 8, unpriced: { estimated_usage: 2 },
+  }));
+  assert.match(html, /#047857/, 'the priced segment ignored the light-theme --green');
+  assert.match(html, /#b45309/, 'the estimated segment ignored the light-theme --amber');
+});

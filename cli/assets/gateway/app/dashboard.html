@@ -121,6 +121,27 @@
   .spark-basis .sw.unmeasured{border-top-color:var(--amber);border-top-style:dashed;}
   .spark-basis .sw.nodata{width:18px;height:9px;border:none;background:var(--muted);
     opacity:0.18;border-radius:2px;}
+  /* ---- WHY A ROW WAS NOT PRICED --------------------------------------------------
+     metrics.py has always published counts.unpriced — five named reasons a row
+     contributed nothing to any dollar figure — and no surface rendered any of it, not
+     even the total. It is the most ACTIONABLE block on the payload: model_not_in_catalog
+     means "add that rate", estimated_usage means "this client is not returning usage".
+     A reader who cannot see it can only wonder why the money looks small.
+     These are ROW COUNTS, not dollars, so they carry no measured/unmeasured basis — a
+     count of excluded rows is the same number however the rows were priced. */
+  .unpriced-bar{display:flex;width:100%;height:14px;border-radius:7px;overflow:hidden;
+    background:var(--bg);border:1px solid var(--line);}
+  .unpriced-bar i{display:block;height:100%;}
+  .unpriced-legend{display:grid;grid-template-columns:auto 1fr auto;gap:4px 10px;
+    align-items:baseline;margin-top:12px;font-size:0.8rem;}
+  .unpriced-legend .sw{width:10px;height:10px;border-radius:3px;align-self:center;}
+  .unpriced-legend .lbl{color:var(--text);}
+  .unpriced-legend .lbl small{display:block;color:var(--muted);font-size:0.72rem;
+    line-height:1.45;margin-top:1px;}
+  .unpriced-legend .n{color:var(--muted);font-variant-numeric:tabular-nums;
+    white-space:nowrap;}
+  .unpriced-note{font-size:0.78rem;color:var(--muted);line-height:1.55;margin-top:10px;}
+  .unpriced-note b{color:var(--text);}
   .spark-cap{font-size:0.74rem;color:var(--muted);margin-top:8px;line-height:1.5;}
   .spark-cap code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
     padding:1px 5px;font-size:0.72rem;color:var(--text);}
@@ -621,6 +642,13 @@
         <button type="button" data-baseline="historical">vs your history</button>
       </div>
       <div class="dim-grid" id="dimGrid"></div>
+    </div>
+
+    <!-- Sits directly under the money it qualifies: this is the population those figures
+         were computed over, and which rows were left out of them. -->
+    <div class="panel">
+      <h2>What the figures above cover</h2>
+      <div id="unpricedWrap"></div>
     </div>
 
     <div class="panel">
@@ -1386,6 +1414,123 @@
     html += '<div class="card"><div class="label">Models changed</div><div class="value green">' + changed.toLocaleString('en-US') + '</div></div>';
     html += '<div class="card"><div class="label">Reasoning-reduction opportunities</div><div class="value green">' + opps.toLocaleString('en-US') + '</div></div>';
     document.getElementById('countsRow').innerHTML = html;
+  }
+
+  // ---------- Why a row contributed nothing to any dollar figure ----------
+  //
+  // metrics.py has published `counts.unpriced` since the pricing rewrite and NO surface
+  // ever rendered it — not the breakdown, not even `unpriced_total`. So a reader whose
+  // saving looked implausibly small had no way to discover that, say, 40% of their calls
+  // named a model with no rate in the catalog. Every one of these reasons has a different
+  // remedy, which is exactly why the total alone would not be enough.
+  //
+  // ORDER IS FIXED, not sorted by size. This reads as a ledger that must reconcile —
+  // priced + the five reasons = examined — and a legend whose rows move between paints is
+  // one a reader cannot learn. The colours are the page's existing categorical swatches.
+  var UNPRICED_REASONS = [
+    ['estimated_usage', 'Token counts were estimated, not reported',
+     'The provider returned no usage for these calls, so their tokens were inferred from '
+     + 'the request. Inferred tokens can be counted, but they cannot be priced as measured.',
+     '--amber'],
+    ['non_2xx', 'The call did not succeed',
+     'A non-2xx response has no completion to bill, so there is nothing to price.', '--red'],
+    ['model_not_in_catalog', 'No published rate for that model',
+     'The model, or its rate on that call’s own day, is absent from the price catalog. '
+     + 'This is the one you can usually fix: add the rate and these calls start counting.',
+     '--blue'],
+    ['undatable', 'No derivable calendar day',
+     'Without a day there is no historical rate to price at, and pricing it at today’s '
+     + 'rates would silently substitute one frame for another.', '--pink'],
+    ['cache_state_indeterminate', 'Cache state unrecoverable',
+     'A model switch invalidated the prompt cache and the baseline arm’s cache state '
+     + 'cannot be recovered from the record, so the saving’s SIGN is undetermined — '
+     + 'not merely its size.', '--muted']
+  ];
+
+  function renderUnpriced(d){
+    var wrap = document.getElementById('unpricedWrap');
+    if (!wrap) return;
+    var counts = (d && d.counts) || {};
+    var by = (counts.unpriced && typeof counts.unpriced === 'object') ? counts.unpriced : null;
+    var examined = measuredValue(counts.examined);
+    // An older gateway publishes neither block. "This gateway does not report it" and
+    // "nothing was excluded" are different statements and must not render alike.
+    if (!by || examined.missing){
+      wrap.innerHTML = '<div class="unpriced-note">This gateway does not report which calls '
+        + 'could be priced, so the figures above cannot be scoped. Upgrade and restart it '
+        + 'with <code>cheaper gateway restart</code>.</div>';
+      return;
+    }
+    if (examined.value <= 0){
+      wrap.innerHTML = '<div class="unpriced-note">No calls have been examined yet, so there '
+        + 'is nothing to include or exclude.</div>';
+      return;
+    }
+    var priced = Math.max(0, num(counts.priced, 0));
+    var rows = [], excluded = 0;
+    UNPRICED_REASONS.forEach(function(r){
+      var n = Math.max(0, num(by[r[0]], 0));
+      excluded += n;
+      if (n > 0) rows.push({ key: r[0], label: r[1], why: r[2], color: r[3], n: n });
+    });
+    var pctOf = function(n){ return (n / examined.value) * 100; };
+    var seg = function(color, n, title){
+      return '<i style="width:' + pctOf(n).toFixed(2) + '%;background:'
+        + themeColor(color, 'var(' + color + ')') + '" title="' + esc(title) + '"></i>';
+    };
+
+    var bar = '<div class="unpriced-bar" role="img" aria-label="'
+      + esc(priced.toLocaleString('en-US') + ' of ' + examined.value.toLocaleString('en-US')
+            + ' examined calls could be priced') + '">';
+    if (priced > 0) bar += seg('--green', priced, priced.toLocaleString('en-US') + ' priced');
+    rows.forEach(function(r){
+      bar += seg(r.color, r.n, r.n.toLocaleString('en-US') + ' — ' + r.label);
+    });
+    bar += '</div>';
+
+    var legend = '<div class="unpriced-legend">';
+    var line = function(color, label, why, n){
+      return '<span class="sw" style="background:' + themeColor(color, 'var(' + color + ')')
+        + '"></span><span class="lbl">' + esc(label)
+        + (why ? '<small>' + esc(why) + '</small>' : '') + '</span>'
+        + '<span class="n">' + n.toLocaleString('en-US') + ' · '
+        + pctOf(n).toFixed(1) + '%</span>';
+    };
+    if (priced > 0){
+      legend += line('--green', 'Priced', 'These are the calls every dollar figure above is '
+        + 'computed from.', priced);
+    }
+    rows.forEach(function(r){ legend += line(r.color, r.label, r.why, r.n); });
+    legend += '</div>';
+
+    // THE RECONCILIATION metrics.py's own comment invites a reader to check:
+    // priced + sum(unpriced) == examined. Printing it is what turns the panel from a
+    // decoration into something falsifiable — and a mismatch is a real defect, so it is
+    // reported rather than hidden behind a percentage that would still look plausible.
+    var note = '';
+    if (excluded === 0){
+      note = '<div class="unpriced-note">Every one of the <b>'
+        + examined.value.toLocaleString('en-US') + '</b> examined call'
+        + (examined.value === 1 ? '' : 's') + ' could be priced, so the figures above cover '
+        + 'all of them.</div>';
+    } else {
+      note = '<div class="unpriced-note"><b>' + excluded.toLocaleString('en-US') + '</b> of '
+        + examined.value.toLocaleString('en-US') + ' examined call'
+        + (examined.value === 1 ? '' : 's') + ' contributed nothing to any dollar figure '
+        + 'above. They are excluded, not counted as zero.</div>';
+    }
+    if (priced + excluded !== examined.value){
+      note += '<div class="unpriced-note" style="color:var(--red)">These counts do not '
+        + 'reconcile: ' + priced.toLocaleString('en-US') + ' priced + '
+        + excluded.toLocaleString('en-US') + ' excluded is not '
+        + examined.value.toLocaleString('en-US') + ' examined. Treat this panel as unreliable '
+        + 'and report it.</div>';
+    }
+    if (num(counts.truncated, 0) === 1 || counts.truncated === true){
+      note += '<div class="unpriced-note">This is a SAMPLE: more rows exist than this '
+        + 'summary examined, so the proportions describe the examined window only.</div>';
+    }
+    wrap.innerHTML = bar + legend + note;
   }
 
   // ---------- Savings dimensions (money / tokens / time) ----------
@@ -2759,6 +2904,7 @@
     paintStatus();
     renderCards(data);
     renderCounts(data);
+    renderUnpriced(data);
     renderDims(data);
     renderSpark(data);
     renderByTool(data);
