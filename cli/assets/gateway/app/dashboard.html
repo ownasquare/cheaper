@@ -3449,6 +3449,7 @@
   // INVALIDATES and the pane refetches only when it is actually on screen.
   var lastSeenNewest = null;    // newest row instant these panes have already fetched against
   var reportsStale = false;     // a newer row exists than the Reports pane's data
+  var logsStale = false;        // …and than the Logs pane's
   var reportsLastFetch = 0;
   var logsLastFetch = 0;
   var REFETCH_THROTTLE_MS = 10000;
@@ -3466,24 +3467,50 @@
     return n.missing ? null : n.value;
   }
 
+  // LEVEL-TRIGGERED, not edge-triggered. This is the whole design, and getting it wrong is
+  // subtle enough to be worth stating: the refreshers run on EVERY frame, not only on the
+  // frame that carried a new row.
+  //
+  // The edge-triggered version — mark stale, refresh once, done — silently loses arrivals.
+  // A refresh can DECLINE for three legitimate reasons (throttled, tab hidden, a load
+  // already in flight), and /ws re-pushes the SAME newest_ts every five seconds, so
+  // `newest > lastSeenNewest` is false on every later frame and nothing ever retries. Row
+  // arrives, refresh declines, traffic stops, pane is stale forever — which is precisely the
+  // defect this code exists to remove, reintroduced in the fix for it.
+  //
+  // refreshMonitor has always been called unconditionally from render() for exactly this
+  // reason. The flag is the LEVEL; each frame re-offers it until a load actually starts.
   function noteFreshness(d){
     var newest = payloadNewest(d);
-    if (newest === null) return;                                     // nothing recorded yet
-    if (lastSeenNewest === null){ lastSeenNewest = newest; return; } // first frame: baseline
-    if (!(newest > lastSeenNewest)) return;                          // no new row since
-    lastSeenNewest = newest;
-    reportsStale = true;
+    if (newest !== null){
+      if (lastSeenNewest === null){
+        lastSeenNewest = newest;          // first frame: baseline, nothing is stale yet
+      } else if (newest > lastSeenNewest){
+        lastSeenNewest = newest;
+        reportsStale = true;
+        logsStale = true;
+      }
+    }
     refreshReports(false);
     refreshLogs(false);
   }
 
   // Both mirror refreshMonitor's shape — visible-gated, then throttled — rather than
   // inventing a second refresh idiom on the same page.
+  //
+  // ORDER MATTERS IN THE TAIL. The flag is cleared and the throttle armed only once every
+  // guard has passed and the load is certain to start. Doing the bookkeeping first and then
+  // calling a loader that early-returns on its own `loading` guard consumes the signal
+  // without acting on it, and the pane never recovers.
   function refreshReports(force){
+    if (!reportsStale && !force) return;                 // nothing has changed
     if (!force && currentTab() !== 'reports') return;
     // Never fetched at all: showTab owns the first load, and racing it here would run the
     // same three requests twice on the switch that opens the tab.
     if (!reportsState.loaded) return;
+    // Already in flight. Keep the flag — its response predates the row we just heard about,
+    // so the next frame must try again rather than assume this load covered it.
+    if (reportsState.loading) return;
     var now = Date.now();
     if (!force && (now - reportsLastFetch) < REFETCH_THROTTLE_MS) return;
     reportsLastFetch = now;
@@ -3492,15 +3519,18 @@
   }
 
   function refreshLogs(force){
+    if (!logsStale && !force) return;
     if (!force && currentTab() !== 'logs') return;
     // PAGE ONE ONLY. Replacing rows under a reader who has paged back into history is worse
     // than showing them a page a few seconds old: their position is theirs, and nothing
-    // announced that it was about to move. Paging back to the newest page picks up the new
-    // rows, because loadLogs() re-requests from the server every time.
+    // announced that it was about to move. The flag SURVIVES, so returning to page 1 gets
+    // the new rows rather than a view frozen at whenever they paged away.
     if (logsCursorStack.length !== 0) return;
+    if (logsLoading) return;                             // in flight — same reasoning as above
     var now = Date.now();
     if (!force && (now - logsLastFetch) < REFETCH_THROTTLE_MS) return;
     logsLastFetch = now;
+    logsStale = false;
     loadLogs(null);
   }
 
@@ -3517,12 +3547,21 @@
       var link = document.querySelector('#tabNav a[data-tab="' + t + '"]');
       if (link) link.classList.toggle('active', t === name);
     });
-    if (name === 'logs') loadLogs(logsCursorStack[logsCursorStack.length - 1] || null);
-    // FORCE when a row arrived while this tab was hidden. loadReports' own guard is
-    // `loaded && !force`, and `loaded` cannot tell "already fetched" from "still current" —
-    // so without this the pane shows its first-load figures for the life of the page, which
-    // is exactly the defect. Read-and-clear, so one arrival causes one refetch.
-    if (name === 'reports'){ var staleNow = reportsStale; reportsStale = false; loadReports(staleNow); }
+    if (name === 'logs'){
+      // Landing on page 1, this load IS the refresh, so consume the flag rather than let the
+      // next /ws frame issue a second identical request. Landing mid-history it must NOT be
+      // consumed: that load is a historical page and says nothing about page 1.
+      if (logsCursorStack.length === 0) logsStale = false;
+      loadLogs(logsCursorStack[logsCursorStack.length - 1] || null);
+    }
+    if (name === 'reports'){
+      // First visit does the initial load. Later visits delegate to refreshReports, which
+      // refetches only if a row actually arrived while this tab was hidden — and which
+      // clears the flag only once the load is certain to start. Clearing it HERE would
+      // consume the signal even when loadReports declines on its own `loading` guard.
+      if (!reportsState.loaded) loadReports(false);
+      else refreshReports(false);
+    }
     if (name === 'monitor') refreshMonitor(true);
   }
   window.addEventListener('hashchange', function(){ showTab(currentTab()); });

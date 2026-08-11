@@ -4446,19 +4446,30 @@ function invalidationDriver(opts) {
     tab: opts.tab || 'dashboard',
     loaded: opts.reportsLoaded !== false,
     cursors: opts.cursors || [],
+    // The REAL loaders both begin `if (…loading) return;` and signal that refusal to nobody.
+    // A driver whose stubs always accept cannot see a dropped invalidation, which is exactly
+    // how the first version of this code shipped a signal it consumed without acting on.
+    reportsLoading: !!opts.reportsLoading,
+    logsLoading: !!opts.logsLoading,
     now: 1_000_000,
   };
   const api = new Function('calls', 'state',
     // Time is injected so the throttle can be tested without sleeping.
     'var Date = { now: function(){ return state.now; } };\n'
     + 'function currentTab(){ return state.tab; }\n'
-    + 'var reportsState = { get loaded(){ return state.loaded; } };\n'
+    + 'var reportsState = { get loaded(){ return state.loaded; },\n'
+    + '                     get loading(){ return state.reportsLoading; } };\n'
     + 'var logsCursorStack = state.cursors;\n'
-    + 'function loadReports(force){ calls.reports.push(force); }\n'
-    + 'function loadLogs(cursor){ calls.logs.push(cursor); }\n'
+    // refreshLogs reads a plain `logsLoading` binding, so it is synced from the mutable test
+    // state on each push rather than being an accessor (a getter cannot be installed over a
+    // `var` in this scope).
+    + 'var logsLoading = false;\n'
+    + 'function loadReports(force){ if (state.reportsLoading) return; calls.reports.push(force); }\n'
+    + 'function loadLogs(cursor){ if (state.logsLoading) return; calls.logs.push(cursor); }\n'
     + fnSource(js, 'measuredValue') + '\n'
     + varSource(js, 'lastSeenNewest') + '\n'
     + varSource(js, 'reportsStale') + '\n'
+    + varSource(js, 'logsStale') + '\n'
     + varSource(js, 'reportsLastFetch') + '\n'
     + varSource(js, 'logsLastFetch') + '\n'
     + varSource(js, 'REFETCH_THROTTLE_MS') + '\n'
@@ -4466,8 +4477,9 @@ function invalidationDriver(opts) {
     + fnSource(js, 'noteFreshness') + '\n'
     + fnSource(js, 'refreshReports') + '\n'
     + fnSource(js, 'refreshLogs') + '\n'
-    + 'return { push: function(d){ noteFreshness(d); },\n'
+    + 'return { push: function(d){ logsLoading = state.logsLoading; noteFreshness(d); },\n'
     + '         stale: function(){ return reportsStale; },\n'
+    + '         logsStale: function(){ return logsStale; },\n'
     + '         seen: function(){ return lastSeenNewest; } };'
   )(calls, state);
   return { api, calls, state };
@@ -4518,12 +4530,66 @@ test('dashboard.html: Reports refetch is throttled, so a burst of rows is not a 
     d.api.push(fresh(3000));                       // inside the window — must not fetch
     assert.deepEqual(d.calls.reports, [true],
       'the throttle did not hold: three heavy endpoints re-ran for a row that arrived one second later');
-    // …but the pane is still known to be behind, so the NEXT eligible moment refetches.
     assert.strictEqual(d.api.stale(), true, 'a throttled arrival silently lost its staleness');
+
+    // THE RETRY IS THE POINT. /ws re-pushes the SAME summary every five seconds, so an
+    // edge-triggered design would never revisit that throttled row: `newest > lastSeenNewest`
+    // is false forever after, and if traffic then stops, the pane stays stale for the life of
+    // the page — the exact defect this code exists to remove. The refreshers are therefore
+    // level-triggered, and an UNCHANGED payload must complete the deferred refetch.
     d.state.now += 20000;
-    d.api.push(fresh(4000));
-    assert.deepEqual(d.calls.reports, [true, true], 'the throttle never released');
+    d.api.push(fresh(3000));                       // no new row, just a later frame
+    assert.deepEqual(d.calls.reports, [true, true],
+      'a throttled arrival was never retried — with no further rows, the Reports pane would '
+      + 'show pre-arrival figures forever, which is what this whole change is about');
+    assert.strictEqual(d.api.stale(), false, 'the retry did not clear the flag');
   });
+
+test('dashboard.html: an invalidation that lands during an in-flight load is kept, not '
+   + 'swallowed', () => {
+    // Both real loaders open with `if (…loading) return;` and tell the caller nothing. The
+    // first version of this code cleared the flag and armed the throttle BEFORE calling them,
+    // so a row arriving during a load in flight was consumed without ever being acted on —
+    // and since the next frames carry the same newest_ts, the pane never recovered.
+    const r = invalidationDriver({ tab: 'reports', reportsLoading: true });
+    r.api.push(fresh(1000));
+    r.api.push(fresh(2000));
+    assert.deepEqual(r.calls.reports, [], 'the stub accepted a load it should have refused');
+    assert.strictEqual(r.api.stale(), true,
+      'the invalidation was consumed by a load already in flight — that response predates the '
+      + 'new row, so the flag must SURVIVE for the next frame to retry');
+    // The load finishes; the very next frame — same payload, no new row — must pick it up.
+    r.state.reportsLoading = false;
+    r.state.now += 20000;
+    r.api.push(fresh(2000));
+    assert.deepEqual(r.calls.reports, [true], 'the kept invalidation was never acted on');
+
+    // Logs has the identical shape against its own `logsLoading` guard.
+    const l = invalidationDriver({ tab: 'logs', logsLoading: true });
+    l.api.push(fresh(1000));
+    l.api.push(fresh(2000));
+    assert.deepEqual(l.calls.logs, []);
+    assert.strictEqual(l.api.logsStale(), true, 'Logs dropped an invalidation mid-flight');
+    l.state.logsLoading = false;
+    l.state.now += 20000;
+    l.api.push(fresh(2000));
+    assert.deepEqual(l.calls.logs, [null], 'Logs never retried the kept invalidation');
+  });
+
+test('dashboard.html: a reader paged back into history KEEPS the pending invalidation', () => {
+  // Declining to move them is right; forgetting that page 1 has new rows is not. Returning to
+  // page 1 must not show a view frozen at whenever they paged away.
+  const d = invalidationDriver({ tab: 'logs', cursors: ['cur-abc'] });
+  d.api.push(fresh(1000));
+  d.api.push(fresh(2000));
+  assert.deepEqual(d.calls.logs, [], 'rows were replaced under a paged-back reader');
+  assert.strictEqual(d.api.logsStale(), true,
+    'the pending invalidation was dropped, so returning to page 1 would not refresh');
+  d.state.cursors.length = 0;          // they page back to the newest page
+  d.state.now += 20000;
+  d.api.push(fresh(2000));
+  assert.deepEqual(d.calls.logs, [null], 'page 1 did not pick up the rows that arrived while paged away');
+});
 
 test('dashboard.html: Logs auto-refreshes on page 1 and NEVER under a reader who has paged '
    + 'back', () => {
@@ -4582,10 +4648,19 @@ test('dashboard.html: render() invalidates, and showTab() forces past the loaded
   // And the tab switch must consume the flag. `loaded` cannot distinguish "already fetched"
   // from "still current", so a non-forced load on a stale pane is a silent no-op.
   const showTab = fnSource(js, 'showTab');
-  assert.match(showTab, /reportsStale/,
-    'showTab() ignores the staleness flag, so a row that arrived while Reports was hidden '
-    + 'never reaches the pane — it shows its first-load figures for the life of the page');
-  assert.match(showTab, /reportsStale = false/,
-    'showTab() does not CLEAR the flag, so one arrival would force a refetch on every '
-    + 'subsequent switch to the tab, forever');
+  // Reports must DELEGATE, not hand-roll the decision. showTab clearing the flag itself is
+  // what consumed invalidations that loadReports then declined; refreshReports is the one
+  // place that clears it, and only once a load is certain to start.
+  assert.match(showTab, /refreshReports\(/,
+    'showTab() does not delegate to refreshReports(), so a row that arrived while Reports was '
+    + 'hidden never reaches the pane');
+  assert.ok(!/reportsStale\s*=\s*false/.test(showTab),
+    'showTab() clears reportsStale itself — that consumes the signal even when loadReports '
+    + 'declines on its own `loading` guard, which is the bug this delegation removes');
+  assert.match(showTab, /reportsState\.loaded/,
+    'showTab() no longer owns the FIRST load, so opening the tab shows an empty pane');
+  // Logs consumes its flag only when the load it issues is actually page 1.
+  assert.match(showTab, /logsCursorStack\.length === 0/,
+    'showTab() consumes logsStale regardless of which page it lands on — a historical page '
+    + 'says nothing about page 1');
 });
