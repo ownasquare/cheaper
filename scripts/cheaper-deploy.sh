@@ -209,6 +209,40 @@
 #   shipped release that was in fact refused.
 #   Unknown step names are rejected before anything runs (a typo like `dektop` used to
 #   run nothing at all and still exit 0).
+# ---- THIS SCRIPT IS BASH, AND SAYS SO OUT LOUD ----------------------------
+#
+# Invoked as `sh cheaper-deploy.sh`, this file died with:
+#
+#   cheaper-deploy.sh: line 1167: syntax error near unexpected token `<'
+#   cheaper-deploy.sh: line 1167: `    done < <(find "$WEB/web" ...'
+#
+# The shebang says bash, but a shebang is only consulted when the KERNEL launches the
+# file (`./cheaper-deploy.sh`). Naming an interpreter explicitly overrides it, and on
+# macOS /bin/sh is bash 3.2 in POSIX mode, which disables process substitution — so the
+# failure is a PARSE error, thrown before a single line of the deploy runs. It is also a
+# deeply misleading one: it points at line 1167 of a working script and says nothing
+# about the actual cause, which is 1167 lines earlier and on the command line.
+#
+# Rather than document "please use bash" and let the next person hit the same wall, the
+# script corrects the invocation itself. Everything below this block is bash — arrays
+# (`urls+=(...)`, `"${urls[@]+...}"`) and the process substitution above — and none of it
+# is worth rewriting in POSIX sh to accommodate a way nobody should be running it.
+#
+# This works because shells read a script incrementally, executing each command as it is
+# parsed: `exec` replaces the process here, at the top, long before the reader ever
+# reaches the bash-only syntax further down. So this guard must stay ABOVE all of it.
+#
+# Kept POSIX-clean for the same reason — it has to parse under whatever shell got here.
+if [ -z "${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then
+    exec bash "$0" "$@"
+  fi
+  echo "cheaper-deploy.sh: this script requires bash (it uses arrays and process" >&2
+  echo "  substitution); no bash was found on PATH. Install one, or run it as" >&2
+  echo "  ./cheaper-deploy.sh so the shebang picks the right interpreter." >&2
+  exit 127
+fi
+
 set -u
 
 # ---- config ---------------------------------------------------------------
