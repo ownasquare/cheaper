@@ -350,6 +350,11 @@ const PROBE = {
   MALFORMED: 'malformed',     // a listener answered 200 with a body we could not parse
   TIMEOUT: 'timeout',         // no answer inside the budget — alive-but-slow is indistinguishable
   UNREACHABLE: 'unreachable', // socket error (ECONNREFUSED) — nothing is serving that port
+  // A LIVENESS check answered, and NO metrics request was ever made. Deliberately its own
+  // outcome rather than reuse of ANSWERED: every other consumer reads ANSWERED as "a summary
+  // came back", and there is no summary here. It proves exactly one thing — something is
+  // serving HTTP on the port — which is the whole of the claim the "See logs" link makes.
+  LIVE: 'live',
 };
 
 // Something spoke HTTP on the port. Deliberately WEAKER than ANSWERED: a 401, or a body we
@@ -358,7 +363,8 @@ const PROBE = {
 // here would hide the dashboard from exactly the users whose gateway is up but whose token
 // file is stale, which is the population most in need of it.
 function gatewayIsListening(outcome) {
-  return outcome === PROBE.ANSWERED || outcome === PROBE.REJECTED || outcome === PROBE.MALFORMED;
+  return outcome === PROBE.ANSWERED || outcome === PROBE.REJECTED
+      || outcome === PROBE.MALFORMED || outcome === PROBE.LIVE;
 }
 
 // One reader for the port, so a notice, a link and a request can never name different ones.
@@ -410,6 +416,38 @@ function fetchGatewaySession(sessionId, timeoutMs = 600) {
       req.on('error', () => finish(null, PROBE.UNREACHABLE));
       req.on('timeout', () => { req.destroy(); finish(null, PROBE.TIMEOUT); });
     } catch { finish(null, PROBE.UNREACHABLE); }
+  });
+}
+
+// LIVENESS ONLY, and ONLY for the path on which no metrics request is made at all.
+//
+// dashboardUrl() reuses the session probe on purpose (see its comment): issuing a second GET
+// there would double the tagline's only network cost on a Stop hook running against a 15 s
+// budget. That reasoning holds whenever a session probe EXISTS. It does not cover the case
+// where there is none: with neither --session nor --transcript, `sid` is null, computeSavings
+// issues nothing, the outcome stays NOT_PROBED, and the link is suppressed against a gateway
+// that is demonstrably up — a hand-run `cheaper peek --tagline` hid a dashboard answering on
+// the same port in the same second. The INVOCATION STYLE was deciding whether a working link
+// printed, which is not a fact about the gateway.
+//
+// So this fires only on that path, where it replaces zero requests with one rather than
+// doubling anything. It asks /healthz — unauthenticated, cheaper than /metrics, and it can
+// never 401 — and never reads the body. Any HTTP answer counts, non-200 included: that is the
+// same deliberately-weak rule gatewayIsListening() already applies to REJECTED, because the
+// link claims the page resolves, not that /metrics was readable.
+function probeGatewayLiveness(timeoutMs = 600) {
+  return new Promise((resolve) => {
+    const port = gatewayPort();
+    let done = false;
+    const finish = (outcome, status) => {
+      if (!done) { done = true; resolve({ outcome, status: status || null, timeoutMs }); }
+    };
+    try {
+      const req = http.get({ host: '127.0.0.1', port, path: '/healthz', timeout: timeoutMs },
+        (res) => { res.resume(); finish(PROBE.LIVE, res.statusCode); });
+      req.on('error', () => finish(PROBE.UNREACHABLE));
+      req.on('timeout', () => { req.destroy(); finish(PROBE.TIMEOUT); });
+    } catch { finish(PROBE.UNREACHABLE); }
   });
 }
 
@@ -695,8 +733,9 @@ function emitEvents(records, opts) {
 // two of them: a refused socket is proof nothing is serving the port, a timeout is not
 // (alive-and-slow looks identical from here), and a non-200 is a live gateway we were not
 // allowed to read — telling that user to run `gateway start` sends them after a process that
-// is already running. ANSWERED and NOT_PROBED return '': one has nothing to report, and the
-// other never asked and must not imply it did.
+// is already running. ANSWERED, LIVE and NOT_PROBED return '': the first two have nothing to
+// report, and the last never asked and must not imply it did. LIVE in particular is a gateway
+// we confirmed is UP without requesting metrics — there is no fallback to explain.
 function gatewayFallbackNotice(probe) {
   const at = ':' + gatewayPort();
   const tail = ' — this figure is a local estimate, not measured routing.';
@@ -728,6 +767,23 @@ async function computeSavings(opts, preRecords, probeOut) {
   // gateway is up nor evidence it is down.
   const probe = { outcome: PROBE.NOT_PROBED, status: null, timeoutMs: null, port: gatewayPort() };
   if (probeOut) Object.assign(probeOut, probe);
+  if (!sid && probeOut) {
+    // No session id, so no metrics request will be made and the "See logs" gate has nothing
+    // to reuse. Establish liveness on its own — but as an UPGRADE ONLY. A failed liveness
+    // check leaves the outcome at NOT_PROBED rather than becoming UNREACHABLE/TIMEOUT,
+    // because gatewayFallbackNotice() exists to explain why the MEASUREMENT fell back to the
+    // estimate, and on this path no measurement was ever attempted. Reporting "gateway not
+    // reachable — this figure is a local estimate, not measured routing" here would answer a
+    // question nobody asked, and P0.1 pinned that silence deliberately. Guarded on probeOut
+    // so a caller that does not want the probe still pays nothing.
+    const live = await probeGatewayLiveness();
+    if (gatewayIsListening(live.outcome)) {
+      probe.outcome = live.outcome;
+      probe.status = live.status;
+      probe.timeoutMs = live.timeoutMs;
+      Object.assign(probeOut, probe);
+    }
+  }
   if (sid) {
     const probed = await fetchGatewaySession(sid);
     probe.outcome = probed.outcome;
@@ -863,4 +919,5 @@ module.exports = { run, computeSavings, realizedFromRecords, fromGateway, buildT
                    // Exported so the probe's five outcomes can be asserted on directly. A
                    // notice that fires for the wrong outcome sends a user after the wrong
                    // fix, and that is not visible from the rendered line at all.
-                   PROBE, gatewayIsListening, gatewayFallbackNotice, dashboardUrl };
+                   PROBE, gatewayIsListening, gatewayFallbackNotice, dashboardUrl,
+                   probeGatewayLiveness };

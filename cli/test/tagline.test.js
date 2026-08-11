@@ -225,6 +225,68 @@ test('P0.1: NO SESSION ID means the probe never ran — and claims nothing in ei
   assert.ok(!/See logs/.test(r.json.full), 'nor may it claim the dashboard resolves: ' + r.json.full);
 });
 
+test('no session id but a LIVE gateway still gets the logs link — the invocation style is '
+   + 'not a fact about the gateway', async () => {
+    // The bug: with neither --session nor --transcript there is no session id, so
+    // computeSavings issued nothing, the outcome stayed NOT_PROBED, and dashboardUrl()
+    // suppressed the link — against a gateway answering on that very port. A hand-run
+    // `cheaper peek --tagline` hid a dashboard that was demonstrably up, and the owner read
+    // that as "the logs link disappeared".
+    const r = await runTagline({ sidechain: true, gateway: 'ok',
+                                 run: { transcript: undefined, current: true } });
+    assert.equal(r.json.gateway.probe, PROBE.LIVE,
+      'a liveness check that answered must be reported as its own outcome, not as NOT_PROBED '
+      + 'and not as ANSWERED (there is no summary): probe=' + r.json.gateway.probe);
+    assert.match(r.json.full, /See logs/,
+      'the link is still suppressed against a gateway that answered: ' + r.json.full);
+    assert.equal(r.stderr, '',
+      'a gateway we confirmed is UP has no fallback to explain: ' + JSON.stringify(r.stderr));
+    // Exactly ONE request. Zero was the bug; two would be the duplicated GET that
+    // dashboardUrl()'s comment forbids on the Stop hook's hot path.
+    assert.equal(r.requests, 1,
+      `the no-session path made ${r.requests} request(s); it must make exactly one`);
+  });
+
+test('a liveness probe that FAILS stays NOT_PROBED — it must not invent a diagnosis', async () => {
+  // The upgrade-only rule. gatewayFallbackNotice() exists to explain why the MEASUREMENT fell
+  // back to an estimate; on this path no measurement was ever attempted, so a failed liveness
+  // check must not start printing "gateway not reachable — this figure is a local estimate,
+  // not measured routing". That silence is what the P0.1 test above pins, and widening the
+  // probe must not cost it.
+  const r = await runTagline({ sidechain: true, gateway: null,
+                               run: { transcript: undefined, current: true } });
+  assert.equal(r.json.gateway.probe, PROBE.NOT_PROBED,
+    'a failed liveness check leaked into the reported outcome: ' + r.json.gateway.probe);
+  assert.equal(r.stderr, '', 'it fabricated a diagnosis: ' + JSON.stringify(r.stderr));
+  assert.ok(!/See logs/.test(r.json.full), 'and still must not claim the page resolves');
+});
+
+test('the liveness probe asks /healthz, never the token-gated /metrics', async () => {
+  // /healthz is unauthenticated, so this path can never 401 and can never be tempted to read
+  // a summary it did not ask for. It also keeps the real ~/.cheaper/dash.token out of a
+  // request made purely to decide whether to print a link.
+  const paths = [];
+  const srv = httpMod.createServer((req, res) => {
+    paths.push(req.url);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const prevPort = process.env.CHEAPER_PORT;
+  process.env.CHEAPER_PORT = String(srv.address().port);
+  try {
+    const tag = freshTagline();
+    const out = await tag.probeGatewayLiveness();
+    assert.equal(out.outcome, PROBE.LIVE);
+    assert.deepEqual(paths, ['/healthz'],
+      'the liveness probe hit ' + JSON.stringify(paths) + ' instead of /healthz alone');
+  } finally {
+    if (prevPort === undefined) delete process.env.CHEAPER_PORT;
+    else process.env.CHEAPER_PORT = prevPort;
+    await new Promise((r) => srv.close(r));
+  }
+});
+
 test('P0.1: the notice distinguishes refused, timed out, unreadable and never-asked', async () => {
   // Four different remedies, so four different sentences. Collapsing them is what made the
   // original bug invisible.
