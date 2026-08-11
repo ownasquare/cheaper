@@ -317,6 +317,53 @@ scenario "and names what the site will keep saying" 0 "keep naming 0.3.0 as the 
 # operator at the wrong file. Each override line is printed only for the check it covers.
 scenario_absent "and does not claim git diverged when it did not" 0 "will NOT match what origin/main shows" docker --allow-unreleasable
 
+# $1 name  $2 interpreter  $3 expected-exit  $4 pattern that MUST appear  $5 pattern that
+# must NOT appear  $6... args. Runs the script through an EXPLICIT interpreter, which is
+# what overrides the shebang and what every one of these scenarios is about.
+scenario_interp(){
+  local name="$1" interp="$2" want_rc="$3" want_txt="$4" bad_txt="$5"; shift 5
+  local out rc
+  out="$("$interp" "$WS/cheaper-deploy.sh" "$@" 2>&1)"; rc=$?
+  local ok_rc=false ok_txt=false ok_bad=false
+  [ "$rc" = "$want_rc" ] && ok_rc=true
+  printf '%s' "$out" | grep -q -- "$want_txt" && ok_txt=true
+  printf '%s' "$out" | grep -q -- "$bad_txt" || ok_bad=true
+  if $ok_rc && $ok_txt && $ok_bad; then
+    printf '  PASS  %s  (exit %s)\n' "$name" "$rc"; PASS=$((PASS+1))
+  else
+    printf '  FAIL  %s\n' "$name"; FAIL=$((FAIL+1))
+    $ok_rc  || printf '        expected exit %s, got %s\n' "$want_rc" "$rc"
+    $ok_txt || printf '        expected output to contain: %s\n' "$want_txt"
+    $ok_bad || printf '        output must NOT contain: %s\n' "$bad_txt"
+    printf '%s\n' "$out" | sed 's/^/        | /' | head -n 25
+  fi
+}
+
+echo
+echo "=== interpreter guard: an explicit non-bash interpreter must not kill the parse ==="
+# `sh cheaper-deploy.sh` died with "syntax error near unexpected token \`<'" pointing at
+# the `done < <(find ...)` that feeds the cache purge — a PARSE error thrown before any
+# step ran, naming a line ~1000 lines away from the real cause (the command line).
+#
+# On macOS /bin/sh IS bash invoked as `sh`: it sets BASH_VERSION and then disables process
+# substitution. The first guard asked "is BASH_VERSION set", so it never fired, and the
+# only visible symptom of that inertness was the reported line number moving by exactly the
+# number of lines the guard had added. That is why this test exists, and why it runs the
+# REAL script rather than asserting on the guard's source.
+#
+# `docker` is the step every other positive scenario uses: it returns immediately with no
+# daemon present and publishes nothing. Reaching it means the reader got past the process
+# substitution, which is the whole point — a scenario using --help or a bad step name would
+# exit at the argument parser hundreds of lines EARLIER and prove nothing. That is exactly
+# the mistake the original "verification" of this fix made.
+fresh_workspace
+scenario_interp "sh: re-execs under bash and runs to the shipping step" \
+  /bin/sh 0 "level with origin" "syntax error" docker
+scenario_interp "zsh: same, despite zsh's own array semantics" \
+  zsh 0 "level with origin" "syntax error" docker
+scenario_interp "bash: unchanged, no re-exec needed" \
+  bash 0 "level with origin" "syntax error" docker
+
 echo
 echo "──────────────────────────────────────────"
 printf 'pre-flight: %s passed, %s failed\n' "$PASS" "$FAIL"

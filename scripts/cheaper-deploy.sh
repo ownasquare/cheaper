@@ -233,7 +233,21 @@
 # reaches the bash-only syntax further down. So this guard must stay ABOVE all of it.
 #
 # Kept POSIX-clean for the same reason — it has to parse under whatever shell got here.
-if [ -z "${BASH_VERSION:-}" ]; then
+#
+# TEST THE CAPABILITY, NOT THE INTERPRETER'S NAME. The first version of this guard asked
+# `[ -z "$BASH_VERSION" ]` and was completely inert, because on macOS /bin/sh IS the bash
+# binary invoked as `sh`: it sets BASH_VERSION=3.2.57 and then disables the very syntax we
+# need. "Am I bash?" was the wrong question — the answer was yes, and the script still
+# could not parse. The right question is "can this shell do what the rest of this file
+# needs", so that is what gets asked:
+#
+#   * BASH_VERSION unset  -> zsh/dash/ksh. Re-exec even where process substitution happens
+#     to work (zsh has it), because the array semantics below are bash's, not theirs.
+#   * eval fails          -> bash in POSIX mode. `eval` defers parsing to RUNTIME, so the
+#     failure is a catchable non-zero exit instead of the fatal parse error that reading
+#     `< <(...)` directly would produce. The subshell contains it: POSIX mode makes some
+#     syntax errors exit the shell, and `( )` means the one that dies is not this one.
+if [ -z "${BASH_VERSION:-}" ] || ! (eval 'true < <(true)') 2>/dev/null; then
   if command -v bash >/dev/null 2>&1; then
     exec bash "$0" "$@"
   fi
