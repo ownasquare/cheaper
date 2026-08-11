@@ -3320,9 +3320,16 @@ test('SUPPRESSION NOTES: three copies, one rule, textually identical', () => {
 // stubbed getComputedStyle standing in for whatever --green the cascade actually
 // resolved (light, dark, or an explicit override) — so the test can prove the chart
 // FOLLOWS the cascade rather than pinning one hard-coded swatch.
-const SPARK_FNS = ['num', 'esc', 'money', 'measuredValue', 'pageOrigin',
+// `durationLabel`, `measurementInfo` and `dollarsAreMeasured` are lifted because the chart
+// is no longer a pure function of `timeseries.points`: it anchors its axis to a clock
+// (seriesNow) and styles its series by the payload's measurement basis. A driver that
+// omitted them would throw rather than assert, which is the failure mode varSource/fnSource
+// exist to make loud.
+const SPARK_FNS = ['num', 'esc', 'money', 'measuredValue', 'pageOrigin', 'durationLabel',
                    'bucketWidthLabel', 'bucketStamp', 'sparkTooFew',
-                   'themeGreen', 'hexToRgba', 'renderSpark'];
+                   'measurementInfo', 'dollarsAreMeasured',
+                   'themeColor', 'themeGreen', 'hexToRgba',
+                   'seriesNow', 'sparkSegments', 'renderSpark'];
 
 // `clientWidth` is stubbed rather than left undefined: renderSpark() sizes its viewBox to
 // the element's MEASURED width so one user unit is one CSS pixel (a stretched <text> is
@@ -3336,11 +3343,17 @@ function sparkDriver(greenValue, clientWidth) {
     getElementById(id) { return id === 'sparkWrap' ? wrap : null; },
     documentElement: {},
   };
-  const gcs = () => ({ getPropertyValue: (name) => (name === '--green' ? greenValue : '') });
+  // --amber is resolved too: an UNMEASURED series is drawn in it, and a stub that returned
+  // '' would silently fall back to the hard-coded literal and make the cascade assertion
+  // vacuous for exactly the branch that needs it most.
+  const AMBER = '#fbbf24';
+  const gcs = () => ({ getPropertyValue: (name) => (
+    name === '--green' ? greenValue : name === '--amber' ? AMBER : '') });
   const drive = new Function('document', 'getComputedStyle',
     varSource(js, 'SPARK_H') + '\n'
     + varSource(js, 'SPARK_PAD') + '\n'
     + varSource(js, 'SPARK_MIN_POINTS') + '\n'
+    + varSource(js, 'DOLLAR_BASES') + '\n'
     + SPARK_FNS.map((n) => fnSource(js, n)).join('\n\n')
     + '\nreturn function(data){ renderSpark(data); };'
   )(doc, gcs);
@@ -3354,7 +3367,17 @@ function sparkDriver(greenValue, clientWidth) {
 // to plot (an axis it cannot date is an axis it must not draw).
 const HOUR = 3600;
 const T0 = 1754_500_000 - (1754_500_000 % HOUR);   // an arbitrary but exact hour boundary
-const TS3 = { timeseries: { bucket_seconds: HOUR, points: [
+// `timeseries.now` is supplied on every geometry fixture and pinned to the LAST bucket, so
+// the axis ends exactly where the data does and these tests keep asserting the pre-existing
+// no-gap geometry. Omitting it would make the chart anchor to the wall clock and every
+// coordinate in this file would drift with the calendar — the gap behaviour gets its own
+// fixtures below, where the distance from the last sample to `now` is the thing under test.
+// `measurement.dollars_basis` is 'measured' for the same reason: the series is drawn in
+// --green only when the payload says the dollars behind it were provider-reported, and a
+// fixture that omitted the block would be styled 'unknown' and fail the colour assertions
+// for a reason that has nothing to do with the cascade. `MEASURED` is the same
+// provider-reported measurement block the money-baseline tests above already use.
+const TS3 = { measurement: MEASURED, timeseries: { bucket_seconds: HOUR, now: T0 + 2 * HOUR, points: [
   { t: T0, saved: 1, spent: 0.5, calls: 3 },
   { t: T0 + HOUR, saved: 2, spent: 0.5, calls: 5 },
   { t: T0 + 2 * HOUR, saved: 1.5, spent: 0.5, calls: 2 },
@@ -3440,9 +3463,10 @@ test('dashboard.html: the spark chart carries a dated time axis, a zero baseline
 
     // …and the width is stated in the unit the payload actually used, not a hard-coded
     // "hour". A day-bucketed trend labelled "1 hour" is a wrong axis, not a rounding.
-    const daily = sparkDriver('#34d399')({ timeseries: { bucket_seconds: 86400, points: [
-      { t: T0, saved: 1, calls: 1 }, { t: T0 + 86400, saved: 2, calls: 1 },
-      { t: T0 + 2 * 86400, saved: 3, calls: 1 }] } });
+    const daily = sparkDriver('#34d399')({ measurement: MEASURED, timeseries: {
+      bucket_seconds: 86400, now: T0 + 2 * 86400, points: [
+        { t: T0, saved: 1, calls: 1 }, { t: T0 + 86400, saved: 2, calls: 1 },
+        { t: T0 + 2 * 86400, saved: 3, calls: 1 }] } });
     assert.match(text(daily), /Each point spans 1 day/,
       'the caption hard-codes an interval instead of reading bucket_seconds');
   });
@@ -3488,10 +3512,11 @@ test('dashboard.html: a NEGATIVE bucket is drawn below the zero line, never clam
   // baseline — a real, signed result the rest of this page goes to some length to
   // preserve — was drawn ON the baseline, indistinguishable from a bucket that saved
   // exactly nothing.
-  const html = sparkDriver('#34d399')({ timeseries: { bucket_seconds: HOUR, points: [
-    { t: T0, saved: 2, calls: 1 },
-    { t: T0 + HOUR, saved: -1, calls: 1 },
-    { t: T0 + 2 * HOUR, saved: 1, calls: 1 }] } });
+  const html = sparkDriver('#34d399')({ measurement: MEASURED, timeseries: {
+    bucket_seconds: HOUR, now: T0 + 2 * HOUR, points: [
+      { t: T0, saved: 2, calls: 1 },
+      { t: T0 + HOUR, saved: -1, calls: 1 },
+      { t: T0 + 2 * HOUR, saved: 1, calls: 1 }] } });
   const labels = svgTexts(html);
   assert.ok(labels.includes('-$1.00'),
     `the negative floor is not labelled on the value axis; got ${JSON.stringify(labels)}`);
@@ -3515,16 +3540,188 @@ test('dashboard.html: a bucket with no derivable figure is dropped and counted, 
     // The old code ran every point through num(p.saved, 0), which drew an ABSENT figure
     // ON the baseline — a measured $0.00 the payload never claimed, at full confidence
     // and with no label anywhere.
-    const html = sparkDriver('#34d399')({ timeseries: { bucket_seconds: HOUR, points: [
-      { t: T0, saved: 1, calls: 1 },
-      { t: T0 + HOUR, saved: null, calls: 1 },
-      { t: T0 + 2 * HOUR, saved: 2, calls: 1 },
-      { t: T0 + 3 * HOUR, saved: 3, calls: 1 }] } });
+    const html = sparkDriver('#34d399')({ measurement: MEASURED, timeseries: {
+      bucket_seconds: HOUR, now: T0 + 3 * HOUR, points: [
+        { t: T0, saved: 1, calls: 1 },
+        { t: T0 + HOUR, saved: null, calls: 1 },
+        { t: T0 + 2 * HOUR, saved: 2, calls: 1 },
+        { t: T0 + 3 * HOUR, saved: 3, calls: 1 }] } });
     const ys = (html.match(/<circle class="dot"/g) || []).length;
     assert.strictEqual(ys, 3, 'the unpriceable bucket was plotted as if it were a figure');
     assert.match(text(html), /1 bucket carried no derivable figure and is not plotted/,
       'the dropped bucket was dropped SILENTLY — a shrinking denominator nobody announces');
   });
+
+// ---------------------------------------------------------------------------
+// THE X AXIS WAS NOT A TIME AXIS.
+//
+// x was the ARRAY INDEX: `x0 + (i * (x1 - x0)) / (pts.length - 1)`. Because metrics.py
+// emits a bucket only when a row lands in it, the array is dense while time is sparse —
+// so a 13-hour hole rendered exactly as wide as a 1-hour step, and the two date labels
+// underneath described a span the geometry did not honour. Worse: the series ended at the
+// last row that happened to exist, so the panel rendered byte-identical on the day traffic
+// stopped and every day after it. A dead gateway was pixel-indistinguishable from a busy
+// one, forever.
+// ---------------------------------------------------------------------------
+
+const dotXs = (html) => (html.match(/<circle class="dot"[^>]*\bcx="([\d.]+)"/g) || [])
+  .map((s) => Number(/cx="([\d.]+)"/.exec(s)[1]));
+
+test('dashboard.html: the spark x axis is TIME, not array index — an unequal gap is drawn '
+   + 'unequally', () => {
+    // Three samples: one hour apart, then FOUR hours apart. Under the old index axis both
+    // steps were identical widths; under a time axis the second must be 4x the first.
+    const html = sparkDriver('#34d399')({ measurement: MEASURED, timeseries: {
+      bucket_seconds: HOUR, now: T0 + 5 * HOUR, points: [
+        { t: T0, saved: 1, calls: 1 },
+        { t: T0 + HOUR, saved: 2, calls: 1 },
+        { t: T0 + 5 * HOUR, saved: 3, calls: 1 }] } });
+    const xs = dotXs(html);
+    assert.strictEqual(xs.length, 3, 'the chart lost its per-bucket markers');
+    const d1 = xs[1] - xs[0], d2 = xs[2] - xs[1];
+    assert.ok(d1 > 0 && d2 > 0, `markers are not left-to-right in time: ${xs}`);
+    assert.ok(Math.abs(d2 / d1 - 4) < 0.05,
+      `a 4-hour gap was drawn ${(d2 / d1).toFixed(2)}x a 1-hour gap, not 4x — x is still an `
+      + `ordinal index rather than an instant (markers at ${xs})`);
+  });
+
+test('dashboard.html: the spark axis is anchored to NOW, so silence is visible instead of '
+   + 'invisible', () => {
+    // The exact live shape that prompted this: samples stop, the gateway keeps running,
+    // and five hours pass with nothing recorded.
+    const stale = { measurement: MEASURED, timeseries: {
+      bucket_seconds: HOUR, now: T0 + 7 * HOUR, points: [
+        { t: T0, saved: 1, calls: 1 },
+        { t: T0 + HOUR, saved: 2, calls: 1 },
+        { t: T0 + 2 * HOUR, saved: 3, calls: 1 }] } };
+    const html = sparkDriver('#34d399')(stale);
+
+    // The unobserved stretch is DRAWN, and drawn as absence.
+    assert.match(html, /class="nodata-band"/,
+      'five hours of silence left no mark on the chart — the panel is byte-identical to a live one');
+    assert.match(html, /class="nodata-rule"/,
+      'nothing marks WHERE observation stopped, so the reader must infer it from where the ink runs out');
+    assert.match(text(html), /no traffic for 5h/,
+      'the gap is drawn but not named, so its size has to be estimated off the axis');
+
+    // …and it is absence, NOT a value. Not one marker, and no stroke, inside the band.
+    const gapX = Number(/<line class="nodata-rule"[^>]*\bx1="([\d.]+)"/.exec(html)[1]);
+    const xs = dotXs(html);
+    assert.strictEqual(xs.length, 3, 'the band invented markers for buckets that recorded nothing');
+    assert.ok(Math.max.apply(null, xs) <= gapX + 0.5,
+      `a marker (${xs}) sits inside the no-traffic band (starts at ${gapX}) — an unrecorded `
+      + 'bucket is being plotted as if it carried a figure');
+
+    // The caption must distinguish the two claims IN WORDS. "$0 saved" and "no calls
+    // happened" are different statements and only one of them is a measurement.
+    assert.match(text(html), /recorded no calls at all/,
+      'the caption does not say the gap is unrecorded rather than zero');
+    assert.match(text(html), /not the same as buckets that saved nothing/,
+      'the caption does not distinguish an unrecorded bucket from a bucket that saved nothing');
+
+    // The RIGHT-HAND axis label is now, not the last row that happens to exist.
+    const labels = svgTexts(html);
+    assert.ok(labels.includes(stampOf(T0 + 7 * HOUR)),
+      `the axis does not run to the present; axis text was ${JSON.stringify(labels)}`);
+
+    // Control: the same series with the clock at the last sample draws no band at all.
+    const live = sparkDriver('#34d399')({ measurement: MEASURED, timeseries: {
+      bucket_seconds: HOUR, now: T0 + 2 * HOUR, points: stale.timeseries.points } });
+    assert.ok(!/class="nodata-band"/.test(live),
+      'a series that runs up to the present still drew a no-traffic band');
+  });
+
+test('dashboard.html: the spark line BREAKS across buckets that were never recorded', () => {
+  // Two runs of observation with a four-hour hole between them. One continuous stroke
+  // across that hole asserts a trend through hours in which nothing was observed.
+  const html = sparkDriver('#34d399')({ measurement: MEASURED, timeseries: {
+    bucket_seconds: HOUR, now: T0 + 6 * HOUR, points: [
+      { t: T0, saved: 1, calls: 1 },
+      { t: T0 + HOUR, saved: 2, calls: 1 },
+      { t: T0 + 5 * HOUR, saved: 3, calls: 1 },
+      { t: T0 + 6 * HOUR, saved: 4, calls: 1 }] } });
+  const strokes = (html.match(/<path class="series[^"]*"/g) || []).length;
+  assert.strictEqual(strokes, 2,
+    `the series was drawn as ${strokes} path(s); a hole in the middle of the data must cut `
+    + 'the stroke, or the chart interpolates a trend through unobserved time');
+  assert.match(text(html), /line breaks in 1 place/,
+    'the break is drawn but never explained, so it reads as a rendering glitch');
+
+  // A CONTIGUOUS series is still exactly one stroke — the break must be caused by the
+  // hole, not by segmenting every point.
+  const solid = sparkDriver('#34d399')(TS3);
+  assert.strictEqual((solid.match(/<path class="series[^"]*"/g) || []).length, 1,
+    'a gapless series was chopped into segments anyway');
+});
+
+// ---------------------------------------------------------------------------
+// THE CHART DREW UNMEASURED DOLLARS AT FULL CONFIDENCE.
+//
+// renderSpark read only p.saved and p.t. It never consulted measurement.dollars_basis, so
+// on the owner's own store — 94 rows, every one with usage_source NULL, dollars_basis
+// "unmeasured", headline.saved null — it plotted $80.52, labelled the value axis with it
+// and put it in the aria-label, directly beneath a banner explaining that the figure must
+// not be quoted as measured. The page contradicted itself in two adjacent elements.
+// ---------------------------------------------------------------------------
+
+test('dashboard.html: an UNMEASURED series is visibly not a measurement', () => {
+  const unmeasured = { measurement: { dollars_basis: 'unmeasured', priced_calls: 94,
+                                      measured_calls: 0, unmeasured_calls: 94 },
+                       timeseries: TS3.timeseries };
+  const html = sparkDriver('#34d399')(unmeasured);
+
+  assert.match(html, /class="series unmeasured"/,
+    'the line carries no basis class, so a stylesheet cannot distinguish it from a measurement');
+  assert.match(html, /stroke="#fbbf24"/,
+    'an unmeasured series is drawn in the measured swatch — the chart asserts a confidence the payload denies');
+  assert.ok(!/stroke="#34d399"/.test(html),
+    'the measured green survived on a series the payload says was never measured');
+  assert.match(text(html), /reconstructed/,
+    'nothing in the caption says the figures were reconstructed rather than measured');
+  assert.match(html, /aria-label="[^"]*not provider-measured/,
+    'the accessible name still presents reconstructed dollars as measured');
+
+  // A gateway that publishes NO measurement block cannot be presented as measured either:
+  // "we do not know" is not "yes". This is the state every pre-upgrade gateway is in.
+  const silent = sparkDriver('#34d399')({ timeseries: TS3.timeseries });
+  assert.match(silent, /class="series unmeasured"/,
+    'a gateway that reports no basis at all had its dollars promoted to measured');
+
+  // Control: the measured payload keeps the plain class and the green.
+  const html2 = sparkDriver('#34d399')(TS3);
+  assert.match(html2, /class="series"/, 'a measured series lost its plain styling');
+  assert.match(html2, /aria-label="[^"]*are provider-measured/,
+    'a measured series does not say so in its accessible name');
+});
+
+test('dashboard.html: a clock running behind the newest row cannot push a sample off its '
+   + 'own chart', () => {
+    // seriesNow() prefers the GATEWAY's clock, but a payload without one falls back to the
+    // browser's, and a skewed browser clock must never produce a right edge EARLIER than a
+    // row that demonstrably exists — that would render a measured point outside the plot.
+    const html = sparkDriver('#34d399')({ measurement: MEASURED, timeseries: {
+      bucket_seconds: HOUR, now: T0 - 10 * HOUR, points: TS3.timeseries.points } });
+    const xs = dotXs(html);
+    const x1 = 600 - 14;      // W - SPARK_PAD.r, with sparkDriver's pinned clientWidth
+    assert.strictEqual(xs.length, 3, 'the chart lost its markers under a backwards clock');
+    assert.ok(Math.max.apply(null, xs) <= x1 + 0.5,
+      `a marker at ${Math.max.apply(null, xs)} overhangs the plot area (ends at ${x1})`);
+    assert.ok(!/class="nodata-band"/.test(html),
+      'a backwards clock invented a no-traffic band out of negative elapsed time');
+  });
+
+test('dashboard.html: renderSpark prefers the GATEWAY clock over the browser clock', () => {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const src = fnSource(js, 'seriesNow');
+  // The order matters: every `ts` in `points` was stamped by the gateway's clock, so the
+  // axis end has to come from that same clock or the gap is measured between two different
+  // ones. Date.now() is the last resort, not the first.
+  assert.ok(src.indexOf('series.now') < src.indexOf('Date.now'),
+    'seriesNow() reaches for the browser clock before the gateway\'s own published one');
+  assert.match(src, /newest_ts/,
+    'seriesNow() has no fallback for a gateway that predates timeseries.now, so those '
+    + 'gateways silently fall through to a browser clock that may be skewed against them');
+});
 
 test('dashboard.html: toggling the theme re-renders the spark chart, not only first paint', () => {
   const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');

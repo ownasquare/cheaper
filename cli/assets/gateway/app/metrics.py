@@ -1312,7 +1312,23 @@ class Metrics:
             ) if total else 0.0,
             "dollars": dollars,
             "by_tool": by_tool,
-            "timeseries": {"bucket_seconds": ts_bucket, "points": points},
+            # `now` is THIS PROCESS'S clock -- the same clock every `ts` in `points` was
+            # stamped with -- and it is the only field here that is not derived from a
+            # row. It exists because `points` is samples-only by design: a bucket is
+            # created (line ~1200) the first time a row lands in it and nothing is
+            # emitted for the buckets in between, so the series cannot say how much time
+            # has passed since the last one. A consumer drawing a time axis therefore had
+            # no upper anchor and could only end the axis at the last row that happened
+            # to exist -- which renders a dead gateway identically to a busy one, forever.
+            #
+            # This is NOT a zero-filled bucket and must never become one. A bucket with no
+            # calls carries no measurement, and emitting `saved: 0.0` for it would
+            # manufacture the confident zero the whole `usage_source` ladder exists to
+            # refuse. The passage of time is a fact; a saving of nothing is a claim.
+            # Publishing the clock lets a renderer draw the first without asserting the
+            # second.
+            "timeseries": {"bucket_seconds": ts_bucket, "points": points,
+                           "now": round(time.time(), 3)},
             "counts": {
                 "intercepted": total,
                 "models_changed": models_changed,

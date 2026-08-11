@@ -2093,3 +2093,59 @@ def test_freshness_is_not_read_off_the_capped_detail_page():
         assert s0["counts"]["examined"] == 0 and s0["total"] == 6
         assert s0["freshness"]["newest_ts"] == pytest.approx(newest, abs=1e-6), s0
         assert s0["freshness"]["live"] is True, s0["freshness"]
+
+
+def test_timeseries_publishes_the_clock_but_never_a_zero_filled_bucket():
+    """``timeseries.now`` exists so a renderer can END ITS AXIS AT THE PRESENT.
+
+    ``points`` is samples-only: a bucket is created the first time a row lands in it and
+    nothing is emitted for the buckets between. That is correct and must stay that way --
+    a bucket with no calls carries no measurement, and emitting ``saved: 0.0`` for it
+    would manufacture exactly the confident zero the ``usage_source`` ladder exists to
+    refuse.
+
+    But it leaves the series unable to say how much time has passed, and a consumer with
+    no upper anchor can only end its axis at the last row that happens to exist -- which
+    renders a gateway nothing is pointed at identically to a busy one, forever. That was
+    a live defect on the dashboard's "Savings over time" panel.
+
+    So the clock is published BESIDE the samples, never mixed into them. This test pins
+    both halves at once, because the tempting "fix" is the one that must not happen: fill
+    the hole with zeros and the axis anchors itself.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.db")
+        m = Metrics(db_path=path)
+        # Two rows, FIVE hours apart: four whole hourly buckets separate them and not one
+        # of them recorded a call.
+        newest = time.time() - 3600
+        oldest = newest - 5 * 3600
+        insert_row(path, ts=oldest, tzo=0, request_id="a")
+        insert_row(path, ts=newest, tzo=0, request_id="b")
+
+        before = time.time()
+        s = m.summary(session="c")
+        after = time.time()
+        ts = s["timeseries"]
+
+        assert ts["bucket_seconds"] == 3600
+
+        # THE CLOCK. This process's own, the same one every `ts` above was stamped with --
+        # not the caller's, and not a row-derived value that would freeze when traffic did.
+        assert "now" in ts, ("timeseries publishes no clock, so a renderer has no upper "
+                             "anchor and its axis must end at the newest row")
+        # The field is rounded to milliseconds, so it can land a fraction BELOW the
+        # instant sampled just before the call. The tolerance is that rounding, not slop.
+        assert before - 0.001 <= ts["now"] <= after + 0.001, (ts["now"], before, after)
+        # It runs AHEAD of the newest sample, which is the whole point: the distance
+        # between them is the silence a chart has to be able to draw.
+        assert ts["now"] > max(p["t"] for p in ts["points"])
+
+        # THE SAMPLES. Still exactly two, still only the buckets that received a row. The
+        # four empty hours between them are ABSENT, not zero-valued.
+        assert len(ts["points"]) == 2, ts["points"]
+        starts = sorted(p["t"] for p in ts["points"])
+        assert starts[1] - starts[0] == 5 * 3600, starts
+        assert all(p["calls"] > 0 for p in ts["points"]), (
+            "a bucket that recorded no call was emitted; `saved: 0.0` for an hour nobody "
+            "was watching is a fabricated measurement, not a zero")

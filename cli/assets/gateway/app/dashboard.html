@@ -94,6 +94,33 @@
      it reads as an axis rather than as another series. */
   svg.spark .zero{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3;opacity:0.7;}
   svg.spark .dot{fill:var(--card);stroke-width:1.5;}
+  /* ---- UNOBSERVED TIME -----------------------------------------------------------
+     A stretch of the axis in which NOTHING WAS MEASURED. It is deliberately not drawn
+     as a value: no stroke, no dot, no area fill, no baseline contact — because a bucket
+     that recorded no call did not record a saving of $0.00, and the whole point of the
+     measuredValue() ladder above is that those two claims must never render alike.
+     A flat wash plus a label is the only honest shape for "we were not watching": it
+     occupies the time it actually covers, and it says so in words rather than leaving
+     the reader to infer a quantity from an empty region. --muted at 7% so it reads as
+     absence of ink rather than as a series in its own right. */
+  svg.spark .nodata-band{fill:var(--muted);opacity:0.07;}
+  /* Where the last real sample sits. The band's left edge IS the last measurement, and
+     a reader has to be able to see exactly where observation stopped. */
+  svg.spark .nodata-rule{stroke:var(--muted);stroke-width:1;stroke-dasharray:2 3;opacity:0.85;}
+  /* The line itself when the dollars behind it are NOT provider-measured. Dashed, so the
+     qualification survives a screenshot cropped past the caption and the legend — the
+     same reasoning that puts .approx inline with the figure it qualifies rather than in
+     a footnote. */
+  svg.spark .series.unmeasured{stroke-dasharray:5 3;}
+  /* The inline basis legend under the chart. Mirrors the wording of the page-level
+     .basis-line rather than inventing a second vocabulary for the same distinction. */
+  .spark-basis{display:inline-flex;align-items:center;gap:6px;margin-right:10px;}
+  .spark-basis .sw{width:18px;height:0;border-top-width:2px;border-top-style:solid;
+    display:inline-block;flex-shrink:0;}
+  .spark-basis .sw.measured{border-top-color:var(--green);}
+  .spark-basis .sw.unmeasured{border-top-color:var(--amber);border-top-style:dashed;}
+  .spark-basis .sw.nodata{width:18px;height:9px;border:none;background:var(--muted);
+    opacity:0.18;border-radius:2px;}
   .spark-cap{font-size:0.74rem;color:var(--muted);margin-top:8px;line-height:1.5;}
   .spark-cap code{background:var(--bg);border:1px solid var(--line);border-radius:5px;
     padding:1px 5px;font-size:0.72rem;color:var(--text);}
@@ -1622,13 +1649,20 @@
   // color, it washed out together with the line instead of compensating for it. Reading
   // the property at render time keeps the chart on whichever swatch the cascade actually
   // chose (OS-default, explicit light, or explicit dark).
-  function themeGreen(){
+  // The general form. A presentation attribute cannot carry var(), so any colour that
+  // has to reach an SVG `stroke="…"`/`fill="…"` must be resolved in JS at render time —
+  // and resolving it from the CASCADE rather than from a JS constant is what keeps the
+  // chart on whichever swatch the theme actually chose. The fallback is the dark-theme
+  // value, matching :root, and is only reached in the node test driver where there is no
+  // getComputedStyle at all.
+  function themeColor(name, fallback){
     try {
-      var v = getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
+      var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
       if (v) return v;
     } catch(e){}
-    return '#34d399';
+    return fallback;
   }
+  function themeGreen(){ return themeColor('--green', '#34d399'); }
   // --green is always a 3- or 6-digit hex (see every :root block above); the area fill
   // needs its own alpha independent of the line color, so this expands the hex into an
   // rgba() rather than adding a second custom property that could drift out of sync.
@@ -1716,6 +1750,60 @@
     return html + '</div>';
   }
 
+  // ---- WHERE THE TIME AXIS ENDS ----------------------------------------------------
+  //
+  // `timeseries.points` carries SAMPLES ONLY. metrics.py creates a bucket via setdefault
+  // the first time a row lands in it and emits nothing for the buckets in between — which
+  // is correct, and must stay that way: a bucket that recorded no call has no measurement
+  // to report, and inventing `saved: 0.0` for it would manufacture exactly the confident
+  // zero measuredValue() exists to refuse.
+  //
+  // The consequence is that the DATA cannot say how much time has passed. Before this,
+  // neither could the chart: x was the array INDEX, so the panel rendered byte-identical
+  // on the day traffic stopped and on every day after it, forever. A gateway nothing was
+  // pointed at looked indistinguishable from a busy one, and a 13-hour hole between two
+  // samples was drawn the same width as a 1-hour step.
+  //
+  // Time is the one quantity here that is measured without inference — the wall clock is
+  // ground truth and requires no assumption about savings. So the axis is anchored to now
+  // and the interval since the last sample is drawn as visible ABSENCE, never as a value.
+  // Prefer the GATEWAY's clock, the same one every `ts` was stamped with:
+  //   1. `timeseries.now`, published for exactly this purpose;
+  //   2. failing that, `freshness.newest_ts + freshness.age_seconds` — the server's clock
+  //      reconstructed from two fields an older gateway already publishes;
+  //   3. only then the browser's, because a skewed local clock inventing a gap is a much
+  //      smaller error than a chart that silently ends whenever the traffic does.
+  function seriesNow(d){
+    var series = (d && d.timeseries) || {};
+    var pub = measuredValue(series.now);
+    if (!pub.missing && pub.value > 0) return pub.value;
+    var f = (d && typeof d.freshness === 'object' && d.freshness) ? d.freshness : null;
+    if (f){
+      var newest = measuredValue(f.newest_ts), age = measuredValue(f.age_seconds);
+      if (!newest.missing && !age.missing && newest.value > 0){
+        return newest.value + Math.max(0, age.value);
+      }
+    }
+    return Date.now() / 1000;
+  }
+
+  // A single stroke from one sample to the next asserts a trend THROUGH every bucket
+  // between them. Where those buckets are absent that assertion is unfounded, so the path
+  // is cut. 1.5x absorbs float rounding in epoch-aligned bucket starts without swallowing
+  // a genuine one-bucket hole.
+  function sparkSegments(coords, pts, bucketSec){
+    var segs = [], cur = [];
+    for (var i = 0; i < coords.length; i++){
+      if (i > 0 && bucketSec > 0 && (pts[i].t - pts[i - 1].t) > bucketSec * 1.5){
+        if (cur.length) segs.push(cur);
+        cur = [];
+      }
+      cur.push(coords[i]);
+    }
+    if (cur.length) segs.push(cur);
+    return segs;
+  }
+
   function renderSpark(d){
     var wrap = document.getElementById('sparkWrap');
     if (!wrap) return;
@@ -1761,25 +1849,68 @@
     if (maxV === minV) maxV = minV + 0.01;      // a perfectly flat series still needs height
     var span = maxV - minV;
     var yFor = function(v){ return yBot - ((v - minV) / span) * (yBot - yTop); };
-    var xFor = function(i){ return x0 + (i * (x1 - x0)) / (pts.length - 1); };
 
-    var coords = pts.map(function(p, i){ return [xFor(i), yFor(p.v)]; });
-    var linePath = coords.map(function(c, i){
-      return (i === 0 ? 'M' : 'L') + c[0].toFixed(1) + ',' + c[1].toFixed(1);
-    }).join(' ');
+    // ---- THE TIME AXIS, anchored to now rather than to the last row that happens to
+    // ---- exist. See seriesNow() above for why the clock and not the data decides this.
+    var tFirst = pts[0].t;
+    var tLast = pts[pts.length - 1].t;
+    // The right edge is the START of the bucket `now` falls in, so it is the same kind of
+    // instant as every plotted point rather than a mid-bucket moment they'd be measured
+    // against. Math.max keeps a skewed clock from pulling the edge BEFORE the newest
+    // sample, which would put a measured point off the right of its own chart.
+    var tNowBucket = bucketSec > 0 ? Math.floor(seriesNow(d) / bucketSec) * bucketSec : seriesNow(d);
+    var tEnd = Math.max(tLast, tNowBucket);
+    // A degenerate span (every sample inside one bucket, clock in that same bucket) still
+    // needs a width to divide by.
+    var tSpan = (tEnd - tFirst) || (bucketSec > 0 ? bucketSec : 1);
+    var xFor = function(t){ return x0 + ((t - tFirst) / tSpan) * (x1 - x0); };
+
+    var coords = pts.map(function(p){ return [xFor(p.t), yFor(p.v)]; });
     var zeroY = yFor(0);
+    // One path per OBSERVED run of buckets. A gap is a gap, not an interpolation.
+    var segs = sparkSegments(coords, pts, bucketSec);
+    var pathOf = function(seg){
+      return seg.map(function(c, i){
+        return (i === 0 ? 'M' : 'L') + c[0].toFixed(1) + ',' + c[1].toFixed(1);
+      }).join(' ');
+    };
     // The area is filled to the ZERO line, not to the bottom of the box, so the shaded
-    // region means "money" rather than "distance above the cheapest bucket".
-    var areaPath = linePath
-      + ' L' + coords[coords.length - 1][0].toFixed(1) + ',' + zeroY.toFixed(1)
-      + ' L' + coords[0][0].toFixed(1) + ',' + zeroY.toFixed(1) + ' Z';
+    // region means "money" rather than "distance above the cheapest bucket". Filled per
+    // segment for the same reason the stroke is: shading across unobserved time would
+    // claim a quantity for it.
+    var areaOf = function(seg){
+      if (seg.length < 2) return '';
+      return pathOf(seg)
+        + ' L' + seg[seg.length - 1][0].toFixed(1) + ',' + zeroY.toFixed(1)
+        + ' L' + seg[0][0].toFixed(1) + ',' + zeroY.toFixed(1) + ' Z';
+    };
 
+    // ---- HOW MUCH OF THE AXIS IS UNOBSERVED -----------------------------------------
+    // The trailing stretch between the newest sample and now. Anything longer than a
+    // bucket-and-a-half is real silence and gets said out loud.
+    var staleSec = tEnd - tLast;
+    var hasGap = bucketSec > 0 && staleSec > bucketSec * 1.5;
+    var gapX = xFor(tLast);
+
+    // ---- IS THE MONEY ON THIS AXIS MEASURED? ----------------------------------------
+    // renderSpark used to read only p.saved and p.t, so it drew the payload's dollars at
+    // full confidence no matter what `measurement.dollars_basis` said about them — a
+    // chart contradicting the banner directly above it. The series now carries its own
+    // basis: solid green for provider-measured, dashed amber for anything else.
+    var measured = dollarsAreMeasured(d);
     var green = themeGreen();
+    var seriesColor = measured ? green : themeColor('--amber', '#fbbf24');
+    var seriesCls = 'series' + (measured ? '' : ' unmeasured');
+
+    var aria = 'Savings per ' + width + ' bucket, ' + bucketStamp(tFirst, bucketSec)
+      + ' to ' + bucketStamp(tLast, bucketSec) + ', peaking at ' + money(maxV) + '. '
+      + (measured ? 'Figures are provider-measured. '
+                  : 'Figures are reconstructed, not provider-measured. ')
+      + (hasGap ? 'No traffic recorded in the ' + durationLabel(staleSec)
+                  + ' since, up to ' + bucketStamp(tEnd, bucketSec) + '.'
+                : 'The series runs to the present.');
     var svg = '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" '
-      + 'preserveAspectRatio="none" role="img" aria-label="'
-      + esc('Savings per ' + width + ' bucket, ' + bucketStamp(pts[0].t, bucketSec)
-            + ' to ' + bucketStamp(pts[pts.length - 1].t, bucketSec)
-            + ', peaking at ' + money(maxV)) + '">';
+      + 'preserveAspectRatio="none" role="img" aria-label="' + esc(aria) + '">';
     // Top gridline + its VALUE, so a height can be read off the chart.
     svg += '<line class="grid" x1="' + x0 + '" y1="' + yTop + '" x2="' + x1 + '" y2="' + yTop + '"></line>';
     svg += '<text x="' + (x0 - 6) + '" y="' + (yTop + 3) + '" text-anchor="end">'
@@ -1796,30 +1927,78 @@
       svg += '<text x="' + (x0 - 6) + '" y="' + (yBot + 3) + '" text-anchor="end">'
           + esc(money(minV)) + '</text>';
     }
-    svg += '<path d="' + areaPath + '" fill="' + hexToRgba(green, 0.15) + '" stroke="none"></path>';
-    svg += '<path d="' + linePath + '" fill="none" stroke="' + green
-        + '" stroke-width="2" vector-effect="non-scaling-stroke"></path>';
+    // UNOBSERVED TIME, drawn UNDER the series so the samples always win the pixel. No
+    // stroke reaches into it, no dot sits in it, no fill touches the baseline through it:
+    // its only claim is "nothing was recorded here", which is the one claim the data
+    // supports.
+    if (hasGap){
+      var bandW = Math.max(0, x1 - gapX);
+      svg += '<rect class="nodata-band" x="' + gapX.toFixed(1) + '" y="' + yTop
+          + '" width="' + bandW.toFixed(1) + '" height="' + (yBot - yTop) + '"><title>'
+          + esc('No routed traffic recorded between ' + bucketStamp(tLast, bucketSec)
+                + ' and ' + bucketStamp(tEnd, bucketSec) + ' — ' + durationLabel(staleSec)
+                + '. No calls happened; that is not a saving of ' + money(0) + '.')
+          + '</title></rect>';
+      // The band's left edge IS the last measurement. A reader has to be able to see
+      // exactly where observation stopped, not infer it from where the ink runs out.
+      svg += '<line class="nodata-rule" x1="' + gapX.toFixed(1) + '" y1="' + yTop
+          + '" x2="' + gapX.toFixed(1) + '" y2="' + yBot + '"></line>';
+      // The words go ON the region they describe when it is wide enough to hold them;
+      // the caption carries the same sentence unconditionally for when it is not.
+      if (bandW > 120){
+        svg += '<text class="nodata-label" x="' + (gapX + bandW / 2).toFixed(1) + '" y="'
+            + ((yTop + yBot) / 2).toFixed(1) + '" text-anchor="middle">'
+            + esc('no traffic for ' + durationLabel(staleSec)) + '</text>';
+      }
+    }
+    segs.forEach(function(seg){
+      var a = areaOf(seg);
+      if (a) svg += '<path d="' + a + '" fill="' + hexToRgba(seriesColor, 0.15) + '" stroke="none"></path>';
+    });
+    segs.forEach(function(seg){
+      if (seg.length < 2) return;   // a lone sample is its dot; a one-point "line" is not one
+      svg += '<path class="' + seriesCls + '" d="' + pathOf(seg) + '" fill="none" stroke="'
+          + seriesColor + '" stroke-width="2" vector-effect="non-scaling-stroke"></path>';
+    });
     // A marker per bucket, each carrying its own instant and figure — the chart is a
     // summary, and a reader who wants the number should not have to guess it off a slope.
     coords.forEach(function(c, i){
       svg += '<circle class="dot" cx="' + c[0].toFixed(1) + '" cy="' + c[1].toFixed(1)
-          + '" r="2.5" stroke="' + green + '"><title>'
+          + '" r="2.5" stroke="' + seriesColor + '"><title>'
           + esc(bucketStamp(pts[i].t, bucketSec) + ' — ' + money(pts[i].v) + ' saved over '
                 + pts[i].calls.toLocaleString('en-US') + ' call'
                 + (pts[i].calls === 1 ? '' : 's')) + '</title></circle>';
     });
-    // The TIME axis: the first and last bucket, stamped with real local dates. Anchored
+    // The TIME axis: where the series STARTS and where the axis ENDS — and the axis now
+    // ends at the present, not at the last row that happens to exist. Anchored
     // start/end so neither can overhang the plot area on a narrow viewport.
     svg += '<text x="' + x0 + '" y="' + (H - 10) + '" text-anchor="start">'
-        + esc(bucketStamp(pts[0].t, bucketSec)) + '</text>';
+        + esc(bucketStamp(tFirst, bucketSec)) + '</text>';
     svg += '<text x="' + x1 + '" y="' + (H - 10) + '" text-anchor="end">'
-        + esc(bucketStamp(pts[pts.length - 1].t, bucketSec)) + '</text>';
+        + esc(bucketStamp(tEnd, bucketSec)) + '</text>';
     svg += '</svg>';
 
-    var cap = 'Each point spans ' + esc(width) + '. ' + pts.length + ' points, '
-      + esc(bucketStamp(pts[0].t, bucketSec)) + ' &rarr; '
-      + esc(bucketStamp(pts[pts.length - 1].t, bucketSec)) + ' (your local time). '
+    var cap = '<span class="spark-basis"><span class="sw '
+      + (measured ? 'measured' : 'unmeasured') + '"></span>'
+      + (measured ? 'provider-measured' : 'reconstructed &mdash; not measured') + '</span>';
+    if (hasGap){
+      cap += '<span class="spark-basis"><span class="sw nodata"></span>no calls recorded</span>';
+    }
+    cap += '<br>Each point spans ' + esc(width) + '. ' + pts.length + ' point'
+      + (pts.length === 1 ? '' : 's') + ', '
+      + esc(bucketStamp(tFirst, bucketSec)) + ' &rarr; '
+      + esc(bucketStamp(tLast, bucketSec)) + ' (your local time). '
       + 'Peak ' + money(maxV) + (minV < 0 ? ', floor ' + money(minV) : '') + ' per bucket.';
+    var interior = segs.length - 1;
+    if (interior > 0){
+      cap += ' The line breaks in ' + interior + ' place' + (interior === 1 ? '' : 's')
+        + ' where no bucket was recorded.';
+    }
+    if (hasGap){
+      cap += ' The axis runs on to ' + esc(bucketStamp(tEnd, bucketSec)) + ': the shaded '
+        + durationLabel(staleSec) + ' after the last sample recorded no calls at all, '
+        + 'which is not the same as buckets that saved nothing.';
+    }
     if (dropped > 0){
       cap += ' ' + dropped + ' bucket' + (dropped === 1 ? '' : 's')
         + ' carried no derivable figure and ' + (dropped === 1 ? 'is' : 'are') + ' not plotted.';
