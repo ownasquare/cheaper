@@ -4425,3 +4425,167 @@ test('report.html: every state that claims no figure is warned, and no warn slug
       + 'chips() renders it unemphasised, in the same weight as a mere qualification');
   }
 });
+
+// ===========================================================================
+// THE PANES THAT FETCHED ONCE AND NEVER AGAIN.
+//
+// render() repaints every Dashboard pane on every /ws frame, and refreshMonitor() keeps the
+// Monitor current. Reports and Logs were on NEITHER path: each fetched on the first switch to
+// its tab and then never again for the life of the page. A dashboard left open on Reports
+// showed whatever was true when it was opened, indefinitely, and nothing on screen said so.
+//
+// The fix reuses the push as an INVALIDATION SIGNAL rather than adding a second data channel,
+// so these tests are about WHEN a refetch is issued — the panes themselves are stubbed.
+// ===========================================================================
+
+function invalidationDriver(opts) {
+  opts = opts || {};
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const calls = { reports: [], logs: [] };
+  const state = {
+    tab: opts.tab || 'dashboard',
+    loaded: opts.reportsLoaded !== false,
+    cursors: opts.cursors || [],
+    now: 1_000_000,
+  };
+  const api = new Function('calls', 'state',
+    // Time is injected so the throttle can be tested without sleeping.
+    'var Date = { now: function(){ return state.now; } };\n'
+    + 'function currentTab(){ return state.tab; }\n'
+    + 'var reportsState = { get loaded(){ return state.loaded; } };\n'
+    + 'var logsCursorStack = state.cursors;\n'
+    + 'function loadReports(force){ calls.reports.push(force); }\n'
+    + 'function loadLogs(cursor){ calls.logs.push(cursor); }\n'
+    + fnSource(js, 'measuredValue') + '\n'
+    + varSource(js, 'lastSeenNewest') + '\n'
+    + varSource(js, 'reportsStale') + '\n'
+    + varSource(js, 'reportsLastFetch') + '\n'
+    + varSource(js, 'logsLastFetch') + '\n'
+    + varSource(js, 'REFETCH_THROTTLE_MS') + '\n'
+    + fnSource(js, 'payloadNewest') + '\n'
+    + fnSource(js, 'noteFreshness') + '\n'
+    + fnSource(js, 'refreshReports') + '\n'
+    + fnSource(js, 'refreshLogs') + '\n'
+    + 'return { push: function(d){ noteFreshness(d); },\n'
+    + '         stale: function(){ return reportsStale; },\n'
+    + '         seen: function(){ return lastSeenNewest; } };'
+  )(calls, state);
+  return { api, calls, state };
+}
+
+// A /metrics payload carrying only the field the invalidation reads.
+const fresh = (ts) => ({ freshness: { newest_ts: ts } });
+
+test('dashboard.html: the FIRST push is a baseline, not an invalidation', () => {
+  // Every pane has just loaded against this very payload. Treating the first frame as "new"
+  // would fire a duplicate refetch of all three reports endpoints on page load.
+  const d = invalidationDriver({ tab: 'reports' });
+  d.api.push(fresh(1000));
+  assert.deepEqual(d.calls.reports, [], 'the first frame triggered a refetch');
+  assert.strictEqual(d.api.seen(), 1000, 'the first frame did not establish the baseline');
+  assert.strictEqual(d.api.stale(), false);
+});
+
+test('dashboard.html: a new row refetches Reports when the tab is VISIBLE, and only marks it '
+   + 'when hidden', () => {
+    // Visible: refetch now, and it must FORCE — loadReports returns early on
+    // `loaded && !force`, so a non-forced call would be a no-op and the pane would never move.
+    const vis = invalidationDriver({ tab: 'reports' });
+    vis.api.push(fresh(1000));
+    vis.api.push(fresh(2000));
+    assert.deepEqual(vis.calls.reports, [true],
+      `visible Reports did not refetch exactly once with force=true (got ${JSON.stringify(vis.calls.reports)})`);
+    assert.strictEqual(vis.api.stale(), false, 'the flag was not cleared by the refetch');
+
+    // Hidden: record the fact, spend no requests. Reports is three heavy endpoints and
+    // nobody is looking at it.
+    const hid = invalidationDriver({ tab: 'dashboard' });
+    hid.api.push(fresh(1000));
+    hid.api.push(fresh(2000));
+    assert.deepEqual(hid.calls.reports, [],
+      'a hidden Reports tab issued requests nobody asked for');
+    assert.strictEqual(hid.api.stale(), true,
+      'a hidden Reports tab did not even RECORD that it is now out of date, so the tab '
+      + 'switch has no way to know it must force past the `loaded` guard');
+  });
+
+test('dashboard.html: Reports refetch is throttled, so a burst of rows is not a burst of '
+   + 'requests', () => {
+    const d = invalidationDriver({ tab: 'reports' });
+    d.api.push(fresh(1000));
+    d.api.push(fresh(2000));                       // fetch #1
+    d.state.now += 1000;
+    d.api.push(fresh(3000));                       // inside the window — must not fetch
+    assert.deepEqual(d.calls.reports, [true],
+      'the throttle did not hold: three heavy endpoints re-ran for a row that arrived one second later');
+    // …but the pane is still known to be behind, so the NEXT eligible moment refetches.
+    assert.strictEqual(d.api.stale(), true, 'a throttled arrival silently lost its staleness');
+    d.state.now += 20000;
+    d.api.push(fresh(4000));
+    assert.deepEqual(d.calls.reports, [true, true], 'the throttle never released');
+  });
+
+test('dashboard.html: Logs auto-refreshes on page 1 and NEVER under a reader who has paged '
+   + 'back', () => {
+    const p1 = invalidationDriver({ tab: 'logs', cursors: [] });
+    p1.api.push(fresh(1000));
+    p1.api.push(fresh(2000));
+    assert.deepEqual(p1.calls.logs, [null],
+      `page 1 did not refresh from the newest page (got ${JSON.stringify(p1.calls.logs)})`);
+
+    // Paged back into history. Swapping rows out from under that reader is worse than
+    // showing them a page a few seconds old: their position is theirs, and nothing
+    // announced it was about to move.
+    const paged = invalidationDriver({ tab: 'logs', cursors: ['cur-abc'] });
+    paged.api.push(fresh(1000));
+    paged.api.push(fresh(2000));
+    assert.deepEqual(paged.calls.logs, [],
+      'rows were replaced under a reader who had paged into history');
+  });
+
+test('dashboard.html: invalidation fires only on a row that is genuinely NEWER', () => {
+  const d = invalidationDriver({ tab: 'reports' });
+  d.api.push(fresh(2000));
+  d.api.push(fresh(2000));   // the same row, re-pushed every 5s by /ws
+  d.api.push(fresh(1500));   // older — a clock stepping backwards is not new data
+  assert.deepEqual(d.calls.reports, [],
+    'an unchanged newest_ts re-triggered a refetch — /ws re-sends the whole summary every '
+    + 'five seconds whether or not a row arrived, so this would refetch forever');
+  assert.strictEqual(d.api.seen(), 2000, 'a backwards clock rewrote the baseline');
+});
+
+test('dashboard.html: a gateway that publishes no freshness block invalidates nothing', () => {
+  // "We cannot tell" is not "there is something new" — the same three-state rule
+  // measuredValue() exists to enforce, applied to the invalidation signal.
+  const d = invalidationDriver({ tab: 'reports' });
+  d.api.push({});
+  d.api.push({ freshness: {} });
+  d.api.push({ freshness: { newest_ts: null } });
+  assert.deepEqual(d.calls.reports, [], 'an absent newest_ts was read as a new row');
+  assert.strictEqual(d.api.seen(), null, 'an absent newest_ts became a baseline');
+});
+
+test('dashboard.html: Reports never refetches before its FIRST load', () => {
+  // showTab owns the first load. Racing it here would run the same three requests twice on
+  // the switch that opens the tab.
+  const d = invalidationDriver({ tab: 'reports', reportsLoaded: false });
+  d.api.push(fresh(1000));
+  d.api.push(fresh(2000));
+  assert.deepEqual(d.calls.reports, [], 'the invalidation raced showTab for the first load');
+});
+
+test('dashboard.html: render() invalidates, and showTab() forces past the loaded guard', () => {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  // The push handler must actually call it, or every assertion above is about dead code.
+  assert.match(fnSource(js, 'render'), /noteFreshness\(data\)/,
+    'render() does not call noteFreshness(), so no /ws frame can ever invalidate a pane');
+  // And the tab switch must consume the flag. `loaded` cannot distinguish "already fetched"
+  // from "still current", so a non-forced load on a stale pane is a silent no-op.
+  const showTab = fnSource(js, 'showTab');
+  assert.match(showTab, /reportsStale/,
+    'showTab() ignores the staleness flag, so a row that arrived while Reports was hidden '
+    + 'never reaches the pane — it shows its first-load figures for the life of the page');
+  assert.match(showTab, /reportsStale = false/,
+    'showTab() does not CLEAR the flag, so one arrival would force a refetch on every '
+    + 'subsequent switch to the tab, forever');
+});

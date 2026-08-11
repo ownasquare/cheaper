@@ -2767,6 +2767,11 @@
     renderRecent(data);
     // A metrics push means new rows exist; refresh the Monitor if it's on screen.
     if (typeof refreshMonitor === 'function') refreshMonitor(false);
+    // …and the two panes that fetch their own data are now possibly stale. This only
+    // INVALIDATES; each pane decides for itself whether it is on screen and due a refetch.
+    // Same `typeof` guard as above: these are declared further down the same script block,
+    // and a renderer must not die half-built over a helper that has not been reached yet.
+    if (typeof noteFreshness === 'function') noteFreshness(data);
   }
 
   // ---------- THREE liveness states, not two ----------
@@ -3429,6 +3434,76 @@
       .catch(function(){ monitorFetching = false; });
   }
 
+  // ---------- Freshness-driven invalidation for the panes that fetch their own data ------
+  //
+  // render() repaints every Dashboard pane on every /ws frame, and refreshMonitor() keeps
+  // the Monitor current. Reports and Logs were on NEITHER path: each fetched once, on the
+  // first switch to its tab, and then never again for the life of the page. A dashboard left
+  // open on Reports showed whatever was true when it was opened, indefinitely, with nothing
+  // on screen admitting it — the same defect class as a sparkline that ended at the last row
+  // instead of at now.
+  //
+  // This is deliberately NOT a second data channel. /ws already carries the only signal
+  // needed — freshness.newest_ts — every five seconds, and Reports' three endpoints are far
+  // too heavy to recompute at that rate for a tab nobody is looking at. So the push
+  // INVALIDATES and the pane refetches only when it is actually on screen.
+  var lastSeenNewest = null;    // newest row instant these panes have already fetched against
+  var reportsStale = false;     // a newer row exists than the Reports pane's data
+  var reportsLastFetch = 0;
+  var logsLastFetch = 0;
+  var REFETCH_THROTTLE_MS = 10000;
+
+  // freshnessInfo() is this page's ONE reader of newest_ts, but it returns only DERIVED
+  // values (live / age / everRecorded) and deliberately not the raw instant. Reading it here
+  // through the same measuredValue() ladder — rather than widening freshnessInfo's return
+  // object, which other callers depend on — keeps ABSENT and ZERO distinct without touching
+  // a shared contract. A gateway that publishes no freshness block invalidates nothing,
+  // which is correct: "we cannot tell" is not "there is something new".
+  function payloadNewest(d){
+    var f = (d && typeof d.freshness === 'object' && d.freshness) ? d.freshness : null;
+    if (!f) return null;
+    var n = measuredValue(f.newest_ts);
+    return n.missing ? null : n.value;
+  }
+
+  function noteFreshness(d){
+    var newest = payloadNewest(d);
+    if (newest === null) return;                                     // nothing recorded yet
+    if (lastSeenNewest === null){ lastSeenNewest = newest; return; } // first frame: baseline
+    if (!(newest > lastSeenNewest)) return;                          // no new row since
+    lastSeenNewest = newest;
+    reportsStale = true;
+    refreshReports(false);
+    refreshLogs(false);
+  }
+
+  // Both mirror refreshMonitor's shape — visible-gated, then throttled — rather than
+  // inventing a second refresh idiom on the same page.
+  function refreshReports(force){
+    if (!force && currentTab() !== 'reports') return;
+    // Never fetched at all: showTab owns the first load, and racing it here would run the
+    // same three requests twice on the switch that opens the tab.
+    if (!reportsState.loaded) return;
+    var now = Date.now();
+    if (!force && (now - reportsLastFetch) < REFETCH_THROTTLE_MS) return;
+    reportsLastFetch = now;
+    reportsStale = false;
+    loadReports(true);   // MUST force: loadReports returns early on `loaded && !force`
+  }
+
+  function refreshLogs(force){
+    if (!force && currentTab() !== 'logs') return;
+    // PAGE ONE ONLY. Replacing rows under a reader who has paged back into history is worse
+    // than showing them a page a few seconds old: their position is theirs, and nothing
+    // announced that it was about to move. Paging back to the newest page picks up the new
+    // rows, because loadLogs() re-requests from the server every time.
+    if (logsCursorStack.length !== 0) return;
+    var now = Date.now();
+    if (!force && (now - logsLastFetch) < REFETCH_THROTTLE_MS) return;
+    logsLastFetch = now;
+    loadLogs(null);
+  }
+
   // ---------- Tab routing (location.hash driven) ----------
   var TABS = ['dashboard', 'reports', 'logs', 'monitor'];
   function currentTab(){
@@ -3443,7 +3518,11 @@
       if (link) link.classList.toggle('active', t === name);
     });
     if (name === 'logs') loadLogs(logsCursorStack[logsCursorStack.length - 1] || null);
-    if (name === 'reports') loadReports(false);
+    // FORCE when a row arrived while this tab was hidden. loadReports' own guard is
+    // `loaded && !force`, and `loaded` cannot tell "already fetched" from "still current" —
+    // so without this the pane shows its first-load figures for the life of the page, which
+    // is exactly the defect. Read-and-clear, so one arrival causes one refetch.
+    if (name === 'reports'){ var staleNow = reportsStale; reportsStale = false; loadReports(staleNow); }
     if (name === 'monitor') refreshMonitor(true);
   }
   window.addEventListener('hashchange', function(){ showTab(currentTab()); });
