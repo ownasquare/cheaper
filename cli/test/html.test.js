@@ -4783,3 +4783,43 @@ test('dashboard.html: the unpriced swatches follow the cascade, not hard-coded h
   assert.match(html, /#047857/, 'the priced segment ignored the light-theme --green');
   assert.match(html, /#b45309/, 'the estimated segment ignored the light-theme --amber');
 });
+
+// ===========================================================================
+// A STATIC REPORT THAT RE-DATED ITSELF EVERY TIME IT WAS OPENED.
+//
+// report.html embeds its data and never fetches — deliberately, so a print-to-PDF captures
+// one consistent instant instead of a mid-fetch race. But its masthead stamped `new Date()`,
+// the READER's clock. Save the file, reopen it next month, and it claims to have been
+// generated next month while every figure beneath it is from the day it was made. Print it
+// and the PDF carries that false date forever — and printing is what this page is for.
+// ===========================================================================
+
+test('report.html: the masthead dates the DATA, not the moment the file was opened', () => {
+  const src = fs.readFileSync(REPORT, 'utf8');
+  // The regression pin. `new Date()` may still appear as the last-resort branch, but it may
+  // never be what the word "Generated" is built from.
+  assert.ok(!/'Generated ' \+ esc\(gen\.toLocaleString\(\)\)/.test(src),
+    'the masthead still stamps the reader\'s clock as the generation time');
+
+  // Source of truth #1: the export payload's own instant, already trusted by Method &
+  // provenance further down the same file.
+  assert.match(src, /META\.generated_at_local \|\| META\.generated_at/,
+    'the masthead ignores the export payload\'s own generation instant');
+  // Source of truth #2: the gateway clock metrics.py stamps when it builds the summary —
+  // what the plain /report route embeds, where META does not exist at all.
+  assert.match(src, /D\.timeseries && typeof D\.timeseries\.now === 'number'/,
+    'the masthead has no source for the /report route, where REP and therefore META are null');
+  // …and when there is neither, it must RELABEL rather than dress the reader's clock up as
+  // a generation time.
+  assert.match(src, /genLabel = 'Opened'/,
+    'with no recorded instant the page still calls the reader\'s clock "Generated"');
+});
+
+test('report.html: the gateway publishes an instant the report can date itself from', () => {
+  // The masthead's fallback is only honest if the field actually exists on the /report
+  // payload. metrics.py stamps it from the same clock every `ts` in the series carries.
+  const metrics = fs.readFileSync(path.join(APP, 'metrics.py'), 'utf8');
+  assert.match(metrics, /"now": round\(time\.time\(\), 3\)/,
+    'metrics.py no longer publishes timeseries.now, so report.html\'s masthead and the '
+    + 'sparkline\'s time axis both lose the only server-side instant they have');
+});

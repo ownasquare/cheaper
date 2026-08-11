@@ -538,9 +538,32 @@
   // ---------------------------------------------------------------------------
   // masthead
   // ---------------------------------------------------------------------------
-  var gen = new Date();
+  // WHEN THIS REPORT'S DATA WAS GENERATED — not when the file happened to be opened.
+  //
+  // This was `new Date()`. For a page whose whole design is that its data is EMBEDDED and
+  // never fetched (see the comment on #report-data above), stamping the masthead with the
+  // READER's clock is the one lie the format cannot afford: save the file, reopen it a month
+  // later, and it claims to have been generated a month later while every figure beneath it
+  // is from the day it was made. Print it and the PDF carries that false date permanently —
+  // and printing is precisely what this page is for.
+  //
+  // Three sources, in descending order of authority, and the last one is RELABELLED rather
+  // than dressed up as the first:
+  //   1. the export payload's own generation instant (present on /api/v1/report.html, and
+  //      already trusted by Method & provenance further down this file);
+  //   2. `timeseries.now` — the gateway's own clock, stamped by metrics.py when it built
+  //      this summary, which is what the plain /report route embeds;
+  //   3. nothing at all, in which case it says "Opened", because the reader's clock can
+  //      honestly describe when the file was opened and nothing else.
+  var genLabel = 'Generated', genText = '';
+  var metaGen = META && (META.generated_at_local || META.generated_at);
+  var tsNow = (D.timeseries && typeof D.timeseries.now === 'number' && isFinite(D.timeseries.now))
+    ? D.timeseries.now : null;
+  if (metaGen) genText = String(metaGen);
+  else if (tsNow) genText = new Date(tsNow * 1000).toLocaleString();
+  else { genLabel = 'Opened'; genText = new Date().toLocaleString(); }
   set('stamp',
-    'Generated ' + esc(gen.toLocaleString()) + '<br>' +
+    esc(genLabel) + ' ' + esc(genText) + '<br>' +
     esc((META && META.timezone) || tz) + '<br>' +
     'gateway build <span class="mono">' + esc(String(D.code_sha || '').slice(0, 12) || 'unknown') + '</span>');
 
