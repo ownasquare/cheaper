@@ -327,6 +327,10 @@
 </div>
 
 <script id="report-data" type="application/json">__REPORT_DATA__</script>
+<!-- Same shared chart vocabulary the dashboard gets, from the same file, substituted by the
+     same handler. This page and the dashboard had drifted into two independent chart
+     implementations of the same figures; one source is the point. -->
+<script>__CHART_LIB__</script>
 <script>
 (function(){
   // The payload is EMBEDDED, never fetched: `webContents.printToPDF` and the browser's

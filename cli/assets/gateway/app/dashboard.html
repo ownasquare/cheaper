@@ -140,6 +140,32 @@
     line-height:1.45;margin-top:1px;}
   .unpriced-legend .n{color:var(--muted);font-variant-numeric:tabular-nums;
     white-space:nowrap;}
+  /* ---- shared chart vocabulary (chart_primitives.js) ------------------------------
+     Class names are prefixed `cbar-` because these are the only styles on the page that
+     are driven from a DIFFERENT file, and a reader who greps for one of them here must
+     land on that fact rather than hunting a renderer that does not exist in this file.
+     `.unmeasured` on the container is the honesty signal: dashed, so the qualification
+     survives a screenshot cropped past the caption — the same rule the spark line uses. */
+  .cbar-row{display:grid;grid-template-columns:130px 1fr 90px;gap:10px;align-items:center;
+    padding:3px 0;font-size:0.82rem;}
+  .cbar-label{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .cbar-value{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;}
+  .cbar-track{display:flex;align-items:center;gap:0;}
+  .cbar-half{flex:1;display:flex;height:11px;background:var(--bg);border:1px solid var(--line);}
+  .cbar-half.left{justify-content:flex-end;border-radius:5px 0 0 5px;border-right:none;}
+  .cbar-half.right{justify-content:flex-start;border-radius:0 5px 5px 0;border-left:none;}
+  .cbar-half i{display:block;height:100%;}
+  /* The centre line is the zero this shape is measured from — not a gridline. It reads as
+     an axis, so it is --muted and 1px, never the series colour. */
+  .cbar-axis{width:1px;height:15px;background:var(--muted);opacity:0.8;flex:none;}
+  .cbar-pair{display:flex;flex-direction:column;gap:2px;}
+  .cbar-pair i{display:block;height:8px;border-radius:3px;min-width:1px;}
+  .cbar-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:0.76rem;
+    color:var(--muted);}
+  .cbar-key{display:inline-flex;align-items:center;gap:6px;}
+  .cbar-legend .sw{width:10px;height:10px;border-radius:3px;display:inline-block;}
+  .cbar-diverging.unmeasured i,.cbar-paired.unmeasured i{opacity:0.72;
+    background-image:repeating-linear-gradient(45deg,rgba(0,0,0,0.18) 0 3px,transparent 3px 6px);}
   .unpriced-note{font-size:0.78rem;color:var(--muted);line-height:1.55;margin-top:10px;}
   .unpriced-note b{color:var(--text);}
   .spark-cap{font-size:0.74rem;color:var(--muted);margin-top:8px;line-height:1.5;}
@@ -651,6 +677,13 @@
       <div id="unpricedWrap"></div>
     </div>
 
+    <!-- Which models the router is winning and losing on. metrics.py has counted both
+         directions since the upcharge work and the dashboard showed neither. -->
+    <div class="panel">
+      <h2>Where routing moved a model</h2>
+      <div id="byModelWrap"></div>
+    </div>
+
     <div class="panel">
       <h2>Savings over time</h2>
       <div id="sparkWrap"></div>
@@ -899,6 +932,14 @@
   <a href="https://github.com/sponsors/ownasquare" target="_blank" rel="noopener">&#9829; Sponsor</a>
   <a href="https://cheaper.app/love" target="_blank" rel="noopener" style="font-weight:600">&#9829; Love Cheaper &rarr;</a>
 </footer>
+
+<!-- The shared chart vocabulary, substituted in by app.py at request time from
+     chart_primitives.js. It defines top-level functions, so they are globals by the time
+     the IIFE below runs and can be called from it without threading an import through.
+     It sits BEFORE that IIFE for exactly that reason. If the substitution ever fails the
+     placeholder is replaced with an empty string, and the panels that use the primitives
+     fall back to their own empty states rather than taking the page down. -->
+<script>__CHART_LIB__</script>
 
 <script>
 (function(){
@@ -1531,6 +1572,64 @@
         + 'summary examined, so the proportions describe the examined window only.</div>';
     }
     wrap.innerHTML = bar + legend + note;
+  }
+
+  // ---------- Which models routing moved, and in which direction ----------
+  //
+  // metrics.py has counted BOTH directions since the upcharge work — downgraded_by_model and
+  // upcharged_by_model — and no surface showed either. The dashboard's "Models changed" card
+  // reports one scalar, which cannot distinguish 60 wins from 30 wins and 30 losses.
+  //
+  // Diverging, not two stacked panels: the SIGN is the whole point. A model the router keeps
+  // upcharging is a policy bug, and it has to be visible in the same glance as the wins or it
+  // will be read as a smaller win.
+  //
+  // These are CALL COUNTS, so they declare chartCountBasis() explicitly rather than inheriting
+  // the dollars' basis. A count of switches is the same number however those calls were
+  // priced, and the exemption is stated at the call site so review can see it was a decision.
+  function renderByModel(d){
+    var wrap = document.getElementById('byModelWrap');
+    if (!wrap) return;
+    if (typeof chartDiverging !== 'function'){
+      wrap.innerHTML = '<div class="empty-note">The shared chart module did not load, so this '
+        + 'panel cannot draw. The figures it would show are unaffected.</div>';
+      return;
+    }
+    var down = (d && d.downgraded_by_model) || {};
+    var up = (d && d.upcharged_by_model) || {};
+    var models = {};
+    Object.keys(down).forEach(function(m){ models[m] = true; });
+    Object.keys(up).forEach(function(m){ models[m] = true; });
+    var names = Object.keys(models);
+    if (!names.length){
+      wrap.innerHTML = '<div class="empty-note">No call has had its model changed yet, so '
+        + 'there is nothing to compare. This is not a saving of ' + money(0) + ' — it is no '
+        + 'routing decisions at all.</div>';
+      return;
+    }
+    // Busiest first, ties by model id, so the order is stable between pushes. A list that
+    // reshuffles every five seconds cannot be read.
+    var rows = names.map(function(m){
+      return { model: m, d: num(down[m], 0), u: num(up[m], 0) };
+    }).sort(function(a, b){
+      return (b.d + b.u) - (a.d + a.u) || (a.model < b.model ? -1 : a.model > b.model ? 1 : 0);
+    }).slice(0, 8).map(function(r){
+      var net = r.d - r.u;
+      return {
+        label: truncate(r.model, 20),
+        left: r.d, right: r.u,
+        leftTitle: r.d.toLocaleString('en-US') + ' call(s) moved DOWN to ' + r.model,
+        rightTitle: r.u.toLocaleString('en-US') + ' call(s) moved UP to ' + r.model,
+        value: (net > 0 ? '+' : '') + net.toLocaleString('en-US'),
+      };
+    });
+    var basis = chartCountBasis();
+    wrap.innerHTML = chartDiverging(rows, { basis: basis })
+      + chartLegend([{ token: '--green', fallback: '#34d399', label: 'downgraded to (cheaper)' },
+                     { token: '--red', fallback: '#f87171', label: 'upcharged to (dearer)' }])
+      + '<div class="unpriced-note">Counts of calls whose model was CHANGED, by the model they '
+      + 'ended on. The right-hand figure is the net; a negative one is a model routing keeps '
+      + 'moving traffic <b>up</b> to, which is a policy question rather than a saving.</div>';
   }
 
   // ---------- Savings dimensions (money / tokens / time) ----------
@@ -2926,6 +3025,7 @@
     renderCards(data);
     renderCounts(data);
     renderUnpriced(data);
+    renderByModel(data);
     renderDims(data);
     renderSpark(data);
     renderByTool(data);

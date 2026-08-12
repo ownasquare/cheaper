@@ -15,7 +15,15 @@ const { spawnSync } = require('child_process');
 const APP = path.join(__dirname, '..', 'assets', 'gateway', 'app');
 const PAGES = ['dashboard.html', 'report.html'];
 
+// app.py substitutes __CHART_LIB__ with chart_primitives.js at request time, so the file on
+// disk holds a placeholder and the SERVED page holds the module. Every driver in this file
+// wants the served page: a bare `__CHART_LIB__` is a ReferenceError the instant it executes,
+// and asserting against markup no browser ever receives would be worse than not asserting.
+// Doing it here rather than at each of the twenty call sites means a new driver cannot forget.
+// A function replacer, not a string — the module contains `$` and `$&` would be interpreted.
 function scriptBlocks(html) {
+  html = String(html).replace('__CHART_LIB__',
+    () => fs.readFileSync(path.join(APP, 'chart_primitives.js'), 'utf8'));
   // Skip <script type="application/json"> — that is embedded DATA, not code.
   const re = /<script(?![^>]*\btype\s*=\s*["']application\/json["'])[^>]*>([\s\S]*?)<\/script>/gi;
   const out = [];
@@ -4892,4 +4900,142 @@ test('dashboard.html: no source-attributed traffic still says so', () => {
   const html = sourceDriver()({ by_source: {} });
   assert.match(text(html), /No source-attributed traffic yet/,
     'an empty by_source rendered three zero rows instead of saying it has nothing');
+});
+
+// ===========================================================================
+// THE SHARED CHART VOCABULARY (chart_primitives.js).
+//
+// Four panels had each hand-rolled their own geometry, and the honesty rule was a convention
+// re-applied by hand in every one — which is how renderSpark came to plot $80.52 in confident
+// green while the banner directly above it explained the figure was not measured. The rule
+// now lives at ONE chokepoint, and the shapes cannot draw without being handed a basis.
+// ===========================================================================
+
+const CHART_LIB = path.join(APP, 'chart_primitives.js');
+
+function chartDriver(cssVars) {
+  const src = fs.readFileSync(CHART_LIB, 'utf8');
+  const doc = { documentElement: {} };
+  const gcs = () => ({ getPropertyValue: (n) => (cssVars || {})[n] || '' });
+  return new Function('document', 'getComputedStyle',
+    src + '\nreturn { chartBasis, chartCountBasis, chartGuard, chartNiceMax, chartSplit,'
+    + ' chartDiverging, chartPaired, chartLegend, chartBasisNote, chartColor };')(doc, gcs);
+}
+
+test('chart_primitives: the basis chokepoint refuses to call "unknown" measured', () => {
+  const L = chartDriver();
+  assert.strictEqual(L.chartBasis({ measurement: { dollars_basis: 'measured' } }).measured, true);
+  for (const b of ['unmeasured', 'mixed', 'none']) {
+    assert.strictEqual(L.chartBasis({ measurement: { dollars_basis: b } }).measured, false,
+      `dollars_basis "${b}" was treated as measured`);
+  }
+  // The state every pre-upgrade gateway is in. "We do not know" is not "yes" — the same
+  // three-state rule measuredValue() applies to one figure, lifted to a whole series.
+  const silent = L.chartBasis({});
+  assert.strictEqual(silent.basis, 'unknown');
+  assert.strictEqual(silent.measured, false,
+    'a payload with no measurement block had its dollars promoted to measured');
+  assert.match(L.chartBasisNote(silent), /does not report/,
+    'the unknown state has no sentence explaining itself');
+  // Counts are exempt, but only by SAYING so — never by forgetting to ask.
+  assert.strictEqual(L.chartCountBasis().measured, true);
+  assert.strictEqual(L.chartBasisNote(L.chartCountBasis()), '',
+    'a count panel was made to carry a dollars-basis disclaimer');
+});
+
+test('chart_primitives: a refusal explains itself instead of drawing an empty box', () => {
+  const L = chartDriver();
+  assert.strictEqual(L.chartGuard([1, 2, 3], 3).ok, true);
+  const few = L.chartGuard([1], 3);
+  assert.strictEqual(few.ok, false);
+  assert.match(few.reason, /1 point/, 'the refusal does not say how many points it had');
+  assert.match(few.reason, /3/, 'the refusal does not say how many it needed');
+  assert.strictEqual(L.chartGuard(null, 1).ok, false, 'a null series was accepted');
+});
+
+test('chart_primitives: scales never divide by zero and split proportionally', () => {
+  const L = chartDriver();
+  // A zero-height axis has no scale and every caller would divide by it.
+  assert.strictEqual(L.chartNiceMax(0), 1);
+  assert.strictEqual(L.chartNiceMax(-5), 5, 'the ceiling must use magnitude, not sign');
+  assert.strictEqual(L.chartNiceMax(7), 10);
+  assert.strictEqual(L.chartNiceMax(1.4), 2);
+  assert.deepEqual(L.chartSplit([3, 1]), [75, 25]);
+  assert.deepEqual(L.chartSplit([0, 0]), [0, 0],
+    'an all-zero series produced widths, which would draw a bar for nothing');
+});
+
+test('chart_primitives: an UNMEASURED shape is visibly not a measurement', () => {
+  const L = chartDriver({ '--green': '#047857', '--red': '#dc2626' });
+  const rows = [{ label: 'claude-haiku-4-5', left: 4, right: 1, value: '+3' }];
+  const measured = L.chartDiverging(rows, { basis: L.chartBasis({ measurement: { dollars_basis: 'measured' } }) });
+  const unmeasured = L.chartDiverging(rows, { basis: L.chartBasis({}) });
+  assert.ok(!/unmeasured/.test(measured), 'a measured shape was marked unmeasured');
+  assert.match(unmeasured, /class="cbar-diverging unmeasured"/,
+    'an unmeasured shape carries no marker, so a stylesheet cannot distinguish it');
+  // Colours come from the cascade, not from literals — the rule the spark line was fixed for.
+  assert.match(measured, /#047857/, 'the light-theme --green was ignored');
+  assert.match(measured, /#dc2626/, 'the light-theme --red was ignored');
+});
+
+test('chart_primitives: diverging bars are scaled against ONE shared maximum', () => {
+  // Per-row normalisation would make a 1-call model and a 100-call model draw identical bars.
+  const L = chartDriver();
+  const html = L.chartDiverging([
+    { label: 'a', left: 10, right: 0 },
+    { label: 'b', left: 5, right: 0 },
+  ], { basis: L.chartCountBasis() });
+  const widths = [...html.matchAll(/width:([\d.]+)%/g)].map((m) => Number(m[1]));
+  assert.strictEqual(widths[0], 100, `the largest bar should fill the axis, got ${widths[0]}`);
+  assert.strictEqual(widths[2], 50, `half the magnitude must be half the bar, got ${widths[2]}`);
+});
+
+// ---------------------------------------------------------------------------
+// P3: WHICH MODELS ROUTING MOVED, AND IN WHICH DIRECTION.
+// ---------------------------------------------------------------------------
+
+const BYMODEL_FNS = ['num', 'esc', 'money', 'truncate', 'renderByModel'];
+
+function byModelDriver() {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const lib = fs.readFileSync(CHART_LIB, 'utf8');
+  const wrap = { innerHTML: '' };
+  const doc = { getElementById(id) { return id === 'byModelWrap' ? wrap : null; },
+                documentElement: {} };
+  const gcs = () => ({ getPropertyValue: () => '' });
+  const drive = new Function('document', 'getComputedStyle',
+    lib + '\n' + BYMODEL_FNS.map((n) => fnSource(js, n)).join('\n\n')
+    + '\nreturn function(d){ renderByModel(d); };')(doc, gcs);
+  return (d) => { wrap.innerHTML = ''; drive(d); return wrap.innerHTML; };
+}
+
+test('dashboard.html: both routing directions are shown, and the net is named', () => {
+  const html = byModelDriver()({
+    downgraded_by_model: { 'claude-haiku-4-5': 40, 'claude-sonnet-5': 10 },
+    upcharged_by_model: { 'claude-sonnet-5': 25 },
+  });
+  const t = text(html);
+  assert.match(t, /claude-haiku-4-5/, 'a model with routing activity is missing');
+  // The net for sonnet is 10 down - 25 up = -15. A model routing keeps moving traffic UP to
+  // is a policy question, and "Models changed" as one scalar cannot express it at all.
+  assert.match(t, /-15/, `the net for an upcharged model is not shown; got ${t.slice(0, 300)}`);
+  assert.match(t, /\+40/, 'the net for a downgraded model is not shown');
+  assert.match(t, /upcharged to/, 'the legend does not name the losing direction');
+});
+
+test('dashboard.html: no model changes says so, and does not call it a saving of zero', () => {
+  const t = text(byModelDriver()({ downgraded_by_model: {}, upcharged_by_model: {} }));
+  assert.match(t, /No call has had its model changed yet/, 'the empty state is missing');
+  assert.match(t, /not a saving of/,
+    'an empty routing history was allowed to read as a measured zero');
+});
+
+test('dashboard.html: the model panel degrades if the shared module fails to load', () => {
+  // app.py substitutes chart_primitives.js at request time and falls back to an empty string
+  // when the file cannot be read. A panel that threw would take the whole render() with it,
+  // including panels that need no primitives at all.
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  assert.match(fnSource(js, 'renderByModel'), /typeof chartDiverging !== 'function'/,
+    'renderByModel does not check the shared module loaded, so a failed substitution throws '
+    + 'inside render() and takes every later pane down with it');
 });

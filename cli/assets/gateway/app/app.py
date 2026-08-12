@@ -131,6 +131,31 @@ def _notify_metrics() -> None:
 
 _PEEK_JSON = Path(os.path.expanduser("~")) / ".cheaper" / "peek.json"
 _DASH_PATH = Path(__file__).resolve().parent / "dashboard.html"
+_CHART_LIB_PATH = Path(__file__).resolve().parent / "chart_primitives.js"
+
+
+def _chart_lib() -> str:
+    """The shared chart vocabulary, inlined into both HTML surfaces at request time.
+
+    ONE source of truth without a build step. dashboard.html and report.html are each a
+    single self-contained file the gateway serves over loopback, and they had grown four
+    independent hand-rolled chart implementations between them -- along with four
+    independent copies of the rule about never drawing an unmeasured figure as a measured
+    one, which is precisely how one of them came to ignore it.
+
+    Substitution rather than a <script src>: a second request would be a second thing that
+    can fail, would not survive a page saved to disk, and would break the print/PDF path.
+    This is the same mechanism /report already uses for __REPORT_DATA__.
+
+    Read per request, not cached at import, so editing the file during development shows up
+    on reload -- these pages are already re-read from disk on every request for the same
+    reason. A missing file degrades to an empty string: the panels that use the primitives
+    render their own empty states, which is strictly better than a 500 on the whole page.
+    """
+    try:
+        return _CHART_LIB_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
 # OpenAI-compatible front-end (for Codex/Cursor/Copilot/OpenCode/… — any tool that
 # points its OpenAI base URL here). Set these to models your account actually has.
@@ -377,7 +402,8 @@ async def report():
     # user-influenced, which makes this an injection boundary, not just tidiness.
     payload = (json.dumps(summary, default=str)
                .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
-    return HTMLResponse(html.replace("__REPORT_DATA__", payload))
+    return HTMLResponse(
+        html.replace("__REPORT_DATA__", payload).replace("__CHART_LIB__", _chart_lib()))
 
 
 # The page a browser gets when it reaches /dashboard without the local token.
@@ -433,7 +459,8 @@ async def dashboard(request: Request):
         return HTMLResponse(_AUTH_WALL_HTML, status_code=401,
                             headers={"WWW-Authenticate": 'Bearer realm="cheaper"'})
     try:
-        resp = HTMLResponse(_DASH_PATH.read_text(encoding="utf-8"))
+        resp = HTMLResponse(
+            _DASH_PATH.read_text(encoding="utf-8").replace("__CHART_LIB__", _chart_lib()))
     except Exception:
         resp = HTMLResponse(_DASHBOARD_HTML)  # inline fallback
     # Issue the session cookie to a caller that ALREADY held the token. The page then

@@ -18,6 +18,7 @@
     "assets/gateway/app/*.py",
     "assets/gateway/app/*.json",
     "assets/gateway/app/*.html",
+    "assets/gateway/app/*.js",
     "assets/gateway/requirements.txt",
     "assets/gateway/.env.example"
   ],
