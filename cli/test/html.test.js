@@ -4823,3 +4823,73 @@ test('report.html: the gateway publishes an instant the report can date itself f
     'metrics.py no longer publishes timeseries.now, so report.html\'s masthead and the '
     + 'sparkline\'s time axis both lose the only server-side instant they have');
 });
+
+// ===========================================================================
+// THE SAME FACT, DRAWN TWO DIFFERENT WAYS.
+//
+// by_source carries calls / saved / spent per row — exactly what by_tool carries, and
+// by_tool is a two-tone bar in the panel immediately above. Rendering the identical
+// structure as flat text made the two look like different KINDS of fact, and left the
+// saved-vs-spent split (which the bar shows at a glance) to be worked out by comparing
+// two numbers.
+// ===========================================================================
+
+const SOURCE_FNS = ['num', 'esc', 'money', 'renderBySource'];
+
+function sourceDriver() {
+  const js = scriptBlocks(fs.readFileSync(DASHBOARD, 'utf8')).join('\n');
+  const el = { innerHTML: '' };
+  const doc = { getElementById(id) { return id === 'bySource' ? el : null; } };
+  const drive = new Function('document',
+    SOURCE_FNS.map((n) => fnSource(js, n)).join('\n\n')
+    + '\nreturn function(d){ renderBySource(d); };')(doc);
+  return (d) => { el.innerHTML = ''; drive(d); return el.innerHTML; };
+}
+
+test('dashboard.html: by-source is drawn with the SAME bar idiom as by-tool', () => {
+  const html = sourceDriver()({ by_source: {
+    user: { calls: 30, saved: 3, spent: 1 },
+    subagent: { calls: 10, saved: 1, spent: 3 },
+  } });
+  // The panel above uses .tool-row / .two-tone / .seg-green / .seg-red. Same data shape,
+  // same markup — a second idiom for one fact is the thing being removed here.
+  assert.match(html, /class="tool-row"/, 'by-source did not adopt the shared row markup');
+  assert.strictEqual((html.match(/class="two-tone"/g) || []).length, 3,
+    'every source row needs its bar track, including the zero row');
+  // The split is PROPORTIONAL to each row's own saved/spent, so a row that mostly spent
+  // reads differently from one that mostly saved.
+  const segs = [...html.matchAll(/class="seg-green" style="width:([\d.]+)%/g)].map((m) => m[1]);
+  assert.deepEqual(segs, ['75.0', '25.0'],
+    `the green segment is not each row's own saved share; got ${JSON.stringify(segs)}`);
+});
+
+test('dashboard.html: a source with no traffic keeps its row and gets NO bar', () => {
+  // "Nothing came from sub-agents" is a real reading. Dropping the row would make it
+  // indistinguishable from a source this build does not know about — but a zero-width bar
+  // would dress it as a measurement it is not.
+  const html = sourceDriver()({ by_source: { user: { calls: 5, saved: 1, spent: 1 } } });
+  assert.match(html, /class="tool-row muted"/, 'the zero rows were dropped instead of muted');
+  assert.strictEqual((html.match(/class="seg-green"/g) || []).length, 1,
+    'a source with no calls was given a bar segment');
+  assert.match(text(html), /Sub-agent/, 'the fixed taxonomy lost a row');
+  assert.match(text(html), /Other/, 'the fixed taxonomy lost a row');
+});
+
+test('dashboard.html: by-source keeps its fixed taxonomy order, never sorted by size', () => {
+  // Unlike by_tool, whose rows arrive in whatever order the gateway grouped them, these
+  // three are a fixed taxonomy. A reader learns where "Sub-agent" sits and looks there.
+  const html = sourceDriver()({ by_source: {
+    user: { calls: 1, saved: 0.1, spent: 0 },
+    subagent: { calls: 999, saved: 99, spent: 0 },
+    other: { calls: 50, saved: 5, spent: 0 },
+  } });
+  const names = [...html.matchAll(/class="tool-name">([^<]*)</g)].map((m) => m[1]);
+  assert.deepEqual(names, ['User', 'Sub-agent', 'Other'],
+    `rows were reordered by magnitude; got ${JSON.stringify(names)}`);
+});
+
+test('dashboard.html: no source-attributed traffic still says so', () => {
+  const html = sourceDriver()({ by_source: {} });
+  assert.match(text(html), /No source-attributed traffic yet/,
+    'an empty by_source rendered three zero rows instead of saying it has nothing');
+});

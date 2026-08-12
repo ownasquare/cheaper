@@ -1765,21 +1765,42 @@
       el.innerHTML = '<div class="empty-note">No source-attributed traffic yet.</div>';
       return;
     }
+    // SAME SHAPE OF DATA, SAME SHAPE ON SCREEN. by_source carries calls / saved / spent per
+    // row, which is exactly what by_tool carries — and by_tool is drawn as a two-tone bar in
+    // the panel immediately above this one. Rendering the identical structure as flat text
+    // here made the two panels look like different KINDS of fact when they are the same
+    // fact grouped differently, and it left the saved-vs-spent split, which the bar shows at
+    // a glance, to be worked out by comparing two numbers.
+    //
+    // Deliberately NOT sorted by size: unlike by_tool, whose rows come from the payload in
+    // whatever order the gateway grouped them, these three are a fixed taxonomy (user /
+    // sub-agent / other). A reader learns where "Sub-agent" sits and looks there.
     var html = '';
     rows.forEach(function(r){
+      // A zero row still gets its line, and still gets no bar. Absence of traffic from a
+      // source is a real, informative reading — "nothing came from sub-agents" — and
+      // dropping the row would make it indistinguishable from a source this build does not
+      // know about. But drawing a bar of width 0 dressed as a measurement it is not.
       if (r.calls === 0){
-        html += '<div class="harness-row muted">' +
-          '<span class="hlabel">' + esc(r.label) + '</span>' +
-          '<span class="hcalls">0 calls</span>' +
-          '<span class="hsaved muted">' + money(0) + '</span>' +
+        html += '<div class="tool-row muted">' +
+          '<div class="tool-name">' + esc(r.label) + '</div>' +
+          '<div class="tool-calls">0</div>' +
+          '<div class="two-tone"></div>' +
+          '<div class="tool-saved muted">' + money(0) + '</div>' +
           '</div>';
         return;
       }
-      html += '<div class="harness-row">' +
-        '<span class="hlabel">' + esc(r.label) + '</span>' +
-        '<span class="hcalls">' + r.calls.toLocaleString('en-US') + ' calls</span>' +
-        '<span class="hsaved">' + money(r.saved) + '</span>' +
-        '<span style="color:var(--red);font-weight:600;font-size:0.82rem;width:90px;text-align:right;">' + money(r.spent) + '</span>' +
+      var saved = r.saved, spent = r.spent;
+      var tot = saved + spent;
+      var savedW = tot > 0 ? (saved / tot) * 100 : 0;
+      var spentW = tot > 0 ? (spent / tot) * 100 : 0;
+      html += '<div class="tool-row">' +
+        '<div class="tool-name">' + esc(r.label) + '</div>' +
+        '<div class="tool-calls">' + r.calls.toLocaleString('en-US') + '</div>' +
+        '<div class="two-tone" title="' + esc(money(saved) + ' saved, ' + money(spent) + ' spent')
+          + '"><div class="seg-green" style="width:' + savedW.toFixed(1) + '%"></div>' +
+          '<div class="seg-red" style="width:' + spentW.toFixed(1) + '%"></div></div>' +
+        '<div class="tool-saved">' + money(saved) + '</div>' +
         '</div>';
     });
     el.innerHTML = html;
