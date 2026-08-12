@@ -13,8 +13,12 @@ const HELP = `
   ${c.bold('Commands')}
     install [skill agents hook gateway plugin cli autostart] [--all]
                         Install components into your Claude environment.
-                        --all / no args = skill+agents+hook+gateway (the
-                        reliable set). "plugin" is a managed bundle of
+                        --all / no args = skill+agents+hook+gateway+cli (the
+                        reliable set). "cli" puts a 'cheaper' command on your
+                        PATH and is in the default set because everything else
+                        installed here — including the savings taglines written
+                        into other harnesses — invokes 'cheaper' by name.
+                        "plugin" is a managed bundle of
                         skill+agents+hook — install it instead of those three.
                         "autostart" is NOT in --all and never will be: a login
                         daemon is opt-in only. Name it, or use "autostart enable".

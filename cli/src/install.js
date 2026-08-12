@@ -4,7 +4,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const P = require('./paths');
 const { c, copyDir, removePath, nowIso, whichSync, ask, readJSON, readJSONForUpdate, writeJSON } = require('./util');
-const { installCliLauncher } = require('./clilink');
+const { installCliLauncher, launcherPath, launcherDir } = require('./clilink');
 const { detectHarnesses } = require('./harnesses');
 const taglineInstall = require('./tagline_install');
 
@@ -231,7 +231,53 @@ function installAutostart() {
   return r.msg;
 }
 
-// skill/agents/hook/gateway are the reliable, discovered-location default set.
+// WHAT WILL ACTUALLY RUN ON THIS MACHINE, RIGHT NOW.
+//
+// The closing notes print next-step commands, and they used to hard-code `cheaper …`. On a
+// fresh machine that produced an install ending in advice that could not be followed —
+// `zsh: command not found: cheaper` on the very first line the user typed.
+//
+// `cli` is now in the default set, so the launcher usually exists by the time this prints.
+// That is NOT the same as it being runnable: it lands in ~/.local/bin, which macOS does not
+// put on PATH by default, and even when the shell profile does have it, THIS process's PATH
+// was captured before the file existed. So the state is checked rather than assumed, and the
+// three cases get three different remedies instead of one misleading command:
+//
+//   on PATH           `cheaper …` is correct. Print it unchanged, say nothing.
+//   launcher on disk  The file exists; its directory is not on PATH. Naming the directory is
+//                     the fix — reinstalling would change nothing and is the obvious wrong
+//                     guess for a user staring at "command not found".
+//   neither           `npx cheaper …` is the only thing that works this second, so that is
+//                     what gets printed, plus how to stop needing npx.
+//
+// This is also why the note prints FIRST: every tagline this run wrote into a harness file
+// is a `cheaper peek --tagline` invocation (tagline_install.js:61), so a broken PATH does not
+// merely block the commands below, it silently disables everything the run just reported as
+// wired.
+function cheaperInvocation() {
+  if (whichSync('cheaper')) return { cmd: 'cheaper', note: null };
+  let lp = null;
+  try { lp = launcherPath(); } catch (e) { lp = null; }
+  if (lp && fs.existsSync(lp)) {
+    return {
+      cmd: lp,
+      note: 'The `cheaper` launcher is installed at ' + lp + ', but ' + launcherDir() +
+        ' is not on your PATH, so the bare name will not resolve. Add it to your shell '
+        + 'profile:  export PATH="' + launcherDir() + ':$PATH"   — until you do, the '
+        + 'commands below use the full path, and the savings taglines just wired into your '
+        + 'other harnesses will not run.',
+    };
+  }
+  return {
+    cmd: 'npx cheaper',
+    note: 'No `cheaper` command is on your PATH, so the commands below use `npx cheaper`, '
+      + 'which always works. For a permanent one:  npx cheaper install cli   — note that '
+      + 'the savings taglines wired into your other harnesses invoke `cheaper` by name and '
+      + 'will not run until it resolves.',
+  };
+}
+
+// skill/agents/hook/gateway/cli are the reliable, discovered-location default set.
 // plugin is an opt-in managed packaging of skill+agents+hook (mutually exclusive).
 const COMPONENTS = [
   { key: 'skill', label: 'Skill (routing procedure + rubric)', fn: installSkill },
@@ -253,7 +299,31 @@ const COMPONENTS = [
 // System Settings needs a stronger gate than "the default happened to include it".
 // It is reachable by naming it — `cheaper install autostart`, the interactive picker, or
 // `cheaper autostart enable` — and by nothing else.
-const DEFAULT_KEYS = ['skill', 'agents', 'hook', 'gateway'];
+// `cli` IS IN THE DEFAULT SET, and has to be: everything else this installer produces
+// names a `cheaper` command.
+//
+// It used to be opt-in, and the result on a fresh machine installed with
+// `npx cheaper install` was an install that reported nothing but green ticks and then did
+// not work. The very first command it told the user to run failed:
+//
+//     $ cheaper gateway start
+//     zsh: command not found: cheaper
+//
+// That is the visible half. The invisible half is worse: tagline_install.js writes the
+// literal string `cheaper peek --tagline …` into every harness's global-instructions file
+// (tagline_install.js:61), so a run that printed "✓ tagline wired" for Codex, Grok, Copilot,
+// PI.dev and Cursor had in fact wired five instructions that could never execute. Nothing
+// would have reported that; the taglines would simply never appear.
+//
+// This is the same defect class harnesses.js:18 already warns about one level up — a user
+// reading "✓ wired" and believing something is in place that is not. The fix there was to
+// stop overclaiming; the fix here is to stop shipping the gap, because unlike routing, the
+// launcher is ours to install and costs one file.
+//
+// `autostart` remains deliberately absent — see the note above. A launcher is a file on
+// PATH; a login daemon is a process that survives the terminal that created it, and those
+// two do not deserve the same gate.
+const DEFAULT_KEYS = ['skill', 'agents', 'hook', 'gateway', 'cli'];
 
 // Accept plurals + synonyms so `install hooks`, `install agent`, `install rules`
 // don't silently abort with "Nothing selected". A token may expand to several
@@ -463,14 +533,19 @@ async function run(argv) {
   // entry for a gateway that is not on disk. Offering to supervise a component that failed
   // to install is the same class of claim as a green tick on an unverified start.
   const installed = new Set(results.filter((r) => r.ok).map((r) => r.key));
+  const CH = cheaperInvocation();
   console.log(c.dim('\n  Done. Notes:'));
+  // The PATH state is the first thing printed, because every command below it — and every
+  // tagline this run just wrote into a harness file — is a `cheaper …` invocation. A user
+  // who cannot run one cannot use anything else in this summary.
+  if (CH.note) console.log('   ' + c.amber('!') + ' ' + CH.note);
   if (chosen.includes('gateway'))
-    console.log(c.dim('   • Start the gateway:  ') + 'cheaper gateway start' +
+    console.log(c.dim('   • Start the gateway:  ') + CH.cmd + ' gateway start' +
       c.dim('   then  ') + 'export ANTHROPIC_BASE_URL=http://localhost:8787');
   if (chosen.includes('plugin'))
     console.log(c.dim('   • Plugin registered + enabled. It loads in newly-started Claude sessions.'));
   else if (chosen.some((k) => ['skill', 'agents', 'hook'].includes(k)))
-    console.log(c.dim('   • Prefer the managed plugin instead? Run:  ') + 'cheaper install plugin');
+    console.log(c.dim('   • Prefer the managed plugin instead? Run:  ') + CH.cmd + ' install plugin');
   console.log(c.dim('   • Existing Claude sessions must be restarted to pick up the skill/agents/hook.\n'));
 
   // No --harness given: this is a plain `cheaper install` (or --all, or the
@@ -507,9 +582,14 @@ async function run(argv) {
     console.log('  ' + c.amber('No ROUTING was configured for them') +
       c.dim(' — a tagline reports what routing would have saved; it does not route a single call.'));
     console.log(c.dim('  Routing is the gateway. Start it, then point the tool at it:'));
-    console.log('    cheaper gateway start' + c.dim('   then   ') +
+    console.log('    ' + CH.cmd + ' gateway start' + c.dim('   then   ') +
       'export ANTHROPIC_BASE_URL=http://localhost:' + require('./gateway').DEFAULT_PORT);
-    console.log(c.dim('  Target one harness with `cheaper install --harness <key>`.\n'));
+    console.log(c.dim('  Target one harness with `') + CH.cmd + c.dim(' install --harness <key>`.'));
+    // Repeated here, at the very end of the longest block of output, because the taglines
+    // reported "✓ wired" a few lines up and every one of them invokes `cheaper` by name. A
+    // PATH warning printed only at the top scrolls away behind the harness table.
+    if (CH.note) console.log('  ' + c.amber('! ') + c.dim(CH.note));
+    console.log('');
   }
 
   // THE ONE-TIME AUTOSTART OFFER, last of all.
@@ -530,5 +610,5 @@ async function run(argv) {
 module.exports = {
   run, install, status, COMPONENTS, DEFAULT_KEYS, AGENT_FILES,
   pluginRegistered, dewireStandaloneHook, isCheaperHookEntry, runClaude,
-  detectHarnesses, installEverywhereElse,
+  detectHarnesses, installEverywhereElse, cheaperInvocation,
 };

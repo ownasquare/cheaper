@@ -485,3 +485,90 @@ test('uninstall.js uses gateway.js\'s pidLooksLikeGateway instead of a second co
 });
 
 test.after(() => { fs.rmSync(SANDBOX, { recursive: true, force: true }); });
+
+// ===========================================================================
+// AN INSTALL THAT ENDED BY RECOMMENDING A COMMAND IT HAD NOT INSTALLED.
+//
+// On a fresh machine, `npx cheaper install` printed nothing but green ticks and then:
+//
+//     $ cheaper gateway start
+//     zsh: command not found: cheaper
+//
+// The `cli` component — the one that puts a `cheaper` launcher on PATH — was opt-in, so the
+// summary named a binary the default run had just declined to provide. The visible half was
+// the failed command; the invisible half is that tagline_install.js writes the literal
+// `cheaper peek --tagline …` into every harness's instructions file, so a run reporting
+// "✓ tagline wired" for five harnesses had wired five instructions that could never execute,
+// and nothing would ever have said so.
+// ===========================================================================
+
+const { DEFAULT_KEYS: DK, cheaperInvocation } = require('../src/install');
+
+test('the default install provides the `cheaper` command everything else depends on', () => {
+  assert.ok(DK.includes('cli'),
+    'the `cli` launcher is not in the default set, so a plain `cheaper install` again ends '
+    + 'by recommending `cheaper gateway start` and wiring taglines that invoke `cheaper` by '
+    + 'name — none of which can run');
+  // The line that must NOT come back: a hard-coded invocation in the closing notes.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'install.js'), 'utf8');
+  assert.ok(!/\+ 'cheaper gateway start'/.test(src),
+    'the notes hard-code `cheaper gateway start` again instead of printing what actually '
+    + 'resolves on this machine');
+  // …and autostart must still NOT be there. A launcher is a file on PATH; a login daemon is
+  // a process that outlives the terminal, and they do not deserve the same gate.
+  assert.ok(!DK.includes('autostart'),
+    'a bare `cheaper install` would now register a login daemon');
+});
+
+test('the closing notes name a command that actually resolves, in all three PATH states', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cheaper-path-'));
+  const prevHome = process.env.HOME, prevPath = process.env.PATH;
+  try {
+    // 1. Nothing anywhere: npx is the only thing that works this second, and it says so.
+    //
+    // PATH keeps the system directories on purpose. whichSync() shells out to `which`, so a
+    // PATH stripped to nothing makes `which` ITSELF unfindable and every branch below would
+    // then pass because the locator crashed rather than because `cheaper` was absent — a
+    // test green for a reason it was not written for.
+    process.env.HOME = home;
+    const SYSTEM_PATH = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(path.delimiter);
+    process.env.PATH = SYSTEM_PATH;
+    let inv = cheaperInvocation();
+    assert.strictEqual(inv.cmd, 'npx cheaper',
+      `with no launcher and no PATH entry the notes must use npx, got ${inv.cmd}`);
+    assert.match(inv.note, /npx cheaper install cli/,
+      'it does not say how to stop needing npx');
+    assert.match(inv.note, /taglines/i,
+      'it does not warn that the taglines it just wired cannot run either — the silent half '
+      + 'of this bug');
+
+    // 2. Launcher on disk but its directory is not on PATH. Reinstalling would change
+    //    nothing, so the remedy must be the PATH line, not another install.
+    const binDir = path.join(home, '.local', 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    // 0o755 deliberately: whichSync only accepts an EXECUTABLE file, which is the same
+    // reason a non-executable launcher would not resolve for the user either.
+    fs.writeFileSync(path.join(binDir, 'cheaper'), '#!/bin/sh\n');
+    fs.chmodSync(path.join(binDir, 'cheaper'), 0o755);
+    inv = cheaperInvocation();
+    assert.strictEqual(inv.cmd, path.join(binDir, 'cheaper'),
+      'with the launcher present but unresolvable, the notes must use its full path so the '
+      + 'commands work as printed');
+    assert.match(inv.note, /export PATH=/,
+      'the remedy for "installed but not on PATH" must be the PATH line');
+    assert.ok(!/install cli/.test(inv.note),
+      'it tells the user to reinstall a launcher that is already on disk');
+
+    // 3. Resolvable: say nothing. A warning that fires when nothing is wrong is a warning
+    //    people learn to skip.
+    process.env.PATH = binDir + path.delimiter + SYSTEM_PATH;
+    inv = cheaperInvocation();
+    assert.strictEqual(inv.cmd, 'cheaper');
+    assert.strictEqual(inv.note, null,
+      'a working PATH still printed a warning');
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevPath === undefined) delete process.env.PATH; else process.env.PATH = prevPath;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

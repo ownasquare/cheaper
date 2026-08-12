@@ -560,7 +560,8 @@ function settingsPluginItem(viaPlugin) {
   const mk = (r.value.extraKnownMarketplaces || {})[P.MARKETPLACE_NAME];
   const en = (r.value.enabledPlugins || {})[P.PLUGIN_ID];
   // Neither key present at all: either the plugin component was never installed (the
-  // default set is skill+agents+hook+gateway, install.js:231) or both were wiped. The
+  // default set is skill+agents+hook+gateway+cli, see DEFAULT_KEYS in install.js) or both
+  // were wiped. The
   // registry is what tells those apart, and they need opposite advice.
   if (mk === undefined && en === undefined) {
     return Object.assign(base, viaPlugin
