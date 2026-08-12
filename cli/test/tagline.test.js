@@ -537,3 +537,63 @@ test('P2.4: a gateway-measured un-sidechained chat IS credited — the gateway i
 
 // The sandbox HOME this file installed at load time, and anything the resolver wrote under it.
 test.after(() => { fs.rmSync(SANDBOX, { recursive: true, force: true }); });
+
+// ===========================================================================
+// THE TWO LINKS ARE PART OF THE LINE, NOT DECORATION ON IT.
+//
+// The brand token and the "See logs" suffix are the line's only two links: one takes the
+// reader to cheaper.app/love, the other to their own dashboard. They are produced by two
+// functions keyed on the SAME `format` argument, so markdown must yield BOTH or the format
+// is not being honoured. Nothing pinned that, and nothing pinned that the hook which feeds
+// Claude Code actually asks for markdown — drop that one flag and both links disappear
+// silently, with every figure still correct and the line still looking fine.
+// ===========================================================================
+
+test('POLICY: markdown format emits BOTH links — brand and logs, together', async () => {
+  const r = await runTagline({ sidechain: true, gateway: 'ok',
+                               run: { format: 'markdown' } });
+  assert.match(r.json.full, /\[Cheaper\.app\]\(https:\/\/cheaper\.app\/love\)/,
+    'the brand token is not a markdown link to /love: ' + r.json.full);
+  assert.match(r.json.full, /\[See logs\]\(http:\/\/localhost:\d+\/dashboard\)/,
+    'the logs suffix is not a markdown link: ' + r.json.full);
+  // The invariant that makes this checkable rather than two coincidences: ONE format drives
+  // both, so a line can never carry one link and not the other.
+  const hasBrand = /\[Cheaper\.app\]\(/.test(r.json.full);
+  const hasLogs = /\[See logs\]\(/.test(r.json.full);
+  assert.strictEqual(hasBrand, hasLogs,
+    'one link rendered and the other did not — they are keyed on the same format, so this '
+    + 'means a renderer grew its own opinion: ' + r.json.full);
+});
+
+test('POLICY: plain format links NEITHER, and says the URL out loud instead', async () => {
+  // A terminal that cannot render markdown must not be handed link syntax as literal text —
+  // but the destination must still be reachable, so it is printed rather than hidden.
+  const r = await runTagline({ sidechain: true, gateway: 'ok', run: { format: 'plain' } });
+  assert.ok(!/\[Cheaper\.app\]\(/.test(r.json.full),
+    'markdown link syntax leaked into a plain-format line: ' + r.json.full);
+  assert.ok(!/\[See logs\]\(/.test(r.json.full),
+    'markdown link syntax leaked into a plain-format line: ' + r.json.full);
+  assert.match(r.json.full, /Cheaper\.app saved/, 'the brand token vanished entirely');
+  assert.match(r.json.full, /See logs: http:\/\/localhost:\d+\/dashboard/,
+    'plain format dropped the dashboard URL instead of printing it');
+});
+
+test('POLICY: the Claude Code injector asks for markdown, or both links vanish', () => {
+  // This is the single flag the whole rendered-link behaviour hangs on. It lives in the
+  // plugin hook, which is COPIED into ~/.cheaper/marketplace and then into the plugin
+  // cache, so a regression here ships silently to every future install.
+  const hook = fs.readFileSync(
+    path.join(__dirname, '..', 'assets', 'plugin', 'hooks', 'inject-tagline-cmd.js'), 'utf8');
+  assert.match(hook, /'--format',\s*'markdown'/,
+    'inject-tagline-cmd.js no longer requests markdown, so the line Claude Code appends '
+    + 'loses BOTH its links while every figure in it stays correct — the exact shape of '
+    + 'regression that is invisible in review');
+
+  // …and the Stop-hook backstop must keep accepting a line whose brand token is a markdown
+  // link, or the guard would reject precisely the well-formed output we just mandated.
+  const stop = fs.readFileSync(
+    path.join(__dirname, '..', 'assets', 'plugin', 'hooks', 'stop-tagline.js'), 'utf8');
+  assert.match(stop, /Cheaper\\?\.app/,
+    'stop-tagline.js lost its brand-token recognition, so acceptTagline() would discard '
+    + 'the line rather than relay it');
+});
