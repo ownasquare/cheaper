@@ -284,13 +284,37 @@ test('a gateway that installed SUCCESSFULLY is still offered — the gate is not
   const P = require('../src/paths');
   fs.rmSync(P.GATEWAY_DIR, { recursive: true, force: true });
 
+  // `gateway cli`, not `gateway` alone: the offer now also requires the staged CLI at
+  // ~/.cheaper/cli, because that is what a login entry is pointed at and enable()
+  // refuses without it. Naming both is what a real install does — `cli` is in
+  // DEFAULT_KEYS, so `--all` and a bare `install` both stage it.
+  const r = await runInstallCountingOffers(['gateway', 'cli']);
+
+  assert.strictEqual(r.code, 0, 'the happy path must stay 0\n' + r.out);
+  assert.ok(fs.existsSync(path.join(P.GATEWAY_DIR, 'app')),
+    'the precondition failed: the gateway did not install\n' + r.out);
+  assert.ok(fs.existsSync(path.join(P.CLI_HOME, 'bin', 'cheaper.js')),
+    'the precondition failed: the CLI was not staged\n' + r.out);
+  assert.strictEqual(r.offered, 1,
+    'gating the offer on success must not delete the offer\n' + r.out);
+});
+
+test('a gateway that installed but a MISSING staged CLI is not offered', async () => {
+  const P = require('../src/paths');
+  fs.rmSync(P.GATEWAY_DIR, { recursive: true, force: true });
+  // The exact state a fresh machine was left in by every release up to 0.4.1, where
+  // `cli` was not in DEFAULT_KEYS: gateway on disk, ~/.cheaper/cli absent. Answering
+  // `y` to the offer printed `✗ nothing to autostart` and burned the one-time answer.
+  fs.rmSync(P.CLI_HOME, { recursive: true, force: true });
+
   const r = await runInstallCountingOffers(['gateway']);
 
   assert.strictEqual(r.code, 0, 'the happy path must stay 0\n' + r.out);
   assert.ok(fs.existsSync(path.join(P.GATEWAY_DIR, 'app')),
     'the precondition failed: the gateway did not install\n' + r.out);
-  assert.strictEqual(r.offered, 1,
-    'gating the offer on success must not delete the offer\n' + r.out);
+  assert.strictEqual(r.offered, 0,
+    'the autostart offer fired with no staged CLI: the user was asked a once-per-machine ' +
+    'question whose only possible outcome is `nothing to autostart`\n' + r.out);
 });
 
 // --------------------------------------------------------------------------

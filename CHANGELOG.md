@@ -4,7 +4,26 @@ What changed in each release, described as something you'd notice using the prod
 internal refactors. Dates are the dates each version was published. Several entries are
 corrections that make Cheaper's reported savings **smaller**: the old numbers were wrong,
 and we would rather say so plainly than quietly ship different figures. The current release
-is `cheaper@0.4.1`.
+is `cheaper@0.4.2`.
+
+## 0.4.2 — 2026-08-15
+`npx cheaper install --all` now installs the `cheaper` command it spends the rest of its
+output telling you to run.
+
+- **`cheaper install` and `cheaper install --all` now install the CLI launcher.** They did
+  not, and the install that followed reported nothing but green ticks and then did not
+  work: the very first command it printed — `cheaper gateway start` — failed with
+  `zsh: command not found: cheaper`. The invisible half was worse. The same run writes the
+  literal string `cheaper peek --tagline …` into the global-instructions file of every
+  harness it detects, so an install that printed "✓ tagline wired" for Codex, Copilot and
+  the rest had in fact wired instructions that could never execute, and nothing would ever
+  have reported it. A launcher is one file and it is ours to write, so it is no longer
+  optional. `autostart` remains opt-in and is still unreachable from `--all`.
+- **The autostart question is no longer asked when it cannot be answered.** It was offered
+  whenever the gateway installed, but a login entry points at the stable CLI copy at
+  `~/.cheaper/cli`; without it, answering yes returned `✗ nothing to autostart`. Because
+  the answer is remembered per machine, that spent the one question this install ever asks
+  on an outcome already known to fail.
 
 ## 0.4.1 — 2026-08-10
 Cheaper can start itself at login and survive a reboot, and it has stopped claiming success

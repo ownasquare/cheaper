@@ -601,7 +601,27 @@ async function run(argv) {
   // install is noise, and noise is how a prompt becomes a nag.
   //
   // `installed`, not `chosen`: a gateway row that THREW must not reach this offer.
-  if (installed.has('gateway')) {
+  //
+  // The staged CLI is required too, and for the same reason one level down:
+  // autostart.js::enable points the login entry at ~/.cheaper/cli/bin/cheaper.js — the
+  // stable copy, never whatever is on PATH today — and refuses outright when that file
+  // is absent. Offering to register a login entry that cannot be registered spends the
+  // ONE question this machine ever gets (the answer is persisted to
+  // ~/.cheaper/autostart.json) on an outcome already known to fail, and answering `y`
+  // returned
+  //
+  //     ✗ nothing to autostart: ~/.cheaper/cli/bin/cheaper.js does not exist
+  //
+  // as the last thing an otherwise-green install printed. Same overclaim the gateway
+  // check exists to prevent: a prompt must not presuppose something not on disk.
+  //
+  // Test the FILE, not `installed.has('cli')`. The staged copy is durable, so a machine
+  // that installed it on an earlier run can legitimately be offered autostart by a later
+  // `cheaper install gateway` that names no CLI at all — and gating on this run's rows
+  // would silently withhold the offer there. This mirrors enable()'s own precondition
+  // exactly, which is the only way the two can't disagree.
+  const cliStaged = fs.existsSync(path.join(P.CLI_HOME, 'bin', 'cheaper.js'));
+  if (installed.has('gateway') && cliStaged) {
     try { await require('./autostart').offerOnce(); }
     catch (e) { console.log(c.dim(`  (skipped the autostart question: ${e.message})`)); }
   }
