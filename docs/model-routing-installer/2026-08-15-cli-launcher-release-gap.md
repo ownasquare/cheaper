@@ -81,20 +81,52 @@ Commit `0ad59ec` on `main`, local to the repo at
 - The same sandbox install from published 0.4.1 produces neither file — the failure in the
   report reproduces on demand.
 
+## Also regenerated: the public changelog page
+
+`cheaper-web/web/changelog.html` still asserted "The currently published CLI is
+`cheaper@0.4.1`". That page is generated from this repo's `CHANGELOG.md` by
+`scripts/render-changelog.js`, and `--check` reported it STALE. Regenerated and committed
+as `03781d8` in `cheaper-web`.
+
+This matters more than a version string: publishing 0.4.2 without it would have put
+cheaper.app back into exactly the state `cheaper-deploy.sh`'s own pre-flight comment
+describes from 2026-08-10 — the site telling every visitor a false "current" version. The
+pre-flight compares `CHANGELOG.md` to `cli/package.json`; it does **not** check the
+rendered page, so nothing would have caught it.
+
+## Release — use `cheaper-deploy.sh`, not `npm publish`
+
+```
+cd /Users/fortunevieyra/Documents/Github/ownasquare.com
+./cheaper-deploy.sh git web cli verify
+```
+
+`git` pushes the three commits, `web` deploys the regenerated page and purges the CDN,
+`cli` publishes (deliberately last — an npm version is immutable), `verify` asks the
+registry what it actually serves rather than trusting `npm publish`'s own output.
+
+**Must run in a real terminal** — npm's browser approval is only offered when stdin and
+stdout are both TTYs — and **on the machine that owns the checkout**: the git credential
+helper resolves to a `/Users/...` path absent on a machine that only mounted the volume,
+and `npm whoami` returns 401 there.
+
+### `desktop` and `docker` are deliberately excluded
+
+`cheaper-desktop/package.json` is 0.4.1 while `cli/package.json` is now 0.4.2, and
+`dist/` holds `Cheaper-0.4.1-*.dmg`. `step_desktop` refuses the whole step on that
+disagreement (`cheaper-deploy.sh:1388`). Because `err()` sets `FAILED` without aborting,
+and `cli` runs *after* `desktop`, a bare full run would refuse the desktop upload, publish
+0.4.2 to npm anyway, and exit 1 — the immutable half done, the run reported as failed.
+
+The fix here is CLI-only and the desktop app genuinely is 0.4.1, so scoping the run is
+correct. Before the next bare `./cheaper-deploy.sh`, either bump `cheaper-desktop` to
+match and rebuild (`npm run dist:mac` — stale 0.4.1 filenames are refused per-file), or
+keep scoping the steps.
+
 ## Status — NOT yet released
 
-`git push origin main` and `npm publish` both failed on this machine and were **not**
-completed:
-
-- git: the repo's credential helper resolves to
-  `/Users/fortunevieyra/Documents/Github/ownasquare.com/.git-credential-ownasquare`, which
-  exists on the machine that owns the repo but not on the machine that mounted it, so the
-  push could not read a username for `https://github.com`.
-- npm: `npm whoami` returns 401 on the mounting machine.
-
-Both must be run on the machine that owns the checkout, where the Keychain entry and the
-npm token live. Until `npm publish` lands, `npx cheaper install --all` still serves 0.4.1
-and still produces the broken install described above.
+Until the publish lands, `npx cheaper install --all` still serves 0.4.1 and still produces
+the broken install described above.
 
 ## Follow-up
 
