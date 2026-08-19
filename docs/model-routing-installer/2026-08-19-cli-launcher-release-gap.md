@@ -1,4 +1,4 @@
-# 2026-08-15 — `npx cheaper install --all` shipped without the `cheaper` command
+# 2026-08-19 — `npx cheaper install --all` shipped without the `cheaper` command
 
 ## What happened
 

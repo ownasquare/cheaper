@@ -6,7 +6,7 @@ corrections that make Cheaper's reported savings **smaller**: the old numbers we
 and we would rather say so plainly than quietly ship different figures. The current release
 is `cheaper@0.4.2`.
 
-## 0.4.2 — 2026-08-15
+## 0.4.2 — 2026-08-19
 `npx cheaper install --all` now installs the `cheaper` command it spends the rest of its
 output telling you to run.
 
